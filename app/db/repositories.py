@@ -1,0 +1,194 @@
+from collections.abc import Iterable
+
+from sqlalchemy import Select, and_, desc, select
+from sqlalchemy.orm import Session
+
+from app.db import models
+from app.forecast.schemas import (
+    ForecastRunSchema,
+    ReachSummarySchema,
+    ReturnPeriodSchema,
+    TimeseriesPointSchema,
+)
+
+
+class ForecastRepository:
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def upsert_run(self, payload: ForecastRunSchema) -> models.ForecastRun:
+        row = self.db.execute(
+            select(models.ForecastRun).where(
+                and_(models.ForecastRun.provider == payload.provider, models.ForecastRun.run_id == payload.run_id)
+            )
+        ).scalar_one_or_none()
+        if not row:
+            row = models.ForecastRun(provider=payload.provider, run_id=payload.run_id)
+            self.db.add(row)
+        row.run_date_utc = payload.run_date_utc
+        row.issued_at_utc = payload.issued_at_utc
+        row.source_type = payload.source_type
+        row.ingest_status = payload.ingest_status
+        row.metadata_json = payload.metadata_json
+        self.db.flush()
+        return row
+
+    def upsert_return_periods(self, rows: Iterable[ReturnPeriodSchema]) -> int:
+        count = 0
+        for payload in rows:
+            row = self.db.execute(
+                select(models.ForecastProviderReturnPeriod).where(
+                    and_(
+                        models.ForecastProviderReturnPeriod.provider == payload.provider,
+                        models.ForecastProviderReturnPeriod.provider_reach_id == payload.provider_reach_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if not row:
+                row = models.ForecastProviderReturnPeriod(
+                    provider=payload.provider, provider_reach_id=payload.provider_reach_id
+                )
+                self.db.add(row)
+            row.rp_2 = payload.rp_2
+            row.rp_5 = payload.rp_5
+            row.rp_10 = payload.rp_10
+            row.rp_25 = payload.rp_25
+            row.rp_50 = payload.rp_50
+            row.rp_100 = payload.rp_100
+            row.metadata_json = payload.metadata_json
+            count += 1
+        self.db.flush()
+        return count
+
+    def bulk_upsert_timeseries(self, rows: Iterable[TimeseriesPointSchema]) -> int:
+        count = 0
+        for payload in rows:
+            row = self.db.execute(
+                select(models.ForecastProviderReachTimeseries).where(
+                    and_(
+                        models.ForecastProviderReachTimeseries.provider == payload.provider,
+                        models.ForecastProviderReachTimeseries.run_id == payload.run_id,
+                        models.ForecastProviderReachTimeseries.provider_reach_id == payload.provider_reach_id,
+                        models.ForecastProviderReachTimeseries.forecast_time_utc == payload.forecast_time_utc,
+                    )
+                )
+            ).scalar_one_or_none()
+            if not row:
+                row = models.ForecastProviderReachTimeseries(
+                    provider=payload.provider,
+                    run_id=payload.run_id,
+                    provider_reach_id=payload.provider_reach_id,
+                    forecast_time_utc=payload.forecast_time_utc,
+                )
+                self.db.add(row)
+            row.flow_mean_cms = payload.flow_mean_cms
+            row.flow_median_cms = payload.flow_median_cms
+            row.flow_p25_cms = payload.flow_p25_cms
+            row.flow_p75_cms = payload.flow_p75_cms
+            row.flow_max_cms = payload.flow_max_cms
+            row.raw_payload_json = payload.raw_payload_json
+            count += 1
+        self.db.flush()
+        return count
+
+    def upsert_summaries(self, rows: Iterable[ReachSummarySchema]) -> int:
+        count = 0
+        for payload in rows:
+            row = self.db.execute(
+                select(models.ForecastProviderReachSummary).where(
+                    and_(
+                        models.ForecastProviderReachSummary.provider == payload.provider,
+                        models.ForecastProviderReachSummary.run_id == payload.run_id,
+                        models.ForecastProviderReachSummary.provider_reach_id == payload.provider_reach_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if not row:
+                row = models.ForecastProviderReachSummary(
+                    provider=payload.provider,
+                    run_id=payload.run_id,
+                    provider_reach_id=payload.provider_reach_id,
+                )
+                self.db.add(row)
+            row.peak_time_utc = payload.peak_time_utc
+            row.first_exceedance_time_utc = payload.first_exceedance_time_utc
+            row.peak_mean_cms = payload.peak_mean_cms
+            row.peak_median_cms = payload.peak_median_cms
+            row.peak_max_cms = payload.peak_max_cms
+            row.return_period_band = payload.return_period_band
+            row.severity_score = payload.severity_score
+            row.is_flagged = payload.is_flagged
+            row.metadata_json = payload.metadata_json
+            count += 1
+        self.db.flush()
+        return count
+
+    def get_latest_run(self, provider: str) -> models.ForecastRun | None:
+        return self.db.execute(
+            select(models.ForecastRun)
+            .where(models.ForecastRun.provider == provider)
+            .order_by(desc(models.ForecastRun.run_date_utc))
+            .limit(1)
+        ).scalar_one_or_none()
+
+
+    def get_run(self, provider: str, run_id: str) -> models.ForecastRun | None:
+        return self.db.execute(
+            select(models.ForecastRun).where(
+                and_(models.ForecastRun.provider == provider, models.ForecastRun.run_id == run_id)
+            )
+        ).scalar_one_or_none()
+    def get_return_period(self, provider: str, reach_id: str) -> models.ForecastProviderReturnPeriod | None:
+        return self.db.execute(
+            select(models.ForecastProviderReturnPeriod).where(
+                and_(
+                    models.ForecastProviderReturnPeriod.provider == provider,
+                    models.ForecastProviderReturnPeriod.provider_reach_id == reach_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+    def get_timeseries(self, provider: str, run_id: str, reach_id: str) -> list[models.ForecastProviderReachTimeseries]:
+        stmt: Select[tuple[models.ForecastProviderReachTimeseries]] = (
+            select(models.ForecastProviderReachTimeseries)
+            .where(
+                and_(
+                    models.ForecastProviderReachTimeseries.provider == provider,
+                    models.ForecastProviderReachTimeseries.run_id == run_id,
+                    models.ForecastProviderReachTimeseries.provider_reach_id == reach_id,
+                )
+            )
+            .order_by(models.ForecastProviderReachTimeseries.forecast_time_utc)
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+    def get_summary(self, provider: str, run_id: str, reach_id: str) -> models.ForecastProviderReachSummary | None:
+        return self.db.execute(
+            select(models.ForecastProviderReachSummary).where(
+                and_(
+                    models.ForecastProviderReachSummary.provider == provider,
+                    models.ForecastProviderReachSummary.run_id == run_id,
+                    models.ForecastProviderReachSummary.provider_reach_id == reach_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+    def get_summaries(
+        self,
+        provider: str,
+        run_id: str,
+        severity_min: int | None = None,
+        limit: int | None = None,
+    ) -> list[models.ForecastProviderReachSummary]:
+        stmt = select(models.ForecastProviderReachSummary).where(
+            and_(
+                models.ForecastProviderReachSummary.provider == provider,
+                models.ForecastProviderReachSummary.run_id == run_id,
+            )
+        )
+        if severity_min is not None:
+            stmt = stmt.where(models.ForecastProviderReachSummary.severity_score >= severity_min)
+        stmt = stmt.order_by(desc(models.ForecastProviderReachSummary.severity_score))
+        if limit:
+            stmt = stmt.limit(limit)
+        return list(self.db.execute(stmt).scalars().all())
