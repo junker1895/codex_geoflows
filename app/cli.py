@@ -10,6 +10,7 @@ from app.forecast.exceptions import (
 )
 from app.forecast.jobs import discover_latest_run, ingest_forecast_run, ingest_return_periods, summarize_run
 from app.forecast.providers.geoglows import GeoglowsForecastProvider
+from app.forecast.providers.geoglows_return_periods import open_geoglows_public_return_periods_zarr
 from app.forecast.service import ForecastService
 
 cli = typer.Typer(help="Forecast ingestion CLI")
@@ -95,6 +96,23 @@ def cli_import_geoglows_return_periods_zarr(
 
     _safe_run(_inner)
 
+
+
+
+@cli.command("return-periods-zarr-open")
+def cli_return_periods_zarr_open(
+    zarr_path: str = typer.Option("s3://geoglows-v2/retrospective/return-periods.zarr", "--zarr-path"),
+    method: str = typer.Option("gumbel", "--method"),
+) -> None:
+    def _inner() -> None:
+        import xarray as xr
+
+        ds = open_geoglows_public_return_periods_zarr(xr=xr, zarr_path=zarr_path)
+        typer.echo(f"selected method: {method}")
+        typer.echo(f"dataset dims: {dict(ds.dims)}")
+        typer.echo(f"dataset variables: {sorted(ds.data_vars.keys())}")
+
+    _safe_run(_inner)
 
 @cli.command("ingest-forecast-run")
 def cli_ingest_forecast_run(

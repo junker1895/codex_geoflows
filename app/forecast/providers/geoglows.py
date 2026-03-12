@@ -156,20 +156,21 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             key=lambda r: _first_not_none(r.flow_max_cms, r.flow_mean_cms, r.flow_median_cms, -1.0),
             default=None,
         )
-        peak_flow = None if peak_row is None else _first_not_none(peak_row.flow_max_cms, peak_row.flow_mean_cms)
+
+        peak_mean = max((r.flow_mean_cms for r in timeseries_rows if r.flow_mean_cms is not None), default=None)
+        peak_median = max((r.flow_median_cms for r in timeseries_rows if r.flow_median_cms is not None), default=None)
+        peak_max = max((r.flow_max_cms for r in timeseries_rows if r.flow_max_cms is not None), default=None)
+
+        peak_flow = _first_not_none(peak_max, peak_mean, peak_median)
         classification = classify_peak_flow(peak_flow, return_period_row)
 
         first_exceedance = None
         if return_period_row and return_period_row.rp_2 is not None:
             for row in sorted(timeseries_rows, key=lambda r: r.forecast_time_utc):
-                candidate = _first_not_none(row.flow_max_cms, row.flow_mean_cms)
+                candidate = _first_not_none(row.flow_max_cms, row.flow_mean_cms, row.flow_median_cms)
                 if candidate is not None and candidate >= return_period_row.rp_2:
                     first_exceedance = row.forecast_time_utc
                     break
-
-        peak_mean = max((r.flow_mean_cms for r in timeseries_rows if r.flow_mean_cms is not None), default=None)
-        peak_median = max((r.flow_median_cms for r in timeseries_rows if r.flow_median_cms is not None), default=None)
-        peak_max = max((r.flow_max_cms for r in timeseries_rows if r.flow_max_cms is not None), default=None)
 
         return ReachSummarySchema(
             provider=self.get_provider_name(),

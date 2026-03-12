@@ -99,8 +99,8 @@ def test_import_local_geoglows_return_periods_upsert_and_classify(db_session, tm
     detail = service.get_reach_detail("geoglows", "760021611", run_id=run.run_id)
 
     assert detail.summary is not None
-    assert detail.summary.return_period_band == "ge_25"
-    assert detail.summary.severity_score == 5
+    assert detail.summary.return_period_band == "25"
+    assert detail.summary.severity_score == 4
     assert detail.summary.is_flagged is True
 
 
@@ -153,6 +153,30 @@ def test_import_geoglows_return_periods_zarr_upsert_and_classify(db_session, mon
     detail = service.get_reach_detail("geoglows", "760021611", run_id=run.run_id)
 
     assert detail.summary is not None
-    assert detail.summary.return_period_band == "ge_25"
-    assert detail.summary.severity_score == 5
+    assert detail.summary.return_period_band == "25"
+    assert detail.summary.severity_score == 4
     assert detail.summary.is_flagged is True
+
+
+def test_summary_with_return_periods_below_two_not_flagged(db_session, tmp_path):
+    settings = Settings(GEOGLOWS_DATA_SOURCE="rest")
+    provider = GeoglowsForecastProvider(settings, geoglows_module=_MockGeoglowsForecastOnly())
+    service = ForecastService(db_session, settings, {"geoglows": provider})
+
+    run = service.discover_latest_run("geoglows")
+    service.ingest_forecast_run("geoglows", run.run_id, ["760021611"])
+
+    dataset = tmp_path / "rp.csv"
+    dataset.write_text(
+        "rivid,return_period_2,return_period_5,return_period_10,return_period_25,return_period_50,return_period_100\n"
+        "760021611,27516.609375,30000,35000,40000,45000,50000\n"
+    )
+    service.import_geoglows_return_periods(str(dataset))
+
+    service.summarize_run("geoglows", run.run_id)
+    detail = service.get_reach_detail("geoglows", "760021611", run_id=run.run_id)
+
+    assert detail.summary is not None
+    assert detail.summary.return_period_band == "below_2"
+    assert detail.summary.severity_score == 0
+    assert detail.summary.is_flagged is False
