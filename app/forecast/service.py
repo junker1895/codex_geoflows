@@ -1,3 +1,4 @@
+import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -13,6 +14,9 @@ from app.forecast.schemas import (
     ReturnPeriodSchema,
     TimeseriesPointSchema,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class ForecastService:
@@ -41,6 +45,7 @@ class ForecastService:
         rows = self.providers[provider].fetch_return_periods(reach_ids)
         count = self.repo.upsert_return_periods(rows)
         self.db.commit()
+        logger.info("upserted return periods", extra={"provider": provider, "count": count})
         return count
 
     def ingest_forecast_run(self, provider: str, run_id: str, reach_ids: list[str]) -> int:
@@ -52,6 +57,7 @@ class ForecastService:
         if run_row:
             run_row.ingest_status = "partial" if count == 0 else "complete"
         self.db.commit()
+        logger.info("upserted forecast timeseries rows", extra={"provider": provider, "run_id": resolved_run.run_id, "count": count})
         return count
 
     def summarize_run(self, provider: str, run_id: str, reach_ids: list[str] | None = None) -> int:
@@ -75,7 +81,11 @@ class ForecastService:
             ts_rows = [to_timeseries_schema(x) for x in self.repo.get_timeseries(provider, resolved_run.run_id, reach_id)]
             rp_model = self.repo.get_return_period(provider, reach_id)
             rp_schema = None if not rp_model else to_return_period_schema(rp_model)
-            summaries.append(adapter.summarize_reach(resolved_run.run_id, reach_id, ts_rows, rp_schema))
+            if rp_schema is None:
+                logger.info("generating summary without return periods", extra={"provider": provider, "run_id": resolved_run.run_id, "reach_id": reach_id})
+            summary = adapter.summarize_reach(resolved_run.run_id, reach_id, ts_rows, rp_schema)
+            logger.info("summary peak values", extra={"provider": provider, "run_id": resolved_run.run_id, "reach_id": reach_id, "peak_mean_cms": summary.peak_mean_cms, "peak_median_cms": summary.peak_median_cms, "peak_max_cms": summary.peak_max_cms})
+            summaries.append(summary)
 
         count = self.repo.upsert_summaries(summaries)
         self.db.commit()
@@ -86,11 +96,13 @@ class ForecastService:
         row = self.repo.get_latest_run(provider)
         return None if row is None else to_run_schema(row)
 
-    def get_reach_detail(self, provider: str, provider_reach_id: str, run_id: str | None = None) -> ReachDetailResponse:
+    def get_reach_detail(
+        self, provider: str, provider_reach_id: str, run_id: str | None = None, timeseries_limit: int | None = None
+    ) -> ReachDetailResponse:
         self._get_provider(provider)
         run = self._resolve_run(provider, run_id or "latest")
         rp_row = self.repo.get_return_period(provider, provider_reach_id)
-        ts_rows = self.repo.get_timeseries(provider, run.run_id, provider_reach_id)
+        ts_rows = self.repo.get_timeseries(provider, run.run_id, provider_reach_id, limit=timeseries_limit)
         summary = self.repo.get_summary(provider, run.run_id, provider_reach_id)
         return ReachDetailResponse(
             provider=provider,

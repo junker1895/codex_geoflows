@@ -35,11 +35,12 @@ def reach_detail(
     provider: str,
     provider_reach_id: str,
     run_id: str | None = Query(default=None),
+    timeseries_limit: int | None = Query(default=500, ge=1, le=5000),
     db: Session = Depends(get_db_session),
 ) -> ReachDetailResponse:
     service = get_forecast_service(db)
     try:
-        return service.get_reach_detail(provider, provider_reach_id, run_id=run_id)
+        return service.get_reach_detail(provider, provider_reach_id, run_id=run_id, timeseries_limit=timeseries_limit)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

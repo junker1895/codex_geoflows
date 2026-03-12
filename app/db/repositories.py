@@ -148,7 +148,9 @@ class ForecastRepository:
             )
         ).scalar_one_or_none()
 
-    def get_timeseries(self, provider: str, run_id: str, reach_id: str) -> list[models.ForecastProviderReachTimeseries]:
+    def get_timeseries(
+        self, provider: str, run_id: str, reach_id: str, limit: int | None = None
+    ) -> list[models.ForecastProviderReachTimeseries]:
         stmt: Select[tuple[models.ForecastProviderReachTimeseries]] = (
             select(models.ForecastProviderReachTimeseries)
             .where(
@@ -160,6 +162,8 @@ class ForecastRepository:
             )
             .order_by(models.ForecastProviderReachTimeseries.forecast_time_utc)
         )
+        if limit is not None:
+            stmt = stmt.limit(limit)
         return list(self.db.execute(stmt).scalars().all())
 
     def get_summary(self, provider: str, run_id: str, reach_id: str) -> models.ForecastProviderReachSummary | None:

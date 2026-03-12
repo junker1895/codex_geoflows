@@ -103,6 +103,8 @@ python -m app.cli summarize-run --provider geoglows --run-id latest
 python -m app.cli smoke-geoglows --river-id 123456789
 ```
 
+Reach detail endpoint supports `timeseries_limit` query parameter (default 500, max 5000) to avoid oversized responses.
+
 ## Tests
 
 ```bash
@@ -130,3 +132,14 @@ Provider health responses include capability flags such as `supports_forecast_st
 ## HydroRIVERS integration later
 
 HydroRIVERS crosswalk should be added in a separate downstream service or module that maps `provider_reach_id` to HydroRIVERS IDs after ingestion. This service intentionally remains provider-native.
+
+
+## Currently verified workflow
+
+1. `python -m alembic upgrade head`
+2. `python -m app.cli discover-latest-run --provider geoglows`
+3. `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --reach-id 760021611`
+4. `python -m app.cli summarize-run --provider geoglows --run-id latest`
+5. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
+
+Return-period ingestion remains the only missing backend capability for full severity classification in REST-only environments.

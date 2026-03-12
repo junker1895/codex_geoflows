@@ -28,9 +28,12 @@ def test_api_endpoints(client, db_session):
     assert summary.status_code == 200
     assert len(summary.json()) == 1
 
-    detail = client.get("/forecast/reaches/geoglows/100")
+    detail = client.get("/forecast/reaches/geoglows/100", params={"timeseries_limit": 2})
     assert detail.status_code == 200
-    assert "timeseries" in detail.json()
+    payload_detail = detail.json()
+    assert "timeseries" in payload_detail
+    assert len(payload_detail["timeseries"]) == 2
+    assert payload_detail["timeseries"][0]["provider_reach_id"] == "100"
 
     health = client.get("/forecast/health", params={"provider": "geoglows"})
     assert health.status_code == 200
