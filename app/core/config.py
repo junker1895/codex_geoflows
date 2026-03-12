@@ -1,7 +1,8 @@
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -16,7 +17,7 @@ class Settings(BaseSettings):
         alias="DATABASE_URL",
     )
     forecast_default_provider: str = Field(default="geoglows", alias="FORECAST_DEFAULT_PROVIDER")
-    forecast_enabled_providers: list[str] = Field(
+    forecast_enabled_providers: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["geoglows"], alias="FORECAST_ENABLED_PROVIDERS"
     )
     forecast_summary_default_limit: int = Field(default=200, alias="FORECAST_SUMMARY_DEFAULT_LIMIT")
