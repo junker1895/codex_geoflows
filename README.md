@@ -201,8 +201,14 @@ After thresholds are loaded and summarize-run is executed, the same fields are p
 
 ```json
 {
-  "return_period_band": "ge_5",
-  "severity_score": 3,
+  "return_period_band": "5",
+  "severity_score": 2,
   "is_flagged": true
 }
 ```
+
+## Flood classification technical reference
+
+For the detailed model-agnostic flood classification design (architecture, thresholds, peak extraction, banding, API mapping, and multi-model integration guidance), see:
+
+- `docs/flood-classification-system.md`
