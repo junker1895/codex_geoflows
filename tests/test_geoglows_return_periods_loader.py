@@ -59,8 +59,8 @@ class _FakeDataset:
 
 class _FakeXR:
     @staticmethod
-    def open_zarr(_path, consolidated=False):
-        assert consolidated is False
+    def open_zarr(_path, storage_options=None):
+        assert storage_options == loader.build_geoglows_public_zarr_storage_options()
         return _FakeDataset()
 
 
@@ -110,3 +110,10 @@ def test_method_selection_gumbel_vs_logpearson3(monkeypatch):
 def test_invalid_method_rejected():
     with pytest.raises(Exception, match="Supported methods"):
         list(loader.iter_geoglows_return_periods_from_zarr("s3://geoglows-v2/retrospective/return-periods.zarr", method="bad", batch_size=2))
+
+
+def test_public_zarr_storage_options_match_verified_open_config():
+    assert loader.build_geoglows_public_zarr_storage_options() == {
+        "anon": True,
+        "client_kwargs": {"region_name": "us-west-2"},
+    }
