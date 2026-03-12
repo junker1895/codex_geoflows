@@ -9,7 +9,7 @@ from app.forecast.providers.geoglows import GeoglowsForecastProvider
 from app.forecast.schemas import ReturnPeriodSchema, TimeseriesPointSchema
 
 
-VALID_RIVER_ID = 123456789
+VALID_RIVER_ID = 760021611
 
 
 class _MockGeoglowsRestForecastOnly:
@@ -21,13 +21,23 @@ class _MockGeoglowsRestForecastOnly:
             [
                 {
                     "forecast_time_utc": datetime(2024, 1, 1, tzinfo=UTC),
-                    "flow_avg_m^3/s": 11,
-                    "flow_max_m^3/s": 15,
+                    "flow_avg": "11.1",
+                    "flow_med": "10.5",
+                    "flow_25p": "9.2",
+                    "flow_75p": "13.0",
+                    "flow_max": "15.0",
+                    "flow_min": "4.0",
+                    "high_res": "14.2",
                 },
                 {
                     "forecast_time_utc": datetime(2024, 1, 1, 1, tzinfo=UTC),
-                    "flow_avg_m^3/s": 19,
-                    "flow_max_m^3/s": 25,
+                    "flow_avg": "nan",
+                    "flow_med": "12.3",
+                    "flow_25p": "11.1",
+                    "flow_75p": "16.0",
+                    "flow_max": "18.8",
+                    "flow_min": "nan",
+                    "high_res": "nan",
                 },
             ]
         )
@@ -61,11 +71,26 @@ class _MockGeoglowsInvalid:
     pass
 
 
-def test_geoglows_valid_9_digit_id_and_forecast_rest_path():
+def test_normalization_maps_provider_columns_and_parses_numbers():
     provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsRestForecastOnly())
     ts = provider.fetch_forecast_timeseries("2024010100", [VALID_RIVER_ID])
+
     assert isinstance(ts[0], TimeseriesPointSchema)
-    assert ts[0].provider_reach_id == str(VALID_RIVER_ID)
+    assert ts[0].flow_mean_cms == 11.1
+    assert ts[0].flow_median_cms == 10.5
+    assert ts[0].flow_p25_cms == 9.2
+    assert ts[0].flow_p75_cms == 13.0
+    assert ts[0].flow_max_cms == 15.0
+    assert ts[0].raw_payload_json["high_res"] == 14.2
+
+
+def test_normalization_nan_strings_become_null():
+    provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsRestForecastOnly())
+    ts = provider.fetch_forecast_timeseries("2024010100", [VALID_RIVER_ID])
+
+    assert ts[1].flow_mean_cms is None
+    assert ts[1].raw_payload_json["flow_min"] is None
+    assert ts[1].raw_payload_json["high_res"] is None
 
 
 def test_geoglows_invalid_id_validation_error():
@@ -88,13 +113,20 @@ def test_return_periods_aws_backend_failure_message():
         provider.fetch_return_periods([VALID_RIVER_ID])
 
 
-def test_geoglows_missing_api_surface_raises_runtime_error():
-    provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsInvalid())
-    with pytest.raises(Exception, match="does not expose 'forecast_stats'"):
-        provider.fetch_forecast_timeseries("2024010100", [VALID_RIVER_ID])
+def test_summary_from_normalized_rows_sets_peak_values_without_rps():
+    provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsRestForecastOnly())
+    ts = provider.fetch_forecast_timeseries("2024010100", [VALID_RIVER_ID])
+
+    summary = provider.summarize_reach("2024010100", str(VALID_RIVER_ID), ts, None)
+    assert summary.peak_time_utc is not None
+    assert summary.peak_mean_cms is not None
+    assert summary.peak_median_cms is not None
+    assert summary.peak_max_cms is not None
+    assert summary.return_period_band == "unknown"
+    assert summary.severity_score == 0
 
 
-def test_summary_shape():
+def test_summary_shape_with_thresholds():
     provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsRestForecastOnly())
     ts = provider.fetch_forecast_timeseries("2024010100", [VALID_RIVER_ID])
     rp = ReturnPeriodSchema(
@@ -109,3 +141,9 @@ def test_summary_shape():
     )
     summary = provider.summarize_reach("2024010100", str(VALID_RIVER_ID), ts, rp)
     assert summary.severity_score >= 2
+
+
+def test_geoglows_missing_api_surface_raises_runtime_error():
+    provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsInvalid())
+    with pytest.raises(Exception, match="does not expose 'forecast_stats'"):
+        provider.fetch_forecast_timeseries("2024010100", [VALID_RIVER_ID])

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable
 
+import math
 import pandas as pd
 
 from app.core.config import Settings
@@ -128,12 +129,17 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                         run_id=run_id,
                         provider_reach_id=str(reach_id),
                         forecast_time_utc=dt,
-                        flow_mean_cms=_safe_float(item.get("flow_avg_m^3/s") or item.get("mean")),
-                        flow_median_cms=_safe_float(item.get("flow_med_m^3/s") or item.get("median")),
-                        flow_p25_cms=_safe_float(item.get("flow_25%_m^3/s") or item.get("p25")),
-                        flow_p75_cms=_safe_float(item.get("flow_75%_m^3/s") or item.get("p75")),
-                        flow_max_cms=_safe_float(item.get("flow_max_m^3/s") or item.get("max")),
-                        raw_payload_json={"provider_row": {k: str(v) for k, v in item.items()}, "source": source},
+                        flow_mean_cms=_safe_float(item.get("flow_avg")),
+                        flow_median_cms=_safe_float(item.get("flow_med")),
+                        flow_p25_cms=_safe_float(item.get("flow_25p")),
+                        flow_p75_cms=_safe_float(item.get("flow_75p")),
+                        flow_max_cms=_safe_float(item.get("flow_max")),
+                        raw_payload_json={
+                            "provider_row": {k: str(v) for k, v in item.items()},
+                            "source": source,
+                            "flow_min": _safe_float(item.get("flow_min")),
+                            "high_res": _safe_float(item.get("high_res")),
+                        },
                     )
                 )
         return rows
@@ -145,17 +151,25 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         timeseries_rows: list[TimeseriesPointSchema],
         return_period_row: ReturnPeriodSchema | None,
     ) -> ReachSummarySchema:
-        peak_row = max(timeseries_rows, key=lambda r: r.flow_max_cms or r.flow_mean_cms or -1, default=None)
-        peak_flow = None if peak_row is None else (peak_row.flow_max_cms or peak_row.flow_mean_cms)
+        peak_row = max(
+            timeseries_rows,
+            key=lambda r: _first_not_none(r.flow_max_cms, r.flow_mean_cms, r.flow_median_cms, -1.0),
+            default=None,
+        )
+        peak_flow = None if peak_row is None else _first_not_none(peak_row.flow_max_cms, peak_row.flow_mean_cms)
         classification = classify_peak_flow(peak_flow, return_period_row)
 
         first_exceedance = None
         if return_period_row and return_period_row.rp_2 is not None:
             for row in sorted(timeseries_rows, key=lambda r: r.forecast_time_utc):
-                candidate = row.flow_max_cms or row.flow_mean_cms
+                candidate = _first_not_none(row.flow_max_cms, row.flow_mean_cms)
                 if candidate is not None and candidate >= return_period_row.rp_2:
                     first_exceedance = row.forecast_time_utc
                     break
+
+        peak_mean = max((r.flow_mean_cms for r in timeseries_rows if r.flow_mean_cms is not None), default=None)
+        peak_median = max((r.flow_median_cms for r in timeseries_rows if r.flow_median_cms is not None), default=None)
+        peak_max = max((r.flow_max_cms for r in timeseries_rows if r.flow_max_cms is not None), default=None)
 
         return ReachSummarySchema(
             provider=self.get_provider_name(),
@@ -163,9 +177,9 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             provider_reach_id=str(reach_id),
             peak_time_utc=None if peak_row is None else peak_row.forecast_time_utc,
             first_exceedance_time_utc=first_exceedance,
-            peak_mean_cms=None if peak_row is None else peak_row.flow_mean_cms,
-            peak_median_cms=None if peak_row is None else peak_row.flow_median_cms,
-            peak_max_cms=None if peak_row is None else peak_row.flow_max_cms,
+            peak_mean_cms=peak_mean,
+            peak_median_cms=peak_median,
+            peak_max_cms=peak_max,
             return_period_band=classification.return_period_band,
             severity_score=classification.severity_score,
             is_flagged=classification.is_flagged,
@@ -197,10 +211,26 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
 
 
 def _safe_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped in {"", "nan", "none", "null"}:
+            return None
     try:
-        return None if value is None else float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    if math.isnan(number):
+        return None
+    return number
+
+
+def _first_not_none(*values: float | None) -> float | None:
+    for v in values:
+        if v is not None:
+            return v
+    return None
 
 
 def _validate_geoglows_reach_ids(reach_ids: list[str | int]) -> list[int]:

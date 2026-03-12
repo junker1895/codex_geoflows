@@ -109,6 +109,8 @@ python -m app.cli smoke-geoglows --river-id 123456789
 make test
 ```
 
+Provider health responses include capability flags such as `supports_forecast_stats_rest` and `supports_return_periods_current_backend` to make backend availability explicit.
+
 ## Current limitations
 
 - GEOGLOWS run discovery currently uses deterministic local-hour run ID fallback and is designed to be replaced with authoritative run endpoint logic.

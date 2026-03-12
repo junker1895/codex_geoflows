@@ -31,3 +31,9 @@ def test_api_endpoints(client, db_session):
     detail = client.get("/forecast/reaches/geoglows/100")
     assert detail.status_code == 200
     assert "timeseries" in detail.json()
+
+    health = client.get("/forecast/health", params={"provider": "geoglows"})
+    assert health.status_code == 200
+    payload = health.json()
+    assert "supports_forecast_stats_rest" in payload
+    assert "supports_return_periods_current_backend" in payload

@@ -116,19 +116,31 @@ class ForecastService:
         return [to_summary_schema(x) for x in rows]
 
     def get_provider_health(self, provider: str) -> ProviderHealthResponse:
-        self._get_provider(provider)
+        adapter = self._get_provider(provider)
         latest = self.get_latest_run(provider)
         summary_count = 0
         status = None
         if latest:
             status = latest.ingest_status
             summary_count = len(self.get_reach_summaries(provider, run_id=latest.run_id, limit=10000))
+
+        capabilities = getattr(adapter, "capabilities", None)
+        supports_forecast_stats_rest = bool(
+            getattr(capabilities, "supports_forecast_stats_rest", False)
+        )
+        source = self.settings.geoglows_data_source.lower() if provider == "geoglows" else "unknown"
+        supports_return_periods_current_backend = bool(
+            getattr(capabilities, f"supports_return_periods_{source}", False)
+        )
+
         return ProviderHealthResponse(
             provider=provider,
             enabled=provider in self.providers,
             latest_run=latest,
             ingest_status=status,
             summary_count=summary_count,
+            supports_forecast_stats_rest=supports_forecast_stats_rest,
+            supports_return_periods_current_backend=supports_return_periods_current_backend,
         )
 
     def _resolve_run(

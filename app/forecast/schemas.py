@@ -78,3 +78,5 @@ class ProviderHealthResponse(ORMBaseModel):
     latest_run: ForecastRunSchema | None
     ingest_status: str | None
     summary_count: int = 0
+    supports_forecast_stats_rest: bool = False
+    supports_return_periods_current_backend: bool = False
