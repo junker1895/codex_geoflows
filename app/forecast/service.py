@@ -6,7 +6,10 @@ from app.core.config import Settings
 from app.db import models
 from app.db.repositories import ForecastRepository
 from app.forecast.base import ForecastProviderAdapter
-from app.forecast.providers.geoglows_return_periods import load_geoglows_return_periods_from_path
+from app.forecast.providers.geoglows_return_periods import (
+    iter_geoglows_return_periods_from_zarr,
+    load_geoglows_return_periods_from_path,
+)
 from app.forecast.schemas import (
     ForecastRunSchema,
     ProviderHealthResponse,
@@ -55,6 +58,60 @@ class ForecastService:
         self.db.commit()
         logger.info("imported local GEOGLOWS return periods", extra={"count": count, "path": dataset_path})
         return count
+
+    def import_geoglows_return_periods_zarr(
+        self,
+        zarr_path: str | None = None,
+        method: str | None = None,
+        batch_size: int | None = None,
+    ) -> int:
+        selected_path = zarr_path or self.settings.geoglows_return_period_zarr_path
+        selected_method = method or self.settings.geoglows_return_period_method
+        selected_batch_size = batch_size or self.settings.geoglows_return_period_import_batch_size
+
+        logger.info(
+            "starting GEOGLOWS Zarr return-period import",
+            extra={
+                "zarr_path": selected_path,
+                "method": selected_method,
+                "batch_size": selected_batch_size,
+            },
+        )
+
+        total_upserted = 0
+        total_processed = 0
+        for rows in iter_geoglows_return_periods_from_zarr(
+            zarr_path=selected_path,
+            method=selected_method,
+            batch_size=selected_batch_size,
+        ):
+            total_processed += len(rows)
+            upserted = self.repo.upsert_return_periods(rows)
+            total_upserted += upserted
+            self.db.commit()
+            logger.info(
+                "upserted GEOGLOWS return-period batch",
+                extra={
+                    "method": selected_method,
+                    "batch_size": selected_batch_size,
+                    "batch_rows": len(rows),
+                    "batch_upserted": upserted,
+                    "total_processed": total_processed,
+                    "total_upserted": total_upserted,
+                },
+            )
+
+        logger.info(
+            "completed GEOGLOWS Zarr return-period import",
+            extra={
+                "method": selected_method,
+                "batch_size": selected_batch_size,
+                "total_reaches_processed": total_processed,
+                "total_upserted": total_upserted,
+                "classification_available": self.repo.has_return_periods("geoglows"),
+            },
+        )
+        return total_upserted
 
     def ingest_forecast_run(self, provider: str, run_id: str, reach_ids: list[str]) -> int:
         self._get_provider(provider)

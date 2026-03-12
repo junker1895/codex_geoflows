@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     geoglows_default_run_selector: str = Field(default="latest", alias="GEOGLOWS_DEFAULT_RUN_SELECTOR")
     geoglows_request_timeout_seconds: int = Field(default=30, alias="GEOGLOWS_REQUEST_TIMEOUT_SECONDS")
     geoglows_data_source: str = Field(default="rest", alias="GEOGLOWS_DATA_SOURCE")
+    geoglows_return_period_method: str = Field(default="gumbel", alias="GEOGLOWS_RETURN_PERIOD_METHOD")
+    geoglows_return_period_zarr_path: str = Field(
+        default="s3://geoglows-v2/retrospective/return-periods.zarr",
+        alias="GEOGLOWS_RETURN_PERIOD_ZARR_PATH",
+    )
+    geoglows_return_period_import_batch_size: int = Field(
+        default=10000, alias="GEOGLOWS_RETURN_PERIOD_IMPORT_BATCH_SIZE"
+    )
 
     @field_validator("forecast_enabled_providers", mode="before")
     @classmethod
