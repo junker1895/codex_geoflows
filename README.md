@@ -110,7 +110,8 @@ make test
 ## Current limitations
 
 - GEOGLOWS run discovery currently uses deterministic local-hour run ID fallback and is designed to be replaced with authoritative run endpoint logic.
-- GEOGLOWS Python package API surface varies by version; adapter currently supports `return_periods`/`forecast_stats` from top-level, `streamflow`, or `data` namespaces.
+- GEOGLOWS Python package API surface varies by version; adapter currently supports `return_periods`/`forecast_stats` from top-level, `streamflow`, or `data` namespaces and multiple parameter signatures (`comid`, `river_id`, positional).
+- GEOGLOWS ingestion depends on outbound network access to GEOGLOWS/AWS endpoints; when blocked, CLI now raises a user-friendly connectivity error.
 - Ingestion is selective by reach IDs (not full global bulk).
 - No auth/rate limiting.
 

@@ -37,13 +37,13 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
 
     def fetch_return_periods(self, reach_ids: list[str | int]) -> list[ReturnPeriodSchema]:
         fn = self._resolve_geoglows_callable("return_periods")
-        data = fn(comid=[int(r) for r in reach_ids])
+        data = self._call_return_periods(fn, [int(r) for r in reach_ids])
         if isinstance(data, pd.Series):
             data = data.to_frame().T
 
         output: list[ReturnPeriodSchema] = []
         for idx, row in data.iterrows():
-            reach_id = str(row.get("rivid", idx))
+            reach_id = str(row.get("rivid", row.get("river_id", idx)))
             output.append(
                 ReturnPeriodSchema(
                     provider=self.get_provider_name(),
@@ -65,7 +65,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         fn = self._resolve_geoglows_callable("forecast_stats")
         rows: list[TimeseriesPointSchema] = []
         for reach_id in reach_ids:
-            df = fn(comid=int(reach_id))
+            df = self._call_forecast_stats(fn, int(reach_id))
             if isinstance(df.index, pd.DatetimeIndex):
                 iter_rows = df.reset_index(names="forecast_time_utc").to_dict(orient="records")
             else:
@@ -156,9 +156,53 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             "(top-level, streamflow, data)."
         )
 
+    def _call_return_periods(self, fn: Callable[..., Any], reach_ids: list[int]) -> Any:
+        call_options = [
+            lambda: fn(comid=reach_ids),
+            lambda: fn(river_id=reach_ids),
+            lambda: fn(river_ids=reach_ids),
+            lambda: fn(reach_ids),
+        ]
+        return self._call_with_fallback(fn_name="return_periods", call_options=call_options)
+
+    def _call_forecast_stats(self, fn: Callable[..., Any], reach_id: int) -> Any:
+        call_options = [
+            lambda: fn(comid=reach_id),
+            lambda: fn(river_id=reach_id),
+            lambda: fn(reach_id),
+        ]
+        return self._call_with_fallback(fn_name="forecast_stats", call_options=call_options)
+
+    def _call_with_fallback(self, fn_name: str, call_options: list[Callable[[], Any]]) -> Any:
+        last_exc: Exception | None = None
+        for call in call_options:
+            try:
+                return call()
+            except Exception as exc:  # pragma: no cover - behavior validated by provider tests
+                last_exc = exc
+                if _looks_like_network_error(exc):
+                    raise RuntimeError(
+                        "GEOGLOWS data source is unreachable from this environment. "
+                        "Check internet/proxy/firewall settings and retry."
+                    ) from exc
+                continue
+        raise RuntimeError(f"Unable to call GEOGLOWS '{fn_name}' with known parameter variants.") from last_exc
+
 
 def _safe_float(value: object) -> float | None:
     try:
         return None if value is None else float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _looks_like_network_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    tokens = [
+        "could not connect to the endpoint url",
+        "getaddrinfo failed",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "clientconnectordnserror",
+    ]
+    return any(token in text for token in tokens)

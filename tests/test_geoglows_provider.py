@@ -52,6 +52,26 @@ class _MockGeoglowsTopLevel:
     forecast_stats = staticmethod(_MockStreamflow.forecast_stats)
 
 
+class _MockGeoglowsRiverId:
+    @staticmethod
+    def return_periods(river_id):
+        assert isinstance(river_id, list)
+        return _MockStreamflow.return_periods(comid=river_id)
+
+    @staticmethod
+    def forecast_stats(river_id):
+        assert isinstance(river_id, int)
+        return _MockStreamflow.forecast_stats(comid=river_id)
+
+
+class _MockGeoglowsNetworkError:
+    @staticmethod
+    def return_periods(comid):
+        raise RuntimeError(
+            'Could not connect to the endpoint URL: "https://geoglows-v2.s3.auto.amazonaws.com/..."'
+        )
+
+
 class _MockGeoglowsInvalid:
     pass
 
@@ -76,6 +96,17 @@ def test_geoglows_normalization_streamflow_namespace():
 def test_geoglows_normalization_top_level_namespace():
     provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsTopLevel())
     _assert_provider(provider)
+
+
+def test_geoglows_normalization_river_id_signature():
+    provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsRiverId())
+    _assert_provider(provider)
+
+
+def test_geoglows_network_errors_are_human_readable():
+    provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsNetworkError())
+    with pytest.raises(RuntimeError, match="data source is unreachable"):
+        provider.fetch_return_periods([123])
 
 
 def test_geoglows_missing_api_surface_raises_runtime_error():
