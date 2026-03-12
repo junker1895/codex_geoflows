@@ -24,3 +24,7 @@ ingest-sample:
 
 summarize-sample:
 	python -m app.cli summarize-run --provider geoglows --run-id latest
+
+
+migrate-docker:
+	docker compose exec app python -m alembic upgrade head

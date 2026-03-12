@@ -55,6 +55,8 @@ make install
 docker compose up --build
 ```
 
+> Note: the app container uses `DATABASE_URL=...@postgres...` internally via `docker-compose.yml`, while host-side commands should use `.env` with `localhost`.
+
 ## Environment variables
 
 - `APP_ENV`
@@ -72,8 +74,16 @@ docker compose up --build
 
 ## Migrations
 
+If you run migrations from your **host machine**, ensure `.env` uses a host-reachable DB URL (default in `.env.example` uses `localhost`).
+
 ```bash
-make migrate
+python -m alembic upgrade head
+```
+
+If you run migrations from inside Docker (recommended when app is containerized):
+
+```bash
+docker compose exec app python -m alembic upgrade head
 ```
 
 ## Running API

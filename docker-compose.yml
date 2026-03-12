@@ -14,6 +14,8 @@ services:
     build: .
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/geoflows
     depends_on:
       - postgres
     ports:
