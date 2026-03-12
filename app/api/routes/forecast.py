@@ -3,6 +3,11 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_forecast_service
 from app.db.session import get_db_session
+from app.forecast.exceptions import (
+    ForecastValidationError,
+    ProviderBackendUnavailableError,
+    ProviderOperationalError,
+)
 from app.forecast.schemas import ForecastRunSchema, ProviderHealthResponse, ReachDetailResponse, ReachSummarySchema
 
 router = APIRouter(prefix="/forecast", tags=["forecast"])
@@ -61,3 +66,30 @@ def forecast_health(provider: str, db: Session = Depends(get_db_session)) -> Pro
         return service.get_provider_health(provider)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/smoke/geoglows")
+def geoglows_smoke(
+    river_id: str = Query("123456789"),
+    run_id: str = Query("latest"),
+    db: Session = Depends(get_db_session),
+) -> dict:
+    service = get_forecast_service(db)
+    out = {
+        "provider": "geoglows",
+        "river_id": river_id,
+        "forecast_stats_rest": {"ok": False, "error": None},
+        "return_periods": {"ok": False, "error": None},
+    }
+    try:
+        service.ingest_forecast_run("geoglows", run_id, [river_id])
+        out["forecast_stats_rest"]["ok"] = True
+    except (ForecastValidationError, ProviderBackendUnavailableError, ProviderOperationalError, ValueError) as exc:
+        out["forecast_stats_rest"]["error"] = str(exc)
+
+    try:
+        service.ingest_return_periods("geoglows", [river_id])
+        out["return_periods"]["ok"] = True
+    except (ForecastValidationError, ProviderBackendUnavailableError, ProviderOperationalError, ValueError) as exc:
+        out["return_periods"]["error"] = str(exc)
+    return out

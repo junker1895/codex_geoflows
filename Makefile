@@ -28,3 +28,6 @@ summarize-sample:
 
 migrate-docker:
 	docker compose exec app python -m alembic upgrade head
+
+smoke-geoglows:
+	python -m app.cli smoke-geoglows --river-id 123456789

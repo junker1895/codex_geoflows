@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     geoglows_source_type: str = Field(default="geoglows_api", alias="GEOGLOWS_SOURCE_TYPE")
     geoglows_default_run_selector: str = Field(default="latest", alias="GEOGLOWS_DEFAULT_RUN_SELECTOR")
     geoglows_request_timeout_seconds: int = Field(default=30, alias="GEOGLOWS_REQUEST_TIMEOUT_SECONDS")
+    geoglows_data_source: str = Field(default="rest", alias="GEOGLOWS_DATA_SOURCE")
 
     @field_validator("forecast_enabled_providers", mode="before")
     @classmethod

@@ -70,6 +70,7 @@ docker compose up --build
 - `GEOGLOWS_SOURCE_TYPE`
 - `GEOGLOWS_DEFAULT_RUN_SELECTOR`
 - `GEOGLOWS_REQUEST_TIMEOUT_SECONDS`
+- `GEOGLOWS_DATA_SOURCE`
 - `FORECAST_SUMMARY_DEFAULT_LIMIT`
 
 ## Migrations
@@ -99,6 +100,7 @@ python -m app.cli discover-latest-run --provider geoglows
 python -m app.cli ingest-return-periods --provider geoglows --reach-id 123 --reach-id 456
 python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --reach-id 123 --reach-id 456
 python -m app.cli summarize-run --provider geoglows --run-id latest
+python -m app.cli smoke-geoglows --river-id 123456789
 ```
 
 ## Tests
@@ -110,8 +112,10 @@ make test
 ## Current limitations
 
 - GEOGLOWS run discovery currently uses deterministic local-hour run ID fallback and is designed to be replaced with authoritative run endpoint logic.
-- GEOGLOWS Python package API surface varies by version; adapter currently supports `return_periods`/`forecast_stats` from top-level, `streamflow`, or `data` namespaces and multiple parameter signatures (`comid`, `river_id`, positional).
-- GEOGLOWS ingestion depends on outbound network access to GEOGLOWS/AWS endpoints; when blocked, CLI now raises a user-friendly connectivity error.
+- `forecast_stats` is supported in REST mode (`GEOGLOWS_DATA_SOURCE=rest`) and can ingest forecasts when GEOGLOWS REST is reachable.
+- `return_periods` is treated as retrospective/AWS-backed in practice; in REST mode this service fails fast with a clear operational message instead of pretending REST support.
+- If retrospective/AWS access is unavailable, return-period ingest will fail and severity classification will degrade to unknown/below-threshold behavior for reaches without thresholds.
+- GEOGLOWS IDs must be 9-digit numeric `river_id` values.
 - Ingestion is selective by reach IDs (not full global bulk).
 - No auth/rate limiting.
 

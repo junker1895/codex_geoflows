@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable
 
@@ -6,6 +7,11 @@ import pandas as pd
 from app.core.config import Settings
 from app.forecast.base import ForecastProviderAdapter
 from app.forecast.classify import classify_peak_flow
+from app.forecast.exceptions import (
+    ForecastValidationError,
+    ProviderBackendUnavailableError,
+    ProviderOperationalError,
+)
 from app.forecast.schemas import (
     ForecastRunSchema,
     ReachSummarySchema,
@@ -14,10 +20,19 @@ from app.forecast.schemas import (
 )
 
 
+@dataclass(frozen=True)
+class GeoglowsCapabilities:
+    supports_forecast_stats_rest: bool = True
+    supports_forecast_stats_aws: bool = True
+    supports_return_periods_rest: bool = False
+    supports_return_periods_aws: bool = True
+
+
 class GeoglowsForecastProvider(ForecastProviderAdapter):
     def __init__(self, settings: Settings, geoglows_module: Any | None = None) -> None:
         self.settings = settings
         self._geoglows = geoglows_module
+        self.capabilities = GeoglowsCapabilities()
 
     def get_provider_name(self) -> str:
         return "geoglows"
@@ -36,8 +51,25 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         )
 
     def fetch_return_periods(self, reach_ids: list[str | int]) -> list[ReturnPeriodSchema]:
+        normalized_ids = _validate_geoglows_reach_ids(reach_ids)
+        forecast_source = self.settings.geoglows_data_source.lower()
+        if forecast_source == "rest" and not self.capabilities.supports_return_periods_rest:
+            raise ProviderBackendUnavailableError(
+                "GEOGLOWS return periods are not supported in REST mode. "
+                "This operation requires retrospective/AWS-backed access."
+            )
+
         fn = self._resolve_geoglows_callable("return_periods")
-        data = self._call_return_periods(fn, [int(r) for r in reach_ids])
+        try:
+            data = fn(river_id=normalized_ids)
+        except Exception as exc:
+            if _looks_like_network_error(exc):
+                raise ProviderBackendUnavailableError(
+                    "GEOGLOWS return periods require retrospective/AWS access, but that backend is unreachable "
+                    "from this environment."
+                ) from exc
+            raise ProviderOperationalError(f"GEOGLOWS return_periods failed: {exc}") from exc
+
         if isinstance(data, pd.Series):
             data = data.to_frame().T
 
@@ -54,7 +86,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                     rp_25=_safe_float(row.get("return_period_25")),
                     rp_50=_safe_float(row.get("return_period_50")),
                     rp_100=_safe_float(row.get("return_period_100")),
-                    metadata_json={"source": "geoglows.return_periods"},
+                    metadata_json={"source": "geoglows.return_periods", "backend": "retrospective_aws"},
                 )
             )
         return output
@@ -62,10 +94,25 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
     def fetch_forecast_timeseries(
         self, run_id: str, reach_ids: list[str | int]
     ) -> list[TimeseriesPointSchema]:
+        normalized_ids = _validate_geoglows_reach_ids(reach_ids)
+        source = self.settings.geoglows_data_source.lower()
+        if source not in {"rest", "aws"}:
+            raise ForecastValidationError(
+                f"Invalid GEOGLOWS_DATA_SOURCE '{self.settings.geoglows_data_source}'. Use 'rest' or 'aws'."
+            )
+
         fn = self._resolve_geoglows_callable("forecast_stats")
         rows: list[TimeseriesPointSchema] = []
-        for reach_id in reach_ids:
-            df = self._call_forecast_stats(fn, int(reach_id))
+        for reach_id in normalized_ids:
+            try:
+                df = fn(river_id=reach_id, data_source=source)
+            except Exception as exc:
+                if _looks_like_network_error(exc):
+                    raise ProviderBackendUnavailableError(
+                        "GEOGLOWS forecast_stats backend is unreachable from this environment."
+                    ) from exc
+                raise ProviderOperationalError(f"GEOGLOWS forecast_stats failed for river_id={reach_id}: {exc}") from exc
+
             if isinstance(df.index, pd.DatetimeIndex):
                 iter_rows = df.reset_index(names="forecast_time_utc").to_dict(orient="records")
             else:
@@ -86,7 +133,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                         flow_p25_cms=_safe_float(item.get("flow_25%_m^3/s") or item.get("p25")),
                         flow_p75_cms=_safe_float(item.get("flow_75%_m^3/s") or item.get("p75")),
                         flow_max_cms=_safe_float(item.get("flow_max_m^3/s") or item.get("max")),
-                        raw_payload_json={"provider_row": {k: str(v) for k, v in item.items()}},
+                        raw_payload_json={"provider_row": {k: str(v) for k, v in item.items()}, "source": source},
                     )
                 )
         return rows
@@ -131,62 +178,22 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         try:
             import geoglows as geoglows_module
         except ModuleNotFoundError as exc:  # pragma: no cover
-            raise RuntimeError(
-                "geoglows package is required for GEOGLOWS ingestion. Install dependencies first."
-            ) from exc
+            raise ProviderOperationalError("geoglows package is required for GEOGLOWS ingestion.") from exc
         self._geoglows = geoglows_module
         return geoglows_module
 
     def _resolve_geoglows_callable(self, function_name: str) -> Callable[..., Any]:
         geoglows = self._get_geoglows()
-        candidates = [
-            geoglows,
-            getattr(geoglows, "streamflow", None),
-            getattr(geoglows, "data", None),
-        ]
+        candidates = [geoglows, getattr(geoglows, "streamflow", None), getattr(geoglows, "data", None)]
         for candidate in candidates:
             if candidate is None:
                 continue
             fn = getattr(candidate, function_name, None)
             if callable(fn):
                 return fn
-
-        raise RuntimeError(
-            f"GEOGLOWS package does not expose '{function_name}' in expected namespaces "
-            "(top-level, streamflow, data)."
+        raise ProviderOperationalError(
+            f"GEOGLOWS package does not expose '{function_name}' in expected namespaces (top-level, streamflow, data)."
         )
-
-    def _call_return_periods(self, fn: Callable[..., Any], reach_ids: list[int]) -> Any:
-        call_options = [
-            lambda: fn(comid=reach_ids),
-            lambda: fn(river_id=reach_ids),
-            lambda: fn(river_ids=reach_ids),
-            lambda: fn(reach_ids),
-        ]
-        return self._call_with_fallback(fn_name="return_periods", call_options=call_options)
-
-    def _call_forecast_stats(self, fn: Callable[..., Any], reach_id: int) -> Any:
-        call_options = [
-            lambda: fn(comid=reach_id),
-            lambda: fn(river_id=reach_id),
-            lambda: fn(reach_id),
-        ]
-        return self._call_with_fallback(fn_name="forecast_stats", call_options=call_options)
-
-    def _call_with_fallback(self, fn_name: str, call_options: list[Callable[[], Any]]) -> Any:
-        last_exc: Exception | None = None
-        for call in call_options:
-            try:
-                return call()
-            except Exception as exc:  # pragma: no cover - behavior validated by provider tests
-                last_exc = exc
-                if _looks_like_network_error(exc):
-                    raise RuntimeError(
-                        "GEOGLOWS data source is unreachable from this environment. "
-                        "Check internet/proxy/firewall settings and retry."
-                    ) from exc
-                continue
-        raise RuntimeError(f"Unable to call GEOGLOWS '{fn_name}' with known parameter variants.") from last_exc
 
 
 def _safe_float(value: object) -> float | None:
@@ -196,6 +203,18 @@ def _safe_float(value: object) -> float | None:
         return None
 
 
+def _validate_geoglows_reach_ids(reach_ids: list[str | int]) -> list[int]:
+    normalized: list[int] = []
+    for raw in reach_ids:
+        text = str(raw).strip()
+        if not text.isdigit() or len(text) != 9:
+            raise ForecastValidationError(
+                f"Invalid GEOGLOWS river_id '{raw}'. GEOGLOWS IDs must be 9-digit numeric values."
+            )
+        normalized.append(int(text))
+    return normalized
+
+
 def _looks_like_network_error(exc: Exception) -> bool:
     text = str(exc).lower()
     tokens = [
@@ -203,6 +222,8 @@ def _looks_like_network_error(exc: Exception) -> bool:
         "getaddrinfo failed",
         "name or service not known",
         "temporary failure in name resolution",
+        "non-existent domain",
+        "nxdomain",
         "clientconnectordnserror",
     ]
     return any(token in text for token in tokens)
