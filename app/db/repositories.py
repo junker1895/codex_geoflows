@@ -131,13 +131,19 @@ class ForecastRepository:
             .limit(1)
         ).scalar_one_or_none()
 
-
     def get_run(self, provider: str, run_id: str) -> models.ForecastRun | None:
         return self.db.execute(
             select(models.ForecastRun).where(
                 and_(models.ForecastRun.provider == provider, models.ForecastRun.run_id == run_id)
             )
         ).scalar_one_or_none()
+
+    def has_return_periods(self, provider: str) -> bool:
+        stmt = select(models.ForecastProviderReturnPeriod.id).where(
+            models.ForecastProviderReturnPeriod.provider == provider
+        ).limit(1)
+        return self.db.execute(stmt).scalar_one_or_none() is not None
+
     def get_return_period(self, provider: str, reach_id: str) -> models.ForecastProviderReturnPeriod | None:
         return self.db.execute(
             select(models.ForecastProviderReturnPeriod).where(

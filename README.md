@@ -6,6 +6,7 @@ Backend-only, provider-agnostic flood forecast ingestion and API service. This f
 
 - Discovers latest forecast runs (provider-specific adapter)
 - Ingests return period thresholds for selected provider-native reach IDs
+- Imports local GEOGLOWS return-period datasets for offline severity classification
 - Ingests forecast timeseries for selected provider-native reach IDs
 - Computes reach-level severity summaries
 - Persists runs, return periods, timeseries, and summaries in PostgreSQL
@@ -98,6 +99,7 @@ make run
 ```bash
 python -m app.cli discover-latest-run --provider geoglows
 python -m app.cli ingest-return-periods --provider geoglows --reach-id 123 --reach-id 456
+python -m app.cli import-geoglows-return-periods --path /data/geoglows_return_periods.csv
 python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --reach-id 123 --reach-id 456
 python -m app.cli summarize-run --provider geoglows --run-id latest
 python -m app.cli smoke-geoglows --river-id 123456789
@@ -111,7 +113,7 @@ Reach detail endpoint supports `timeseries_limit` query parameter (default 500, 
 make test
 ```
 
-Provider health responses include capability flags such as `supports_forecast_stats_rest` and `supports_return_periods_current_backend` to make backend availability explicit.
+Provider health responses include capability flags such as `supports_forecast_stats_rest`, `supports_return_periods_current_backend`, and `local_return_periods_available` to make backend availability explicit.
 
 ## Current limitations
 
@@ -143,3 +145,41 @@ HydroRIVERS crosswalk should be added in a separate downstream service or module
 5. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
 
 Return-period ingestion remains the only missing backend capability for full severity classification in REST-only environments.
+
+
+## Local GEOGLOWS return-period import
+
+Return periods are per-reach threshold flows (2, 5, 10, 25, 50, 100-year) used to classify forecast peaks into summary severity fields:
+
+- `return_period_band`
+- `severity_score`
+- `is_flagged`
+
+Import a local dataset once and re-run summarization:
+
+```bash
+python -m app.cli import-geoglows-return-periods --path /data/geoglows_return_periods.csv
+python -m app.cli summarize-run --provider geoglows --run-id latest
+```
+
+Supported local formats: `.csv` and `.parquet`. The import is idempotent and upserts by `provider=geoglows` + `provider_reach_id`.
+
+API response shape remains stable. Before thresholds are loaded, summaries return:
+
+```json
+{
+  "return_period_band": "unknown",
+  "severity_score": 0,
+  "is_flagged": false
+}
+```
+
+After thresholds are loaded for the same reach, the same summary fields are populated, for example:
+
+```json
+{
+  "return_period_band": "ge_5",
+  "severity_score": 3,
+  "is_flagged": true
+}
+```

@@ -6,6 +6,7 @@ from app.core.config import Settings
 from app.db import models
 from app.db.repositories import ForecastRepository
 from app.forecast.base import ForecastProviderAdapter
+from app.forecast.providers.geoglows_return_periods import load_geoglows_return_periods_from_path
 from app.forecast.schemas import (
     ForecastRunSchema,
     ProviderHealthResponse,
@@ -46,6 +47,13 @@ class ForecastService:
         count = self.repo.upsert_return_periods(rows)
         self.db.commit()
         logger.info("upserted return periods", extra={"provider": provider, "count": count})
+        return count
+
+    def import_geoglows_return_periods(self, dataset_path: str) -> int:
+        rows = load_geoglows_return_periods_from_path(dataset_path)
+        count = self.repo.upsert_return_periods(rows)
+        self.db.commit()
+        logger.info("imported local GEOGLOWS return periods", extra={"count": count, "path": dataset_path})
         return count
 
     def ingest_forecast_run(self, provider: str, run_id: str, reach_ids: list[str]) -> int:
@@ -144,6 +152,7 @@ class ForecastService:
         supports_return_periods_current_backend = bool(
             getattr(capabilities, f"supports_return_periods_{source}", False)
         )
+        local_return_periods_available = self.repo.has_return_periods(provider)
 
         return ProviderHealthResponse(
             provider=provider,
@@ -153,6 +162,7 @@ class ForecastService:
             summary_count=summary_count,
             supports_forecast_stats_rest=supports_forecast_stats_rest,
             supports_return_periods_current_backend=supports_return_periods_current_backend,
+            local_return_periods_available=local_return_periods_available,
         )
 
     def _resolve_run(
