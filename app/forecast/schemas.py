@@ -80,3 +80,4 @@ class ProviderHealthResponse(ORMBaseModel):
     summary_count: int = 0
     supports_forecast_stats_rest: bool = False
     supports_return_periods_current_backend: bool = False
+    local_return_periods_available: bool = False

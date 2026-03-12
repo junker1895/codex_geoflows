@@ -76,3 +76,83 @@ def test_verified_workflow_forecast_only_summary_has_peak_values(db_session):
     assert detail_after.summary.peak_max_cms is not None
     assert detail_after.summary.return_period_band == "unknown"
     assert detail_after.summary.severity_score == 0
+
+
+def test_import_local_geoglows_return_periods_upsert_and_classify(db_session, tmp_path):
+    settings = Settings(GEOGLOWS_DATA_SOURCE="rest")
+    provider = GeoglowsForecastProvider(settings, geoglows_module=_MockGeoglowsForecastOnly())
+    service = ForecastService(db_session, settings, {"geoglows": provider})
+
+    run = service.discover_latest_run("geoglows")
+    service.ingest_forecast_run("geoglows", run.run_id, ["760021611"])
+
+    dataset = tmp_path / "rp.csv"
+    dataset.write_text(
+        "rivid,return_period_2,return_period_5,return_period_10,return_period_25,return_period_50,return_period_100\n"
+        "760021611,3,6,8,10,11,12\n"
+    )
+
+    assert service.import_geoglows_return_periods(str(dataset)) == 1
+    assert service.import_geoglows_return_periods(str(dataset)) == 1
+
+    service.summarize_run("geoglows", run.run_id)
+    detail = service.get_reach_detail("geoglows", "760021611", run_id=run.run_id)
+
+    assert detail.summary is not None
+    assert detail.summary.return_period_band == "ge_25"
+    assert detail.summary.severity_score == 5
+    assert detail.summary.is_flagged is True
+
+
+def test_health_reports_local_return_period_availability(db_session, tmp_path):
+    settings = Settings(GEOGLOWS_DATA_SOURCE="rest")
+    provider = GeoglowsForecastProvider(settings, geoglows_module=_MockGeoglowsForecastOnly())
+    service = ForecastService(db_session, settings, {"geoglows": provider})
+
+    before = service.get_provider_health("geoglows")
+    assert before.local_return_periods_available is False
+
+    dataset = tmp_path / "rp.csv"
+    dataset.write_text("river_id,return_period_2\n760021611,3\n")
+    service.import_geoglows_return_periods(str(dataset))
+
+    after = service.get_provider_health("geoglows")
+    assert after.local_return_periods_available is True
+
+
+def test_import_geoglows_return_periods_zarr_upsert_and_classify(db_session, monkeypatch):
+    settings = Settings(GEOGLOWS_DATA_SOURCE="rest")
+    provider = GeoglowsForecastProvider(settings, geoglows_module=_MockGeoglowsForecastOnly())
+    service = ForecastService(db_session, settings, {"geoglows": provider})
+
+    run = service.discover_latest_run("geoglows")
+    service.ingest_forecast_run("geoglows", run.run_id, ["760021611"])
+
+    def _fake_batches(**_kwargs):
+        from app.forecast.schemas import ReturnPeriodSchema
+
+        yield [
+            ReturnPeriodSchema(
+                provider="geoglows",
+                provider_reach_id="760021611",
+                rp_2=3,
+                rp_5=6,
+                rp_10=8,
+                rp_25=10,
+                rp_50=11,
+                rp_100=12,
+                metadata_json={"method": "gumbel"},
+            )
+        ]
+
+    monkeypatch.setattr("app.forecast.service.iter_geoglows_return_periods_from_zarr", _fake_batches)
+
+    assert service.import_geoglows_return_periods_zarr(batch_size=1) == 1
+
+    service.summarize_run("geoglows", run.run_id)
+    detail = service.get_reach_detail("geoglows", "760021611", run_id=run.run_id)
+
+    assert detail.summary is not None
+    assert detail.summary.return_period_band == "ge_25"
+    assert detail.summary.severity_score == 5
+    assert detail.summary.is_flagged is True

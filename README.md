@@ -6,6 +6,7 @@ Backend-only, provider-agnostic flood forecast ingestion and API service. This f
 
 - Discovers latest forecast runs (provider-specific adapter)
 - Ingests return period thresholds for selected provider-native reach IDs
+- Imports local GEOGLOWS return-period datasets for offline severity classification
 - Ingests forecast timeseries for selected provider-native reach IDs
 - Computes reach-level severity summaries
 - Persists runs, return periods, timeseries, and summaries in PostgreSQL
@@ -71,6 +72,9 @@ docker compose up --build
 - `GEOGLOWS_DEFAULT_RUN_SELECTOR`
 - `GEOGLOWS_REQUEST_TIMEOUT_SECONDS`
 - `GEOGLOWS_DATA_SOURCE`
+- `GEOGLOWS_RETURN_PERIOD_METHOD`
+- `GEOGLOWS_RETURN_PERIOD_ZARR_PATH`
+- `GEOGLOWS_RETURN_PERIOD_IMPORT_BATCH_SIZE`
 - `FORECAST_SUMMARY_DEFAULT_LIMIT`
 
 ## Migrations
@@ -98,6 +102,8 @@ make run
 ```bash
 python -m app.cli discover-latest-run --provider geoglows
 python -m app.cli ingest-return-periods --provider geoglows --reach-id 123 --reach-id 456
+python -m app.cli import-geoglows-return-periods-zarr
+python -m app.cli import-geoglows-return-periods-zarr --method logpearson3 --batch-size 50000
 python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --reach-id 123 --reach-id 456
 python -m app.cli summarize-run --provider geoglows --run-id latest
 python -m app.cli smoke-geoglows --river-id 123456789
@@ -111,7 +117,7 @@ Reach detail endpoint supports `timeseries_limit` query parameter (default 500, 
 make test
 ```
 
-Provider health responses include capability flags such as `supports_forecast_stats_rest` and `supports_return_periods_current_backend` to make backend availability explicit.
+Provider health responses include capability flags such as `supports_forecast_stats_rest`, `supports_return_periods_current_backend`, and `local_return_periods_available` to make backend availability explicit.
 
 ## Current limitations
 
@@ -142,4 +148,61 @@ HydroRIVERS crosswalk should be added in a separate downstream service or module
 4. `python -m app.cli summarize-run --provider geoglows --run-id latest`
 5. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
 
-Return-period ingestion remains the only missing backend capability for full severity classification in REST-only environments.
+Return-period ingest can run from the verified GEOGLOWS Zarr object store path for full severity classification in REST-only forecast environments.
+
+
+## Local GEOGLOWS return-period import
+
+The service imports GEOGLOWS return periods directly from the verified dataset path:
+
+- `s3://geoglows-v2/retrospective/return-periods.zarr`
+
+Dataset shape used by the importer:
+
+- dims: `river_id`, `return_period`
+- `return_period` coordinate values: `2, 5, 10, 25, 50, 100`
+- data variables: `gumbel`, `logpearson3`, `max_simulated`
+
+Supported methods:
+
+- `gumbel` (default)
+- `logpearson3`
+
+Default method can be controlled by `GEOGLOWS_RETURN_PERIOD_METHOD` and the Zarr path by `GEOGLOWS_RETURN_PERIOD_ZARR_PATH`.
+
+Import command (direct object path read, no bucket listing required):
+
+```bash
+python -m app.cli import-geoglows-return-periods-zarr
+```
+
+Optional overrides:
+
+```bash
+python -m app.cli import-geoglows-return-periods-zarr \
+  --zarr-path s3://geoglows-v2/retrospective/return-periods.zarr \
+  --method gumbel \
+  --batch-size 10000
+```
+
+The importer reads `river_id` in batches (chunked), reshapes one reach per row into `rp_2/rp_5/rp_10/rp_25/rp_50/rp_100`, and upserts into `forecast_provider_return_periods` keyed by `provider=geoglows + provider_reach_id`.
+
+Summary response shape remains unchanged. Before thresholds are loaded:
+
+```json
+{
+  "return_period_band": "unknown",
+  "severity_score": 0,
+  "is_flagged": false
+}
+```
+
+After thresholds are loaded and summarize-run is executed, the same fields are populated (example):
+
+```json
+{
+  "return_period_band": "ge_5",
+  "severity_score": 3,
+  "is_flagged": true
+}
+```

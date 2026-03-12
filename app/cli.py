@@ -68,6 +68,34 @@ def cli_ingest_return_periods(
     _safe_run(_inner)
 
 
+@cli.command("import-geoglows-return-periods")
+def cli_import_geoglows_return_periods(
+    path: str = typer.Option(..., "--path"),
+) -> None:
+    def _inner() -> None:
+        service = _build_service()
+        count = service.import_geoglows_return_periods(path)
+        typer.echo(f"upserted local GEOGLOWS return periods: {count}")
+
+    _safe_run(_inner)
+
+
+@cli.command("import-geoglows-return-periods-zarr")
+def cli_import_geoglows_return_periods_zarr(
+    zarr_path: str | None = typer.Option(None, "--zarr-path"),
+    method: str | None = typer.Option(None, "--method"),
+    batch_size: int | None = typer.Option(None, "--batch-size"),
+) -> None:
+    def _inner() -> None:
+        service = _build_service()
+        count = service.import_geoglows_return_periods_zarr(
+            zarr_path=zarr_path, method=method, batch_size=batch_size
+        )
+        typer.echo(f"upserted GEOGLOWS return periods from Zarr: {count}")
+
+    _safe_run(_inner)
+
+
 @cli.command("ingest-forecast-run")
 def cli_ingest_forecast_run(
     provider: str = typer.Option("geoglows", "--provider"),
