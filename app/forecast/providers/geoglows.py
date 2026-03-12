@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -23,8 +23,6 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         return "geoglows"
 
     def discover_latest_run(self) -> ForecastRunSchema:
-        # GEOGLOWS run discovery endpoint support varies by package/version; use a deterministic
-        # UTC-hour run identifier as a safe default until a dedicated run metadata source is wired.
         run_date = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
         run_id = run_date.strftime("%Y%m%d%H")
         return ForecastRunSchema(
@@ -38,8 +36,8 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         )
 
     def fetch_return_periods(self, reach_ids: list[str | int]) -> list[ReturnPeriodSchema]:
-        geoglows = self._get_geoglows()
-        data = geoglows.streamflow.return_periods(comid=[int(r) for r in reach_ids])
+        fn = self._resolve_geoglows_callable("return_periods")
+        data = fn(comid=[int(r) for r in reach_ids])
         if isinstance(data, pd.Series):
             data = data.to_frame().T
 
@@ -56,7 +54,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                     rp_25=_safe_float(row.get("return_period_25")),
                     rp_50=_safe_float(row.get("return_period_50")),
                     rp_100=_safe_float(row.get("return_period_100")),
-                    metadata_json={"source": "geoglows.streamflow.return_periods"},
+                    metadata_json={"source": "geoglows.return_periods"},
                 )
             )
         return output
@@ -64,10 +62,10 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
     def fetch_forecast_timeseries(
         self, run_id: str, reach_ids: list[str | int]
     ) -> list[TimeseriesPointSchema]:
-        geoglows = self._get_geoglows()
+        fn = self._resolve_geoglows_callable("forecast_stats")
         rows: list[TimeseriesPointSchema] = []
         for reach_id in reach_ids:
-            df = geoglows.streamflow.forecast_stats(comid=int(reach_id))
+            df = fn(comid=int(reach_id))
             if isinstance(df.index, pd.DatetimeIndex):
                 iter_rows = df.reset_index(names="forecast_time_utc").to_dict(orient="records")
             else:
@@ -138,6 +136,25 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             ) from exc
         self._geoglows = geoglows_module
         return geoglows_module
+
+    def _resolve_geoglows_callable(self, function_name: str) -> Callable[..., Any]:
+        geoglows = self._get_geoglows()
+        candidates = [
+            geoglows,
+            getattr(geoglows, "streamflow", None),
+            getattr(geoglows, "data", None),
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            fn = getattr(candidate, function_name, None)
+            if callable(fn):
+                return fn
+
+        raise RuntimeError(
+            f"GEOGLOWS package does not expose '{function_name}' in expected namespaces "
+            "(top-level, streamflow, data)."
+        )
 
 
 def _safe_float(value: object) -> float | None:

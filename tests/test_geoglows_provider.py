@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pandas as pd
+import pytest
 
 from app.core.config import Settings
 from app.forecast.providers.geoglows import GeoglowsForecastProvider
@@ -42,13 +43,20 @@ class _MockStreamflow:
         )
 
 
-class _MockGeoglows:
+class _MockGeoglowsStreamflow:
     streamflow = _MockStreamflow()
 
 
-def test_geoglows_normalization():
-    provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglows())
+class _MockGeoglowsTopLevel:
+    return_periods = staticmethod(_MockStreamflow.return_periods)
+    forecast_stats = staticmethod(_MockStreamflow.forecast_stats)
 
+
+class _MockGeoglowsInvalid:
+    pass
+
+
+def _assert_provider(provider: GeoglowsForecastProvider) -> None:
     rp = provider.fetch_return_periods([123])
     ts = provider.fetch_forecast_timeseries("2024010100", [123])
 
@@ -58,3 +66,19 @@ def test_geoglows_normalization():
     summary = provider.summarize_reach("2024010100", "123", ts, rp[0])
     assert summary.run_id == "2024010100"
     assert summary.severity_score >= 2
+
+
+def test_geoglows_normalization_streamflow_namespace():
+    provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsStreamflow())
+    _assert_provider(provider)
+
+
+def test_geoglows_normalization_top_level_namespace():
+    provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsTopLevel())
+    _assert_provider(provider)
+
+
+def test_geoglows_missing_api_surface_raises_runtime_error():
+    provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsInvalid())
+    with pytest.raises(RuntimeError, match="does not expose 'return_periods'"):
+        provider.fetch_return_periods([123])
