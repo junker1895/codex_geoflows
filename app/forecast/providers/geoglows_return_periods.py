@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,9 @@ from app.forecast.schemas import ReturnPeriodSchema
 
 _VALID_RETURN_PERIODS = (2, 5, 10, 25, 50, 100)
 _VALID_METHODS = {"gumbel", "logpearson3"}
+_GEOGLOWS_PUBLIC_REGION = "us-west-2"
+
+logger = logging.getLogger(__name__)
 
 
 def iter_geoglows_return_periods_from_zarr(
@@ -22,7 +26,7 @@ def iter_geoglows_return_periods_from_zarr(
 
     xr = _import_xarray()
     try:
-        ds = xr.open_zarr(zarr_path, consolidated=False)
+        ds = open_geoglows_public_return_periods_zarr(xr=xr, zarr_path=zarr_path)
     except Exception as exc:
         raise ProviderOperationalError(f"Failed to open GEOGLOWS Zarr dataset at '{zarr_path}': {exc}") from exc
 
@@ -164,6 +168,28 @@ def _import_xarray():
             "xarray is required to import GEOGLOWS return periods from Zarr."
         ) from exc
     return xr
+
+
+def build_geoglows_public_zarr_storage_options() -> dict[str, Any]:
+    """Storage options aligned with the known-good direct xarray.open_zarr call."""
+    return {
+        "anon": True,
+        "client_kwargs": {"region_name": _GEOGLOWS_PUBLIC_REGION},
+    }
+
+
+def open_geoglows_public_return_periods_zarr(*, xr: Any, zarr_path: str) -> Any:
+    storage_options = build_geoglows_public_zarr_storage_options()
+    logger.info(
+        "opening GEOGLOWS return-period Zarr dataset",
+        extra={
+            "zarr_path": zarr_path,
+            "method": "xarray.open_zarr",
+            "anonymous": storage_options.get("anon") is True,
+            "region": storage_options.get("client_kwargs", {}).get("region_name"),
+        },
+    )
+    return xr.open_zarr(zarr_path, storage_options=storage_options)
 
 
 def _import_pandas():

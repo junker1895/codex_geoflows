@@ -5,34 +5,32 @@ def classify_peak_flow(peak_flow: float | None, thresholds: ReturnPeriodSchema |
     if peak_flow is None or thresholds is None:
         return ClassificationResult()
 
-    candidates = {
-        2: thresholds.rp_2,
-        5: thresholds.rp_5,
-        10: thresholds.rp_10,
-        25: thresholds.rp_25,
-        50: thresholds.rp_50,
-        100: thresholds.rp_100,
-    }
-    clean = {k: v for k, v in candidates.items() if isinstance(v, (float, int)) and v >= 0}
-    if not clean:
+    rp_2 = _valid_threshold(thresholds.rp_2)
+    if rp_2 is None:
         return ClassificationResult()
 
-    ordered = sorted(clean.items(), key=lambda item: item[1])
-    highest = None
-    for rp, threshold in ordered:
-        if peak_flow >= threshold:
-            highest = rp
+    rp_5 = _valid_threshold(thresholds.rp_5)
+    rp_10 = _valid_threshold(thresholds.rp_10)
+    rp_25 = _valid_threshold(thresholds.rp_25)
+    rp_50 = _valid_threshold(thresholds.rp_50)
+    rp_100 = _valid_threshold(thresholds.rp_100)
 
-    if highest is None:
-        return ClassificationResult(return_period_band="below_2", severity_score=1, is_flagged=False)
+    if peak_flow < rp_2:
+        return ClassificationResult(return_period_band="below_2", severity_score=0, is_flagged=False)
+    if rp_5 is None or peak_flow < rp_5:
+        return ClassificationResult(return_period_band="2", severity_score=1, is_flagged=True)
+    if rp_10 is None or peak_flow < rp_10:
+        return ClassificationResult(return_period_band="5", severity_score=2, is_flagged=True)
+    if rp_25 is None or peak_flow < rp_25:
+        return ClassificationResult(return_period_band="10", severity_score=3, is_flagged=True)
+    if rp_50 is None or peak_flow < rp_50:
+        return ClassificationResult(return_period_band="25", severity_score=4, is_flagged=True)
+    if rp_100 is None or peak_flow < rp_100:
+        return ClassificationResult(return_period_band="50", severity_score=5, is_flagged=True)
+    return ClassificationResult(return_period_band="100", severity_score=6, is_flagged=True)
 
-    band_map = {
-        2: ("ge_2", 2),
-        5: ("ge_5", 3),
-        10: ("ge_10", 4),
-        25: ("ge_25", 5),
-        50: ("ge_50", 6),
-        100: ("ge_100", 7),
-    }
-    band, score = band_map.get(highest, ("unknown", 0))
-    return ClassificationResult(return_period_band=band, severity_score=score, is_flagged=score >= 3)
+
+def _valid_threshold(value: float | None) -> float | None:
+    if isinstance(value, (float, int)) and value >= 0:
+        return float(value)
+    return None
