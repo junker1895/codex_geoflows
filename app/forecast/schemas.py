@@ -111,4 +111,9 @@ class ProviderHealthResponse(ORMBaseModel):
     summary_count: int = 0
     supports_forecast_stats_rest: bool = False
     supports_return_periods_current_backend: bool = False
+    supports_bulk_forecast_ingest: bool = False
     local_return_periods_available: bool = False
+    latest_run_has_timeseries: bool = False
+    latest_run_timeseries_row_count: int = 0
+    latest_run_reach_count: int = 0
+    latest_run_has_summaries: bool = False
