@@ -9,6 +9,7 @@ from app.forecast.exceptions import (
     ProviderOperationalError,
 )
 from app.forecast.jobs import discover_latest_run, ingest_forecast_run, ingest_return_periods, summarize_run
+from app.forecast.jobs import prepare_bulk_artifact
 from app.forecast.providers.geoglows import GeoglowsForecastProvider
 from app.forecast.providers.geoglows_return_periods import open_geoglows_public_return_periods_zarr
 from app.forecast.service import ForecastService
@@ -114,15 +115,56 @@ def cli_return_periods_zarr_open(
 
     _safe_run(_inner)
 
+
+
+@cli.command("prepare-bulk-artifact")
+def cli_prepare_bulk_artifact(
+    provider: str = typer.Option("geoglows", "--provider"),
+    run_id: str = typer.Option("latest", "--run-id"),
+    filter_to_supported_reaches: bool = typer.Option(True, "--filter-supported/--no-filter-supported"),
+    if_present: str = typer.Option("skip", "--if-present", help="Behavior if artifact exists: skip|overwrite|error"),
+    overwrite_raw: bool = typer.Option(False, "--overwrite-raw"),
+) -> None:
+    def _inner() -> None:
+        if if_present not in {"skip", "overwrite", "error"}:
+            raise ValueError("--if-present must be one of: skip, overwrite, error")
+        service = _build_service()
+        artifact_path, count = prepare_bulk_artifact.run(
+            service,
+            provider=provider,
+            run_id=run_id,
+            filter_to_supported_reaches=filter_to_supported_reaches,
+            if_present=if_present,
+            overwrite_raw=overwrite_raw,
+        )
+        typer.echo(f"prepared bulk artifact: {artifact_path} (rows={count})")
+
+    _safe_run(_inner)
+
 @cli.command("ingest-forecast-run")
 def cli_ingest_forecast_run(
     provider: str = typer.Option("geoglows", "--provider"),
     run_id: str = typer.Option("latest", "--run-id"),
-    reach_id: list[str] = typer.Option(..., "--reach-id"),
+    reach_id: list[str] | None = typer.Option(None, "--reach-id"),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help="Ingest mode: rest_single (debug/small batch) or bulk (full supported network via bulk source)",
+    ),
 ) -> None:
     def _inner() -> None:
+        selected_mode = mode
+        if selected_mode is None:
+            selected_mode = "rest_single" if reach_id else "bulk"
+        if selected_mode not in {"rest_single", "bulk"}:
+            raise ValueError("--mode must be one of: rest_single, bulk")
+        if selected_mode == "rest_single" and not reach_id:
+            raise ValueError("--mode rest_single requires at least one --reach-id")
+        if selected_mode == "bulk" and reach_id:
+            raise ValueError("--mode bulk cannot be combined with --reach-id; remove --reach-id for full ingest")
+
         service = _build_service()
-        count = ingest_forecast_run.run(service, provider, run_id, reach_id)
+        count = ingest_forecast_run.run(service, provider, run_id, reach_id, ingest_mode=selected_mode)
         typer.echo(f"upserted timeseries rows: {count}")
 
     _safe_run(_inner)

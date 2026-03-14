@@ -104,12 +104,17 @@ python -m app.cli discover-latest-run --provider geoglows
 python -m app.cli ingest-return-periods --provider geoglows --reach-id 123 --reach-id 456
 python -m app.cli import-geoglows-return-periods-zarr
 python -m app.cli import-geoglows-return-periods-zarr --method logpearson3 --batch-size 50000
-python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --reach-id 123 --reach-id 456
+python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 123
+python -m app.cli prepare-bulk-artifact --provider geoglows --run-id latest --filter-supported --if-present overwrite --overwrite-raw
+python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode bulk
 python -m app.cli summarize-run --provider geoglows --run-id latest
 python -m app.cli smoke-geoglows --river-id 123456789
 ```
 
 Reach detail endpoint supports `timeseries_limit` query parameter (default 500, max 5000) to avoid oversized responses.
+
+REST mode is debug/smoke only for one or small reach sets. Production full-network ingest uses prepared normalized artifacts and then `--mode bulk`.
+`--mode bulk` and `--reach-id` are intentionally mutually exclusive to prevent accidental fallback semantics.
 
 ## Tests
 
@@ -126,7 +131,7 @@ Provider health responses include capability flags such as `supports_forecast_st
 - `return_periods` is treated as retrospective/AWS-backed in practice; in REST mode this service fails fast with a clear operational message instead of pretending REST support.
 - If retrospective/AWS access is unavailable, return-period ingest will fail and severity classification will degrade to unknown/below-threshold behavior for reaches without thresholds.
 - GEOGLOWS IDs must be 9-digit numeric `river_id` values.
-- Ingestion is selective by reach IDs (not full global bulk).
+- Bulk ingestion uses the supported-reach universe already loaded in `forecast_provider_return_periods` (typically from GEOGLOWS Zarr import), with configurable chunking via `FORECAST_BULK_INGEST_BATCH_SIZE`.
 - No auth/rate limiting.
 
 ## Extending to future providers
@@ -144,9 +149,11 @@ HydroRIVERS crosswalk should be added in a separate downstream service or module
 
 1. `python -m alembic upgrade head`
 2. `python -m app.cli discover-latest-run --provider geoglows`
-3. `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --reach-id 760021611`
-4. `python -m app.cli summarize-run --provider geoglows --run-id latest`
-5. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
+3. Optional debug smoke: `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 760021611`
+4. Prepare normalized artifact (requires bulk acquisition configuration): `python -m app.cli prepare-bulk-artifact --provider geoglows --run-id latest --filter-supported --if-present overwrite --overwrite-raw`
+5. Bulk ingest artifact: `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode bulk`
+6. `python -m app.cli summarize-run --provider geoglows --run-id latest`
+7. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
 
 Return-period ingest can run from the verified GEOGLOWS Zarr object store path for full severity classification in REST-only forecast environments.
 
@@ -212,3 +219,75 @@ After thresholds are loaded and summarize-run is executed, the same fields are p
 For the detailed model-agnostic flood classification design (architecture, thresholds, peak extraction, banding, API mapping, and multi-model integration guidance), see:
 
 - `docs/flood-classification-system.md`
+
+
+### Production bulk workflow
+
+The production bulk pipeline is intentionally split into three layers:
+
+1. **Provider acquisition layer**: fetch provider-native run data (GEOGLOWS bulk source).
+2. **Normalization/export layer**: convert provider-native records into normalized bulk artifact rows.
+3. **Ingest layer**: load normalized artifact rows into `forecast_provider_reach_timeseries`.
+
+Current normalized artifact format is JSONL with schema fields:
+
+- `provider` (string, required)
+- `run_id` (string, required)
+- `provider_reach_id` (string, required)
+- `forecast_time_utc` (datetime, required)
+- `flow_mean_cms`, `flow_median_cms`, `flow_p25_cms`, `flow_p75_cms`, `flow_max_cms` (float, optional)
+- `raw_payload_json` (object, optional)
+
+For production mode, the artifact is the bridge between provider-native bulk acquisition and DB ingest.
+
+
+## GEOGLOWS bulk acquisition modes
+
+Acquisition is explicitly controlled by `GEOGLOWS_BULK_ACQUISITION_MODE`:
+
+- `manual_artifact_only`: backend does not acquire raw data; operators provide normalized artifact directly.
+- `local_file`: backend stages a local raw JSONL file from `GEOGLOWS_BULK_RAW_SOURCE_URI`.
+- `remote_http`: backend downloads raw JSONL from HTTP(S) URL in `GEOGLOWS_BULK_RAW_SOURCE_URI` (supports `{run_id}` templating).
+- `remote_object_store`: declared mode for future object-store retrieval (currently fails with clear message).
+
+Key acquisition config:
+
+- `GEOGLOWS_BULK_ACQUISITION_MODE`
+- `GEOGLOWS_BULK_RAW_SOURCE_URI`
+- `GEOGLOWS_BULK_REMOTE_AUTH_TOKEN`
+- `GEOGLOWS_BULK_STAGING_DIR`
+- `GEOGLOWS_BULK_DOWNLOAD_TIMEOUT_SECONDS`
+- `GEOGLOWS_BULK_DOWNLOAD_MAX_RETRIES`
+- `GEOGLOWS_BULK_OVERWRITE_EXISTING_RAW`
+- `GEOGLOWS_BULK_RAW_RETENTION_RUNS`
+
+Artifact/ingest config:
+
+- `FORECAST_BULK_ARTIFACT_DIR`
+- `FORECAST_BULK_ARTIFACT_WRITE_BATCH_SIZE`
+- `FORECAST_BULK_INGEST_BATCH_SIZE`
+- `FORECAST_BULK_ARTIFACT_RETENTION_RUNS`
+
+Normalized artifact row mapping (`BulkForecastArtifactRowSchema`):
+
+Required raw source fields:
+
+- `provider_reach_id` (or `river_id`)
+- `forecast_time_utc` (or `time`)
+
+Optional raw fields:
+
+- `flow_avg` or `flow_mean_cms` -> `flow_mean_cms`
+- `flow_med` or `flow_median_cms` -> `flow_median_cms`
+- `flow_25p` or `flow_p25_cms` -> `flow_p25_cms`
+- `flow_75p` or `flow_p75_cms` -> `flow_p75_cms`
+- `flow_max` or `flow_max_cms` -> `flow_max_cms`
+
+Timestamp parsing uses ISO datetime conversion; invalid/missing rows are dropped during prepare and counted in logs. Raw provider record is preserved in `raw_payload_json.raw_record`.
+
+Run-scoped paths are deterministic:
+
+- raw staging: `${GEOGLOWS_BULK_STAGING_DIR}/geoglows/geoglows_{run_id}.jsonl`
+- normalized artifact: `${FORECAST_BULK_ARTIFACT_DIR}/geoglows/geoglows_{run_id}.jsonl`
+
+Prepare behavior when artifact exists is controlled with CLI `--if-present skip|overwrite|error`.

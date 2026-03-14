@@ -62,6 +62,14 @@ def test_api_endpoints(client, db_session):
     assert "supports_forecast_stats_rest" in payload
     assert "supports_return_periods_current_backend" in payload
     assert "local_return_periods_available" in payload
+    assert "supports_bulk_forecast_ingest" in payload
+    assert "bulk_acquisition_configured" in payload
+    assert "bulk_acquisition_mode" in payload
+    assert "bulk_raw_source_reachable" in payload
+    assert "latest_run_has_timeseries" in payload
+    assert "latest_run_has_summaries" in payload
+    assert "latest_run_artifact_exists" in payload
+    assert "latest_run_map_ready" in payload
 
 
 def test_map_reaches_endpoint_contract_and_filters(client, db_session):
@@ -116,3 +124,18 @@ def test_map_reaches_endpoint_contract_and_filters(client, db_session):
 def test_map_reaches_requires_valid_provider(client):
     response = client.get("/forecast/map/reaches", params={"provider": "unknown"})
     assert response.status_code == 400
+
+
+def test_map_reaches_after_bulk_ingest_returns_multiple_rows(client, db_session):
+    service = ForecastService(db_session, Settings(FORECAST_BULK_INGEST_BATCH_SIZE=2), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100", "101", "102"])
+    service.prepare_bulk_artifact("geoglows", run.run_id)
+    service.ingest_forecast_run("geoglows", run.run_id, ingest_mode="bulk")
+    service.summarize_run("geoglows", run.run_id)
+
+    response = client.get("/forecast/map/reaches", params={"provider": "geoglows", "run_id": run.run_id, "limit": 10})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["meta"]["count"] == 3
+    assert len(payload["data"]) == 3
