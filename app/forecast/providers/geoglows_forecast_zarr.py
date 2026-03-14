@@ -106,8 +106,58 @@ def detect_forecast_structure(ds: Any, forecast_variable: str) -> dict[str, Any]
         "time_dim": time_dim,
         "reach_dim": reach_dim,
         "ensemble_dims": ensemble_dims,
+        "chunking": dataarray_chunking(qout),
         "coords": sorted(ds.coords.keys()),
         "attrs": dict(ds.attrs),
+    }
+
+
+def dataarray_chunking(data_array: Any) -> dict[str, list[int]]:
+    chunks = getattr(data_array, "chunks", None)
+    if not chunks:
+        return {}
+    return {
+        dim: [int(x) for x in dim_chunks]
+        for dim, dim_chunks in zip(data_array.dims, chunks, strict=False)
+    }
+
+
+def chunk_aligned_windows(dim_size: int, chunk_sizes: list[int] | tuple[int, ...] | None) -> list[tuple[int, int]]:
+    if dim_size <= 0:
+        return []
+    if not chunk_sizes:
+        return [(0, dim_size)]
+
+    windows: list[tuple[int, int]] = []
+    start = 0
+    for chunk in chunk_sizes:
+        if start >= dim_size:
+            break
+        width = int(chunk)
+        if width <= 0:
+            continue
+        end = min(start + width, dim_size)
+        windows.append((start, end))
+        start = end
+
+    if start < dim_size:
+        windows.append((start, dim_size))
+    return windows
+
+
+def describe_forecast_dataset(ds: Any, forecast_variable: str) -> dict[str, Any]:
+    structure = detect_forecast_structure(ds, forecast_variable)
+    qout = ds[forecast_variable]
+    return {
+        "dims": {k: int(v) for k, v in ds.sizes.items()},
+        "coords": sorted(ds.coords.keys()),
+        "data_vars": sorted(ds.data_vars.keys()),
+        "forecast_variable": forecast_variable,
+        "forecast_dims": list(qout.dims),
+        "chunking": dataarray_chunking(qout),
+        "detected_time_dim": structure["time_dim"],
+        "detected_reach_dim": structure["reach_dim"],
+        "detected_ensemble_dims": structure["ensemble_dims"],
     }
 
 

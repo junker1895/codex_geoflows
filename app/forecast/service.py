@@ -316,6 +316,8 @@ class ForecastService:
 
         try:
             started_at = perf_counter()
+            if hasattr(adapter, "set_supported_reach_filter"):
+                adapter.set_supported_reach_filter(supported_reaches)
             staged_raw_path = adapter.acquire_bulk_raw_source(resolved_run.run_id, overwrite=overwrite_raw)
             raw["source_uri"] = staged_raw_path
             raw["staged_raw_path"] = staged_raw_path
@@ -406,6 +408,9 @@ class ForecastService:
         except Exception as exc:
             self._record_run_failure(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED, str(exc))
             raise
+        finally:
+            if hasattr(adapter, "set_supported_reach_filter"):
+                adapter.set_supported_reach_filter(None)
 
     def ingest_forecast_run(
         self,

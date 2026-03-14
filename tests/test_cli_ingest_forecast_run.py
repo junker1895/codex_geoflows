@@ -182,3 +182,37 @@ def test_cli_run_status_latest_shows_authoritative_resolved_run(monkeypatch):
     assert result.exit_code == 0
     assert "run_id: 2026031400" in result.stdout
     assert "authoritative_latest_upstream_run_id: 2026031400" in result.stdout
+
+
+def test_cli_forecast_zarr_inspect(monkeypatch):
+    class _Provider:
+        @staticmethod
+        def build_source_zarr_path(run_id: str) -> str:
+            return f"s3://geoglows-v2-forecasts/{run_id}.zarr"
+
+    class _Svc:
+        providers = {"geoglows": _Provider()}
+
+        @staticmethod
+        def resolve_requested_run_id(provider, run_id):
+            assert provider == "geoglows"
+            assert run_id == "latest"
+            return type("_R", (), {"run_id": "2026031400"})()
+
+    monkeypatch.setattr(cli_mod, "_build_service", lambda: _Svc())
+    monkeypatch.setattr(
+        cli_mod,
+        "open_geoglows_public_forecast_run_zarr",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "describe_forecast_dataset",
+        lambda _ds, _var: {"dims": {"ensemble": 52, "time": 280, "rivid": 6838900}, "chunking": {"rivid": [686]}},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.cli, ["forecast-zarr-inspect", "--run-id", "latest"])
+    assert result.exit_code == 0
+    assert '"run_id": "2026031400"' in result.stdout
+    assert '"rivid": 6838900' in result.stdout

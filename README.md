@@ -180,6 +180,9 @@ Print run readiness summary:
 
 ```bash
 python -m app.cli run-status --provider geoglows --run-id latest
+
+# Inspect forecast Zarr structure/chunking for a run
+python -m app.cli forecast-zarr-inspect --run-id latest
 ```
 
 ### Failure tracking
@@ -328,6 +331,10 @@ Current normalized artifact format is JSONL with schema fields:
 
 For production mode, the artifact is the bridge between provider-native bulk acquisition and DB ingest.
 
+GEOGLOWS preparation is optimized for the real upstream layout by reading contiguous `rivid` blocks aligned to Zarr chunk windows (observed upstream `Qout` chunking: `(52, 280, 686)`) and computing statistics vectorized over ensemble values. This avoids per-reach random-access patterns that can appear stalled on global runs.
+
+The prepare job logs block progress at INFO level (`run_id`, source Zarr path, block index/total, `rivid` start/end, rows written, elapsed seconds, and rows/sec) so long-running runs show clear forward progress.
+
 
 ## GEOGLOWS bulk acquisition modes
 
@@ -337,7 +344,7 @@ Production mode is `aws_public_zarr` and reads official GEOGLOWS upstream runs f
 - region: `us-west-2`
 - anonymous (`no-sign-request`)
 - one Zarr per run: `YYYYMMDD00.zarr/`
-- forecast variable: `Qout`
+- forecast variable: `Qout` (confirmed dims: `ensemble, time, rivid`)
 
 Acquisition is controlled by `GEOGLOWS_BULK_ACQUISITION_MODE`:
 

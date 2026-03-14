@@ -31,10 +31,11 @@ class _FakeCoord:
 
 
 class _FakeDataArray:
-    def __init__(self, values, dims, coords):
+    def __init__(self, values, dims, coords, chunks=None):
         self.values = np.array(values)
         self.dims = tuple(dims)
         self.coords = coords
+        self.chunks = chunks
 
     def isel(self, indexers):
         dims = list(self.dims)
@@ -47,8 +48,16 @@ class _FakeDataArray:
                 dims.pop(axis)
                 coords.pop(dim, None)
         if values.ndim == 0:
-            return _FakeDataArray(np.array([values.item()]), (), coords)
-        return _FakeDataArray(values, dims, coords)
+            return _FakeDataArray(np.array([values.item()]), (), coords, None)
+        return _FakeDataArray(values, dims, coords, self.chunks)
+
+    def transpose(self, *dims):
+        perm = [self.dims.index(d) for d in dims]
+        transposed = np.transpose(self.values, axes=perm)
+        transposed_chunks = None
+        if self.chunks:
+            transposed_chunks = tuple(self.chunks[idx] for idx in perm)
+        return _FakeDataArray(transposed, dims, self.coords, transposed_chunks)
 
 
 class _FakeDataset:
@@ -66,8 +75,10 @@ class _FakeDataset:
                 ],
                 dims=("river_id", "time", "ensemble"),
                 coords=self.coords,
+                chunks=((1, 1), (2,), (3,)),
             )
         }
+        self.sizes = {"river_id": 2, "time": 2, "ensemble": 3}
         self.attrs = {"title": "fake"}
 
     def __getitem__(self, key):
@@ -127,6 +138,20 @@ def test_provider_normalizes_qout_members_to_artifact_rows(monkeypatch):
     assert normalized.flow_p75_cms == 13.0
     assert normalized.flow_max_cms == 14.0
     assert normalized.raw_payload_json["high_res"] == 10.0
+    assert {r["raw_payload_json"]["block_index"] for r in rows} == {1, 2}
+
+
+def test_provider_filters_supported_reaches_within_block(monkeypatch):
+    settings = Settings()
+    provider = GeoglowsForecastProvider(settings)
+    monkeypatch.setattr(provider, "_import_xarray", lambda: _FakeXR)
+    provider.set_supported_reach_filter({"760021611"})
+
+    rows = list(provider.iter_raw_bulk_records("2026031400", "ignored"))
+    provider.set_supported_reach_filter(None)
+
+    assert len(rows) == 2
+    assert all(row["provider_reach_id"] == "760021611" for row in rows)
 
 
 def test_run_exists_uses_bucket_and_suffix():
@@ -137,3 +162,14 @@ def test_run_exists_uses_bucket_and_suffix():
         use_anon=True,
         run_id="2026031400",
     )
+
+
+def test_chunk_aligned_windows_follow_chunk_sizes():
+    assert helper.chunk_aligned_windows(10, [4, 4, 2]) == [(0, 4), (4, 8), (8, 10)]
+
+
+def test_describe_forecast_dataset_reports_dims_and_chunking():
+    summary = helper.describe_forecast_dataset(_FakeDataset(), "Qout")
+    assert summary["dims"] == {"river_id": 2, "time": 2, "ensemble": 3}
+    assert summary["chunking"]["river_id"] == [1, 1]
+    assert summary["detected_time_dim"] == "time"

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
+import logging
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import shutil
@@ -22,12 +23,17 @@ from app.forecast.exceptions import (
 )
 from app.forecast.providers.geoglows_forecast_zarr import (
     build_geoglows_forecast_run_zarr_uri,
+    chunk_aligned_windows,
+    describe_forecast_dataset,
+    dataarray_chunking,
     detect_forecast_structure,
     discover_latest_forecast_run_id,
     open_geoglows_public_forecast_run_zarr,
     run_exists,
     to_utc_datetime,
 )
+
+logger = logging.getLogger(__name__)
 from app.forecast.schemas import (
     BulkForecastArtifactRowSchema,
     ForecastRunSchema,
@@ -50,6 +56,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         self.settings = settings
         self._geoglows = geoglows_module
         self.capabilities = GeoglowsCapabilities()
+        self._supported_reach_filter: set[str] | None = None
 
     def get_provider_name(self) -> str:
         return "geoglows"
@@ -302,6 +309,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
 
     def _iter_records_from_public_zarr(self, run_id: str) -> Iterator[dict]:
         xr = self._import_xarray()
+        source_zarr_path = self.build_source_zarr_path(run_id)
         ds = open_geoglows_public_forecast_run_zarr(
             xr=xr,
             run_id=run_id,
@@ -311,51 +319,140 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             run_suffix=self.settings.geoglows_forecast_run_suffix,
         )
         structure = detect_forecast_structure(ds, self.settings.geoglows_forecast_variable)
+        summary = describe_forecast_dataset(ds, self.settings.geoglows_forecast_variable)
 
         qout = ds[self.settings.geoglows_forecast_variable]
         time_values = ds[structure["time_dim"]].values
-        reach_values = ds[structure["reach_dim"]].values
+        reach_coord = ds[structure["reach_dim"]]
+        reach_values = reach_coord.values
         ensemble_dims = structure["ensemble_dims"]
 
-        chunk_size = max(1, self.settings.forecast_bulk_artifact_write_batch_size)
-        for reach_start in range(0, len(reach_values), chunk_size):
-            reach_end = min(reach_start + chunk_size, len(reach_values))
-            chunk = qout.isel({structure["reach_dim"]: slice(reach_start, reach_end)})
+        # Confirmed upstream shape for GEOGLOWS runs is (ensemble, time, rivid), and
+        # real dask chunks are currently observed as (52, 280, 686). We inspect chunking
+        # dynamically and iterate contiguous reach windows aligned to chunk boundaries.
+        chunking = dataarray_chunking(qout)
+        reach_chunks = chunking.get(structure["reach_dim"])
+        reach_windows = chunk_aligned_windows(len(reach_values), reach_chunks)
 
-            for local_reach_index, reach_value in enumerate(reach_values[reach_start:reach_end]):
-                reach_slice = chunk.isel({structure["reach_dim"]: local_reach_index})
-                for time_index, forecast_time in enumerate(time_values):
-                    member_slice = reach_slice.isel({structure["time_dim"]: time_index})
-                    values = np.asarray(member_slice.values, dtype=float).reshape(-1)
-                    finite = values[np.isfinite(values)]
-                    if finite.size == 0:
+        ordered_dims = [*ensemble_dims, structure["time_dim"], structure["reach_dim"]]
+        qout_view = qout.transpose(*ordered_dims)
+        high_res_index = self._detect_high_res_member_index(qout_view=qout_view, ensemble_dims=ensemble_dims)
+
+        start = datetime.now(UTC)
+        rows_written = 0
+        logger.info(
+            "GEOGLOWS public Zarr artifact preparation started",
+            extra={
+                "run_id": run_id,
+                "source_zarr_path": source_zarr_path,
+                "total_rivid_count": int(len(reach_values)),
+                "chunking": summary["chunking"],
+                "detected_time_dim": structure["time_dim"],
+                "detected_reach_dim": structure["reach_dim"],
+                "detected_ensemble_dims": ensemble_dims,
+                "total_blocks": len(reach_windows),
+            },
+        )
+
+        supported_reaches = self._supported_reach_filter
+        for block_idx, (reach_start, reach_end) in enumerate(reach_windows, start=1):
+            block = qout_view.isel({structure["reach_dim"]: slice(reach_start, reach_end)})
+            values = np.asarray(block.values, dtype=np.float32)
+
+            if ensemble_dims:
+                ensemble_axes = tuple(range(len(ensemble_dims)))
+                mean_values = np.nanmean(values, axis=ensemble_axes)
+                median_values = np.nanmedian(values, axis=ensemble_axes)
+                p25_values = np.nanpercentile(values, 25, axis=ensemble_axes)
+                p75_values = np.nanpercentile(values, 75, axis=ensemble_axes)
+                max_values = np.nanmax(values, axis=ensemble_axes)
+                high_res_values = (
+                    None
+                    if high_res_index is None
+                    else np.asarray(np.take(values, indices=high_res_index, axis=0), dtype=np.float32)
+                )
+            else:
+                mean_values = median_values = p25_values = p75_values = max_values = values
+                high_res_values = values
+
+            block_reach_ids = np.asarray(reach_values[reach_start:reach_end]).astype(str)
+            reach_mask = np.ones(block_reach_ids.shape[0], dtype=bool)
+            if supported_reaches is not None:
+                reach_mask = np.fromiter((rid in supported_reaches for rid in block_reach_ids), dtype=bool)
+
+            selected_idx = np.flatnonzero(reach_mask)
+            if selected_idx.size == 0:
+                continue
+
+            block_mean = mean_values[:, selected_idx]
+            block_median = median_values[:, selected_idx]
+            block_p25 = p25_values[:, selected_idx]
+            block_p75 = p75_values[:, selected_idx]
+            block_max = max_values[:, selected_idx]
+            block_high_res = None if high_res_values is None else high_res_values[:, selected_idx]
+            selected_reaches = block_reach_ids[selected_idx]
+
+            for time_idx, forecast_time in enumerate(time_values):
+                forecast_time_utc = to_utc_datetime(forecast_time).isoformat()
+                for rid_pos, reach_id in enumerate(selected_reaches):
+                    mean_v = _safe_float(block_mean[time_idx, rid_pos])
+                    med_v = _safe_float(block_median[time_idx, rid_pos])
+                    p25_v = _safe_float(block_p25[time_idx, rid_pos])
+                    p75_v = _safe_float(block_p75[time_idx, rid_pos])
+                    max_v = _safe_float(block_max[time_idx, rid_pos])
+                    if all(v is None for v in (mean_v, med_v, p25_v, p75_v, max_v)):
                         continue
 
-                    high_res = self._extract_high_res_candidate(
-                        member_slice=member_slice,
-                        ensemble_dims=ensemble_dims,
-                    )
-
+                    rows_written += 1
                     yield {
-                        "provider_reach_id": str(reach_value),
-                        "forecast_time_utc": to_utc_datetime(forecast_time).isoformat(),
-                        "flow_mean_cms": float(np.mean(finite)),
-                        "flow_median_cms": float(np.median(finite)),
-                        "flow_p25_cms": float(np.percentile(finite, 25)),
-                        "flow_p75_cms": float(np.percentile(finite, 75)),
-                        "flow_max_cms": float(np.max(finite)),
+                        "provider_reach_id": str(reach_id),
+                        "forecast_time_utc": forecast_time_utc,
+                        "flow_mean_cms": mean_v,
+                        "flow_median_cms": med_v,
+                        "flow_p25_cms": p25_v,
+                        "flow_p75_cms": p75_v,
+                        "flow_max_cms": max_v,
                         "raw_payload_json": {
                             "source": "geoglows_public_forecast_zarr",
-                            "zarr_path": self.build_source_zarr_path(run_id),
+                            "zarr_path": source_zarr_path,
                             "forecast_variable": self.settings.geoglows_forecast_variable,
                             "forecast_dims": structure["dims"],
                             "time_dim": structure["time_dim"],
                             "reach_dim": structure["reach_dim"],
                             "ensemble_dims": ensemble_dims,
-                            "ensemble_count": int(finite.size),
-                            "high_res": high_res,
+                            "ensemble_count": int(np.prod([values.shape[i] for i in range(len(ensemble_dims))])) if ensemble_dims else 1,
+                            "high_res": None if block_high_res is None else _safe_float(block_high_res[time_idx, rid_pos]),
+                            "block_index": block_idx,
+                            "block_start": reach_start,
+                            "block_end": reach_end,
                         },
                     }
+
+            elapsed = (datetime.now(UTC) - start).total_seconds()
+            logger.info(
+                "GEOGLOWS public Zarr artifact preparation progress",
+                extra={
+                    "run_id": run_id,
+                    "source_zarr_path": source_zarr_path,
+                    "block_index": block_idx,
+                    "total_blocks": len(reach_windows),
+                    "rivid_start": reach_start,
+                    "rivid_end": reach_end,
+                    "rows_written_so_far": rows_written,
+                    "elapsed_seconds": round(elapsed, 2),
+                    "rows_per_second": round(rows_written / elapsed, 2) if elapsed > 0 else None,
+                },
+            )
+
+        logger.info(
+            "GEOGLOWS public Zarr artifact preparation completed",
+            extra={
+                "run_id": run_id,
+                "source_zarr_path": source_zarr_path,
+                "rows_written": rows_written,
+                "elapsed_seconds": round((datetime.now(UTC) - start).total_seconds(), 2),
+            },
+        )
 
     def _extract_high_res_candidate(self, member_slice: Any, ensemble_dims: list[str]) -> float | None:
         if not ensemble_dims:
@@ -374,6 +471,22 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                     if idx < flat.size and np.isfinite(flat[idx]):
                         return float(flat[idx])
         return None
+
+    def _detect_high_res_member_index(self, qout_view: Any, ensemble_dims: list[str]) -> int | None:
+        if not ensemble_dims:
+            return None
+        primary_dim = ensemble_dims[0]
+        coords = qout_view.coords.get(primary_dim)
+        if coords is None:
+            return None
+        labels = [str(x).lower() for x in np.asarray(coords.values).reshape(-1)]
+        for idx, label in enumerate(labels):
+            if any(token in label for token in ("high", "determin", "control", "member_0", "0")):
+                return idx
+        return 0 if labels else None
+
+    def set_supported_reach_filter(self, reach_ids: set[str] | None) -> None:
+        self._supported_reach_filter = None if reach_ids is None else set(reach_ids)
 
     def normalize_bulk_record(self, run_id: str, record: dict) -> BulkForecastArtifactRowSchema | None:
         reach_id = str(record.get("provider_reach_id", record.get("river_id", ""))).strip()

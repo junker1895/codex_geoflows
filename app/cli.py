@@ -12,6 +12,7 @@ from app.forecast.exceptions import (
 from app.forecast.jobs import discover_latest_run, ingest_forecast_run, ingest_return_periods, summarize_run
 from app.forecast.jobs import prepare_bulk_artifact
 from app.forecast.providers.geoglows import GeoglowsForecastProvider
+from app.forecast.providers.geoglows_forecast_zarr import describe_forecast_dataset, open_geoglows_public_forecast_run_zarr
 from app.forecast.providers.geoglows_return_periods import open_geoglows_public_return_periods_zarr
 from app.forecast.service import ForecastService
 
@@ -113,6 +114,41 @@ def cli_return_periods_zarr_open(
         typer.echo(f"selected method: {method}")
         typer.echo(f"dataset dims: {dict(ds.dims)}")
         typer.echo(f"dataset variables: {sorted(ds.data_vars.keys())}")
+
+    _safe_run(_inner)
+
+
+@cli.command("forecast-zarr-inspect")
+def cli_forecast_zarr_inspect(
+    run_id: str = typer.Option("latest", "--run-id"),
+    bucket: str | None = typer.Option(None, "--bucket"),
+    region: str | None = typer.Option(None, "--region"),
+    forecast_variable: str | None = typer.Option(None, "--variable"),
+) -> None:
+    def _inner() -> None:
+        import xarray as xr
+
+        service = _build_service()
+        settings = get_settings()
+        provider = service.providers["geoglows"]
+        resolved = service.resolve_requested_run_id("geoglows", run_id)
+
+        selected_bucket = bucket or settings.geoglows_forecast_bucket
+        selected_region = region or settings.geoglows_forecast_region
+        selected_variable = forecast_variable or settings.geoglows_forecast_variable
+
+        ds = open_geoglows_public_forecast_run_zarr(
+            xr=xr,
+            run_id=resolved.run_id,
+            bucket=selected_bucket,
+            region=selected_region,
+            use_anon=settings.geoglows_forecast_use_anon,
+            run_suffix=settings.geoglows_forecast_run_suffix,
+        )
+        summary = describe_forecast_dataset(ds, selected_variable)
+        summary["run_id"] = resolved.run_id
+        summary["source_zarr_path"] = provider.build_source_zarr_path(resolved.run_id)
+        typer.echo(json.dumps(summary, indent=2, default=str))
 
     _safe_run(_inner)
 
