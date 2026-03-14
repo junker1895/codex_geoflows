@@ -52,6 +52,27 @@ class ForecastArtifactStore:
                         f"Invalid bulk artifact row at line {line_number} in {path}: {exc}"
                     ) from exc
 
+
+    def count_rows(self, provider: str, run_id: str) -> int:
+        path = self.artifact_path(provider, run_id)
+        if not path.exists():
+            return 0
+
+        count = 0
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    count += 1
+        return count
+
+    def preview_rows(self, provider: str, run_id: str, limit: int = 5) -> list[dict]:
+        rows: list[dict] = []
+        for row in self.iter_rows(provider, run_id):
+            rows.append(row.model_dump(mode="json"))
+            if len(rows) >= limit:
+                break
+        return rows
+
     def exists(self, provider: str, run_id: str) -> bool:
         return self.artifact_path(provider, run_id).exists()
 

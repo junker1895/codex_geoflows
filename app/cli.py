@@ -1,3 +1,4 @@
+import json
 import typer
 
 from app.core.config import get_settings
@@ -182,6 +183,53 @@ def cli_summarize_run(
 
     _safe_run(_inner)
 
+
+
+
+@cli.command("inspect-run-artifact")
+def cli_inspect_run_artifact(
+    provider: str = typer.Option("geoglows", "--provider"),
+    run_id: str = typer.Option("latest", "--run-id"),
+    preview_limit: int = typer.Option(0, "--preview-limit", min=0, max=10),
+) -> None:
+    def _inner() -> None:
+        service = _build_service()
+        status = service.get_run_status(provider, run_id)
+        typer.echo(f"run_id: {status.run_id}")
+        typer.echo(f"artifact_exists: {status.artifact.exists}")
+        typer.echo(f"artifact_path: {status.artifact.path or ''}")
+        typer.echo(f"artifact_row_count: {status.artifact.row_count}")
+        if preview_limit > 0 and status.artifact.exists:
+            preview = service.artifacts.preview_rows(provider, status.run_id, limit=preview_limit)
+            typer.echo("artifact_preview:")
+            typer.echo(json.dumps(preview, indent=2))
+
+    _safe_run(_inner)
+
+
+@cli.command("run-status")
+def cli_run_status(
+    provider: str = typer.Option("geoglows", "--provider"),
+    run_id: str = typer.Option("latest", "--run-id"),
+) -> None:
+    def _inner() -> None:
+        service = _build_service()
+        status = service.get_run_status(provider, run_id)
+        typer.echo(f"provider: {status.provider}")
+        typer.echo(f"run_id: {status.run_id}")
+        typer.echo(f"current_status: {status.current_status}")
+        typer.echo(f"completed_stages: {', '.join(status.completed_stages) or '(none)'}")
+        typer.echo(f"missing_stages: {', '.join(status.missing_stages) or '(none)'}")
+        typer.echo(f"artifact: exists={status.artifact.exists} rows={status.artifact.row_count}")
+        typer.echo(f"timeseries_rows: {status.ingest.timeseries_row_count}")
+        typer.echo(f"summary_rows: {status.summarize.summary_row_count}")
+        typer.echo(f"map_rows: {status.map_row_count}")
+        typer.echo(f"map_ready: {'yes' if status.map_ready else 'no'}")
+        if status.failure_stage or status.failure_message:
+            typer.echo(f"failure_stage: {status.failure_stage or ''}")
+            typer.echo(f"failure_message: {status.failure_message or ''}")
+
+    _safe_run(_inner)
 
 @cli.command("smoke-geoglows")
 def cli_smoke_geoglows(

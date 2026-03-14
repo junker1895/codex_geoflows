@@ -14,6 +14,7 @@ from app.forecast.schemas import (
     ProviderHealthResponse,
     ReachDetailResponse,
     ReachSummarySchema,
+    RunReadinessStatusResponse,
 )
 
 router = APIRouter(prefix="/forecast", tags=["forecast"])
@@ -99,6 +100,16 @@ def forecast_health(provider: str, db: Session = Depends(get_db_session)) -> Pro
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+
+
+
+@router.get("/runs/{provider}/{run_id}/status", response_model=RunReadinessStatusResponse)
+def run_status(provider: str, run_id: str, db: Session = Depends(get_db_session)) -> RunReadinessStatusResponse:
+    service = get_forecast_service(db)
+    try:
+        return service.get_run_status(provider, run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 @router.get("/smoke/geoglows")
 def geoglows_smoke(

@@ -141,4 +141,53 @@ class ProviderHealthResponse(ORMBaseModel):
     latest_run_reach_count: int = 0
     latest_run_has_summaries: bool = False
     latest_run_artifact_exists: bool = False
+    latest_run_artifact_row_count: int = 0
     latest_run_map_ready: bool = False
+    latest_run_summary_count: int = 0
+    latest_run_map_count: int = 0
+    latest_run_status: str | None = None
+    latest_run_missing_stages: list[str] = Field(default_factory=list)
+    latest_run_failure_stage: str | None = None
+    latest_run_failure_message: str | None = None
+
+
+class RawAcquisitionStatus(ORMBaseModel):
+    attempted: bool = False
+    succeeded: bool = False
+    mode: str | None = None
+    source_uri: str | None = None
+    staged_raw_path: str | None = None
+
+
+class ArtifactStatus(ORMBaseModel):
+    exists: bool = False
+    path: str | None = None
+    row_count: int = 0
+
+
+class IngestStatus(ORMBaseModel):
+    completed: bool = False
+    timeseries_row_count: int = 0
+
+
+class SummarizeStatus(ORMBaseModel):
+    completed: bool = False
+    summary_row_count: int = 0
+
+
+class RunReadinessStatusResponse(ORMBaseModel):
+    provider: str
+    run_id: str
+    current_status: str
+    completed_stages: list[str] = Field(default_factory=list)
+    missing_stages: list[str] = Field(default_factory=list)
+    raw_acquisition: RawAcquisitionStatus
+    artifact: ArtifactStatus
+    ingest: IngestStatus
+    summarize: SummarizeStatus
+    map_row_count: int = 0
+    map_ready: bool = False
+    map_ready_definition: str
+    failure_stage: str | None = None
+    failure_message: str | None = None
+    last_updated_utc: datetime | None = None
