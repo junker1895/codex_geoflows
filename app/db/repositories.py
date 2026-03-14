@@ -183,6 +183,30 @@ class ForecastRepository:
             )
         ).scalar_one_or_none()
 
+
+    def get_map_summaries(
+        self,
+        provider: str,
+        run_id: str,
+        flagged_only: bool = False,
+        min_severity_score: float | None = None,
+        limit: int | None = None,
+    ) -> list[models.ForecastProviderReachSummary]:
+        stmt = select(models.ForecastProviderReachSummary).where(
+            and_(
+                models.ForecastProviderReachSummary.provider == provider,
+                models.ForecastProviderReachSummary.run_id == run_id,
+            )
+        )
+        if flagged_only:
+            stmt = stmt.where(models.ForecastProviderReachSummary.is_flagged.is_(True))
+        if min_severity_score is not None:
+            stmt = stmt.where(models.ForecastProviderReachSummary.severity_score >= min_severity_score)
+        stmt = stmt.order_by(desc(models.ForecastProviderReachSummary.severity_score))
+        if limit:
+            stmt = stmt.limit(limit)
+        return list(self.db.execute(stmt).scalars().all())
+
     def get_summaries(
         self,
         provider: str,
