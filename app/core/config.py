@@ -40,7 +40,12 @@ class Settings(BaseSettings):
         default=10000, alias="GEOGLOWS_RETURN_PERIOD_IMPORT_BATCH_SIZE"
     )
     geoglows_bulk_forecast_source: str | None = Field(default=None, alias="GEOGLOWS_BULK_FORECAST_SOURCE")
-    geoglows_bulk_acquisition_mode: str = Field(default="manual_artifact_only", alias="GEOGLOWS_BULK_ACQUISITION_MODE")
+    geoglows_forecast_bucket: str = Field(default="geoglows-v2-forecasts", alias="GEOGLOWS_FORECAST_BUCKET")
+    geoglows_forecast_region: str = Field(default="us-west-2", alias="GEOGLOWS_FORECAST_REGION")
+    geoglows_forecast_use_anon: bool = Field(default=True, alias="GEOGLOWS_FORECAST_USE_ANON")
+    geoglows_forecast_variable: str = Field(default="Qout", alias="GEOGLOWS_FORECAST_VARIABLE")
+    geoglows_forecast_run_suffix: str = Field(default=".zarr", alias="GEOGLOWS_FORECAST_RUN_SUFFIX")
+    geoglows_bulk_acquisition_mode: str = Field(default="aws_public_zarr", alias="GEOGLOWS_BULK_ACQUISITION_MODE")
     geoglows_bulk_raw_source_uri: str | None = Field(default=None, alias="GEOGLOWS_BULK_RAW_SOURCE_URI")
     geoglows_bulk_remote_auth_token: str | None = Field(default=None, alias="GEOGLOWS_BULK_REMOTE_AUTH_TOKEN")
     geoglows_bulk_staging_dir: str = Field(default="./data/geoglows_raw", alias="GEOGLOWS_BULK_STAGING_DIR")

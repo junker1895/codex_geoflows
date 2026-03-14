@@ -150,8 +150,7 @@ def test_geoglows_missing_api_surface_raises_runtime_error():
         provider.fetch_forecast_timeseries("2024010100", [VALID_RIVER_ID])
 
 
-def test_bulk_ingest_requires_configured_source():
+def test_bulk_ingest_default_mode_is_public_zarr():
     provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsRestForecastOnly())
-    assert provider.supports_bulk_acquisition() is False
-    with pytest.raises(ProviderBackendUnavailableError, match="bulk acquisition source is not configured"):
-        provider.acquire_bulk_raw_source("2024010100")
+    assert provider.bulk_acquisition_mode() == "aws_public_zarr"
+    assert provider.supports_bulk_acquisition() is True

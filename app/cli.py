@@ -225,6 +225,11 @@ def cli_run_status(
         typer.echo(f"summary_rows: {status.summarize.summary_row_count}")
         typer.echo(f"map_rows: {status.map_row_count}")
         typer.echo(f"map_ready: {'yes' if status.map_ready else 'no'}")
+        typer.echo(f"authoritative_latest_upstream_run_id: {status.authoritative_latest_upstream_run_id or ''}")
+        typer.echo(f"upstream_run_exists: {status.upstream_run_exists}")
+        typer.echo(f"acquisition_mode: {status.acquisition_mode or ''}")
+        typer.echo(f"source_bucket: {status.source_bucket or ''}")
+        typer.echo(f"source_zarr_path: {status.source_zarr_path or ''}")
         if status.failure_stage or status.failure_message:
             typer.echo(f"failure_stage: {status.failure_stage or ''}")
             typer.echo(f"failure_message: {status.failure_message or ''}")
