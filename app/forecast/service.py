@@ -243,7 +243,7 @@ class ForecastService:
         overwrite_raw: bool = False,
     ) -> tuple[str, int]:
         adapter = self._get_provider(provider)
-        resolved_run = self._resolve_run(provider, run_id)
+        resolved_run = self.resolve_requested_run_id(provider, run_id)
 
         if not adapter.supports_bulk_acquisition():
             raise ValueError(
@@ -415,7 +415,7 @@ class ForecastService:
         ingest_mode: Literal["rest_single", "bulk"] | None = None,
     ) -> int:
         adapter = self._get_provider(provider)
-        resolved_run = self._resolve_run(provider, run_id)
+        resolved_run = self.resolve_requested_run_id(provider, run_id)
         selected_mode = ingest_mode or ("rest_single" if reach_ids else "bulk")
 
         if selected_mode == "rest_single":
@@ -611,7 +611,7 @@ class ForecastService:
 
     def summarize_run(self, provider: str, run_id: str, reach_ids: list[str] | None = None) -> int:
         adapter = self._get_provider(provider)
-        resolved_run = self._resolve_run(provider, run_id)
+        resolved_run = self.resolve_requested_run_id(provider, run_id)
 
         try:
             if reach_ids is None:
@@ -662,15 +662,13 @@ class ForecastService:
             raise
 
     def get_latest_run(self, provider: str) -> ForecastRunSchema | None:
-        self._get_provider(provider)
-        row = self.repo.get_latest_run(provider)
-        return None if row is None else to_run_schema(row)
+        return self.resolve_requested_run_id(provider, "latest", require_existing=False)
 
     def get_reach_detail(
         self, provider: str, provider_reach_id: str, run_id: str | None = None, timeseries_limit: int | None = None
     ) -> ReachDetailResponse:
         self._get_provider(provider)
-        run = self._resolve_run(provider, run_id or "latest")
+        run = self.resolve_requested_run_id(provider, run_id or "latest")
         rp_row = self.repo.get_return_period(provider, provider_reach_id)
         ts_rows = self.repo.get_timeseries(provider, run.run_id, provider_reach_id, limit=timeseries_limit)
         summary = self.repo.get_summary(provider, run.run_id, provider_reach_id)
@@ -686,7 +684,7 @@ class ForecastService:
         self, provider: str, run_id: str | None = None, severity_min: int | None = None, limit: int | None = None
     ) -> list[ReachSummarySchema]:
         self._get_provider(provider)
-        run = self._resolve_run(provider, run_id or "latest", require_existing=False)
+        run = self.resolve_requested_run_id(provider, run_id or "latest", require_existing=False)
         if not run:
             return []
         rows = self.repo.get_summaries(
@@ -718,7 +716,7 @@ class ForecastService:
         no reach geometry/bounds table, so bbox filtering is not applied yet.
         """
         self._get_provider(provider)
-        run = self._resolve_run(provider, run_id or "latest", require_existing=False)
+        run = self.resolve_requested_run_id(provider, run_id or "latest", require_existing=False)
         if not run:
             return ForecastMapReachesResponse(
                 data=[],
@@ -917,7 +915,7 @@ class ForecastService:
 
     def get_run_status(self, provider: str, run_id: str) -> RunReadinessStatusResponse:
         self._get_provider(provider)
-        resolved = self._resolve_run(provider, run_id, require_existing=False)
+        resolved = self.resolve_requested_run_id(provider, run_id, require_existing=False)
         if not resolved:
             raise ValueError(f"Run '{run_id}' not found for provider '{provider}'")
         run_row = self.repo.get_run(provider, resolved.run_id)
@@ -925,16 +923,24 @@ class ForecastService:
             raise ValueError(f"Run '{resolved.run_id}' not found for provider '{provider}'")
         return self._run_status_from_row(provider, run_row)
 
+    def resolve_requested_run_id(
+        self, provider: str, requested_run_id: str, require_existing: bool = True
+    ) -> ForecastRunSchema | None:
+        return self._resolve_run(provider, requested_run_id, require_existing=require_existing)
+
     def _resolve_run(
         self, provider: str, run_id: str, require_existing: bool = True
     ) -> ForecastRunSchema | None:
         if run_id == "latest":
-            latest = self.repo.get_latest_run(provider)
-            if latest:
-                return to_run_schema(latest)
-            if require_existing:
+            # Always resolve authoritative upstream latest for providers that support it,
+            # and reconcile a local run row for the resolved run_id.
+            try:
                 return self.discover_latest_run(provider)
-            return None
+            except Exception:
+                if require_existing:
+                    raise
+                latest = self.repo.get_latest_run(provider)
+                return None if latest is None else to_run_schema(latest)
 
         run = self.repo.get_run(provider, run_id)
         if run:

@@ -460,3 +460,77 @@ def test_health_and_status_report_upstream_bulk_context(db_session):
     assert status.source_bucket == "geoglows-v2-forecasts"
     assert status.source_zarr_path == f"s3://geoglows-v2-forecasts/{run.run_id}.zarr"
     assert status.acquisition_mode == "aws_public_zarr"
+
+
+def test_latest_resolution_uses_authoritative_upstream_run_across_bulk_lifecycle(db_session, tmp_path):
+    class _AuthoritativeLatestProvider(FakeProvider):
+        def __init__(self):
+            super().__init__(supports_bulk=True)
+            self.acquire_run_ids = []
+            self.summarize_run_ids = []
+
+        def discover_latest_run(self):
+            return ForecastRunSchema(
+                provider="geoglows",
+                run_id="2026031400",
+                run_date_utc=datetime(2026, 3, 14, tzinfo=UTC),
+                issued_at_utc=datetime(2026, 3, 14, tzinfo=UTC),
+                source_type="geoglows_api",
+                ingest_status="pending",
+            )
+
+        def get_latest_upstream_run_id(self) -> str:
+            return "2026031400"
+
+        def upstream_run_exists(self, run_id: str):
+            return run_id == "2026031400"
+
+        def build_source_zarr_path(self, run_id: str) -> str:
+            return f"s3://geoglows-v2-forecasts/{run_id}.zarr"
+
+        def acquire_bulk_raw_source(self, run_id: str, overwrite: bool = False) -> str:
+            _ = overwrite
+            self.acquire_run_ids.append(run_id)
+            return f"fake://{run_id}"
+
+        def summarize_reach(self, run_id, reach_id, timeseries_rows, return_period_row):
+            self.summarize_run_ids.append(run_id)
+            return super().summarize_reach(run_id, reach_id, timeseries_rows, return_period_row)
+
+    provider = _AuthoritativeLatestProvider()
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": provider})
+
+    # Seed a synthetic stale run that should never win latest resolution.
+    service.repo.upsert_run(
+        ForecastRunSchema(
+            provider="geoglows",
+            run_id="2026031410",
+            run_date_utc=datetime(2026, 3, 14, 10, tzinfo=UTC),
+            issued_at_utc=datetime(2026, 3, 14, 10, tzinfo=UTC),
+            source_type="geoglows_api",
+            ingest_status="pending",
+        )
+    )
+    service.db.commit()
+
+    service.ingest_return_periods("geoglows", ["101", "102"])
+
+    artifact_path, artifact_count = service.prepare_bulk_artifact("geoglows", "latest")
+    ingest_count = service.ingest_forecast_run("geoglows", "latest", ingest_mode="bulk")
+    summary_count = service.summarize_run("geoglows", "latest")
+    status = service.get_run_status("geoglows", "latest")
+
+    assert "2026031400" in artifact_path
+    assert artifact_count > 0
+    assert ingest_count > 0
+    assert summary_count > 0
+    assert provider.acquire_run_ids and set(provider.acquire_run_ids) == {"2026031400"}
+    assert provider.summarize_run_ids and set(provider.summarize_run_ids) == {"2026031400"}
+    assert status.run_id == "2026031400"
+    assert status.authoritative_latest_upstream_run_id == "2026031400"
+    assert status.source_zarr_path == "s3://geoglows-v2-forecasts/2026031400.zarr"
+
+    latest = service.get_latest_run("geoglows")
+    assert latest is not None
+    assert latest.run_id == "2026031400"
