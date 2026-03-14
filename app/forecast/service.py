@@ -11,7 +11,11 @@ from app.forecast.providers.geoglows_return_periods import (
     load_geoglows_return_periods_from_path,
 )
 from app.forecast.schemas import (
+    ForecastMapFilters,
+    ForecastMapMeta,
+    ForecastMapReachesResponse,
     ForecastRunSchema,
+    MapReachSummarySchema,
     ProviderHealthResponse,
     ReachDetailResponse,
     ReachSummarySchema,
@@ -192,6 +196,65 @@ class ForecastService:
         )
         return [to_summary_schema(x) for x in rows]
 
+
+    def list_forecast_map_reaches(
+        self,
+        provider: str,
+        run_id: str | None = None,
+        bbox: str | None = None,
+        limit: int | None = None,
+        flagged_only: bool = False,
+        min_severity_score: float | None = None,
+    ) -> ForecastMapReachesResponse:
+        """
+        Map endpoint contract: serve lightweight forecast attributes only.
+
+        River geometry is intentionally excluded from this backend because geometry is
+        provided by frontend tiles (PMTiles/vector tiles). The detailed reach endpoint
+        remains the heavy view for timeseries and return-period payloads.
+
+        NOTE: bbox is accepted for forward compatibility; this repository currently has
+        no reach geometry/bounds table, so bbox filtering is not applied yet.
+        """
+        self._get_provider(provider)
+        run = self._resolve_run(provider, run_id or "latest", require_existing=False)
+        if not run:
+            return ForecastMapReachesResponse(
+                data=[],
+                meta=ForecastMapMeta(
+                    provider=provider,
+                    run_id="",
+                    count=0,
+                    filters=ForecastMapFilters(
+                        bbox=bbox,
+                        flagged_only=flagged_only,
+                        min_severity_score=min_severity_score,
+                    ),
+                ),
+            )
+
+        rows = self.repo.get_map_summaries(
+            provider=provider,
+            run_id=run.run_id,
+            flagged_only=flagged_only,
+            min_severity_score=min_severity_score,
+            limit=limit or self.settings.forecast_summary_default_limit,
+        )
+        data = [to_map_summary_schema(x) for x in rows]
+        return ForecastMapReachesResponse(
+            data=data,
+            meta=ForecastMapMeta(
+                provider=provider,
+                run_id=run.run_id,
+                count=len(data),
+                filters=ForecastMapFilters(
+                    bbox=bbox,
+                    flagged_only=flagged_only,
+                    min_severity_score=min_severity_score,
+                ),
+            ),
+        )
+
     def get_provider_health(self, provider: str) -> ProviderHealthResponse:
         adapter = self._get_provider(provider)
         latest = self.get_latest_run(provider)
@@ -255,3 +318,18 @@ def to_timeseries_schema(row: models.ForecastProviderReachTimeseries) -> Timeser
 
 def to_summary_schema(row: models.ForecastProviderReachSummary) -> ReachSummarySchema:
     return ReachSummarySchema.model_validate(row, from_attributes=True)
+
+
+def to_map_summary_schema(row: models.ForecastProviderReachSummary) -> MapReachSummarySchema:
+    return MapReachSummarySchema(
+        provider=row.provider,
+        run_id=row.run_id,
+        provider_reach_id=row.provider_reach_id,
+        peak_time_utc=row.peak_time_utc,
+        peak_mean_cms=row.peak_mean_cms,
+        peak_median_cms=row.peak_median_cms,
+        peak_max_cms=row.peak_max_cms,
+        return_period_band=row.return_period_band,
+        severity_score=row.severity_score,
+        is_flagged=row.is_flagged,
+    )
