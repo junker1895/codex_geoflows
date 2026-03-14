@@ -21,6 +21,7 @@ class Settings(BaseSettings):
         default_factory=lambda: ["geoglows"], alias="FORECAST_ENABLED_PROVIDERS"
     )
     forecast_summary_default_limit: int = Field(default=200, alias="FORECAST_SUMMARY_DEFAULT_LIMIT")
+    forecast_bulk_ingest_chunk_size: int = Field(default=250, alias="FORECAST_BULK_INGEST_CHUNK_SIZE")
     geoglows_enabled: bool = Field(default=True, alias="GEOGLOWS_ENABLED")
     geoglows_source_type: str = Field(default="geoglows_api", alias="GEOGLOWS_SOURCE_TYPE")
     geoglows_default_run_selector: str = Field(default="latest", alias="GEOGLOWS_DEFAULT_RUN_SELECTOR")
