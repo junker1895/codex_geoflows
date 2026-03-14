@@ -73,6 +73,33 @@ class ForecastService:
             raise ValueError(f"Provider '{provider}' is not enabled")
         return self.providers[provider]
 
+    def _latest_upstream_run_id(self, adapter: ForecastProviderAdapter) -> str | None:
+        fn = getattr(adapter, "get_latest_upstream_run_id", None)
+        if callable(fn):
+            try:
+                return fn()
+            except Exception:
+                return None
+        return None
+
+    def _upstream_run_exists(self, adapter: ForecastProviderAdapter, run_id: str) -> bool | None:
+        fn = getattr(adapter, "upstream_run_exists", None)
+        if callable(fn):
+            try:
+                return fn(run_id)
+            except Exception:
+                return None
+        return None
+
+    def _source_zarr_path(self, adapter: ForecastProviderAdapter, run_id: str) -> str | None:
+        fn = getattr(adapter, "build_source_zarr_path", None)
+        if callable(fn):
+            try:
+                return fn(run_id)
+            except Exception:
+                return None
+        return None
+
     def _run_ops_metadata(self, run_row: models.ForecastRun | None) -> dict[str, Any]:
         if run_row is None or not run_row.metadata_json:
             return {}
@@ -758,6 +785,9 @@ class ForecastService:
         local_return_periods_available = self.repo.has_return_periods(provider)
         latest_run_artifact_exists = bool(latest_status and latest_status.artifact.exists)
         latest_run_map_ready = bool(latest_status and latest_status.map_ready)
+        upstream_latest_run_id = self._latest_upstream_run_id(adapter)
+        latest_upstream_run_exists = self._upstream_run_exists(adapter, upstream_latest_run_id) if upstream_latest_run_id else None
+        latest_source_zarr_path = self._source_zarr_path(adapter, latest.run_id) if latest else None
 
         return ProviderHealthResponse(
             provider=provider,
@@ -785,6 +815,10 @@ class ForecastService:
             latest_run_map_ready=latest_run_map_ready,
             latest_run_failure_stage=None if latest_status is None else latest_status.failure_stage,
             latest_run_failure_message=None if latest_status is None else latest_status.failure_message,
+            authoritative_latest_upstream_run_id=upstream_latest_run_id,
+            latest_upstream_run_exists=latest_upstream_run_exists,
+            source_bucket=getattr(self.settings, "geoglows_forecast_bucket", None) if provider == "geoglows" else None,
+            source_zarr_path=latest_source_zarr_path,
         )
 
     def _parse_last_updated(self, value: Any) -> datetime | None:
@@ -855,6 +889,9 @@ class ForecastService:
         else:
             current_status = self.STAGE_DISCOVERED
 
+        authoritative_latest_upstream_run_id = self._latest_upstream_run_id(self._get_provider(provider))
+        source_zarr_path = self._source_zarr_path(self._get_provider(provider), run_row.run_id)
+
         return RunReadinessStatusResponse(
             provider=provider,
             run_id=run_row.run_id,
@@ -871,6 +908,11 @@ class ForecastService:
             failure_stage=ops.get("failure_stage"),
             failure_message=ops.get("failure_message"),
             last_updated_utc=self._parse_last_updated(ops.get("last_updated_utc")) or run_row.updated_at,
+            authoritative_latest_upstream_run_id=authoritative_latest_upstream_run_id,
+            upstream_run_exists=self._upstream_run_exists(self._get_provider(provider), run_row.run_id),
+            acquisition_mode=self._get_provider(provider).bulk_acquisition_mode(),
+            source_bucket=getattr(self.settings, "geoglows_forecast_bucket", None) if provider == "geoglows" else None,
+            source_zarr_path=source_zarr_path,
         )
 
     def get_run_status(self, provider: str, run_id: str) -> RunReadinessStatusResponse:

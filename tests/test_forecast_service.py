@@ -430,3 +430,33 @@ def test_run_status_tracks_missing_artifact_for_bulk_ingest_failure(db_session):
     assert "artifact_prepared" in status.missing_stages
     assert status.failure_stage == "ingested"
     assert status.failure_message is not None
+
+
+def test_health_and_status_report_upstream_bulk_context(db_session):
+    class _UpstreamAwareFakeProvider(FakeProvider):
+        def bulk_acquisition_mode(self) -> str:
+            return "aws_public_zarr"
+
+        def get_latest_upstream_run_id(self) -> str:
+            return "2026031400"
+
+        def upstream_run_exists(self, run_id: str):
+            return run_id == "2024010100"
+
+        def build_source_zarr_path(self, run_id: str) -> str:
+            return f"s3://geoglows-v2-forecasts/{run_id}.zarr"
+
+    settings = Settings()
+    service = ForecastService(db_session, settings, {"geoglows": _UpstreamAwareFakeProvider()})
+    run = service.discover_latest_run("geoglows")
+
+    health = service.get_provider_health("geoglows")
+    status = service.get_run_status("geoglows", run.run_id)
+
+    assert health.authoritative_latest_upstream_run_id == "2026031400"
+    assert health.source_bucket == "geoglows-v2-forecasts"
+    assert health.source_zarr_path == f"s3://geoglows-v2-forecasts/{run.run_id}.zarr"
+    assert status.authoritative_latest_upstream_run_id == "2026031400"
+    assert status.source_bucket == "geoglows-v2-forecasts"
+    assert status.source_zarr_path == f"s3://geoglows-v2-forecasts/{run.run_id}.zarr"
+    assert status.acquisition_mode == "aws_public_zarr"

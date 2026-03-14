@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +9,7 @@ import shutil
 
 import json
 import math
+import numpy as np
 import pandas as pd
 
 from app.core.config import Settings
@@ -18,6 +19,14 @@ from app.forecast.exceptions import (
     ForecastValidationError,
     ProviderBackendUnavailableError,
     ProviderOperationalError,
+)
+from app.forecast.providers.geoglows_forecast_zarr import (
+    build_geoglows_forecast_run_zarr_uri,
+    detect_forecast_structure,
+    discover_latest_forecast_run_id,
+    open_geoglows_public_forecast_run_zarr,
+    run_exists,
+    to_utc_datetime,
 )
 from app.forecast.schemas import (
     BulkForecastArtifactRowSchema,
@@ -46,8 +55,8 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         return "geoglows"
 
     def discover_latest_run(self) -> ForecastRunSchema:
-        run_date = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        run_id = run_date.strftime("%Y%m%d%H")
+        run_id = self.get_latest_upstream_run_id()
+        run_date = datetime.strptime(run_id, "%Y%m%d%H").replace(tzinfo=UTC)
         return ForecastRunSchema(
             provider=self.get_provider_name(),
             run_id=run_id,
@@ -55,8 +64,52 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             issued_at_utc=run_date,
             source_type=self.settings.geoglows_source_type,
             ingest_status="pending",
-            metadata_json={"selector": self.settings.geoglows_default_run_selector},
+            metadata_json={
+                "selector": self.settings.geoglows_default_run_selector,
+                "upstream": {
+                    "bucket": self.settings.geoglows_forecast_bucket,
+                    "region": self.settings.geoglows_forecast_region,
+                    "source_zarr_path": self.build_source_zarr_path(run_id),
+                },
+            },
         )
+
+    def get_latest_upstream_run_id(self) -> str:
+        if self.bulk_acquisition_mode() == "aws_public_zarr":
+            try:
+                return discover_latest_forecast_run_id(
+                    s3fs_module=self._import_s3fs(),
+                    bucket=self.settings.geoglows_forecast_bucket,
+                    region=self.settings.geoglows_forecast_region,
+                    use_anon=self.settings.geoglows_forecast_use_anon,
+                    run_suffix=self.settings.geoglows_forecast_run_suffix,
+                )
+            except Exception:
+                pass
+        # fallback only when discovery is unavailable
+        return datetime.now(UTC).strftime("%Y%m%d") + "00"
+
+    def build_source_zarr_path(self, run_id: str) -> str:
+        return build_geoglows_forecast_run_zarr_uri(
+            bucket=self.settings.geoglows_forecast_bucket,
+            run_id=run_id,
+            run_suffix=self.settings.geoglows_forecast_run_suffix,
+        )
+
+    def upstream_run_exists(self, run_id: str) -> bool | None:
+        if self.bulk_acquisition_mode() != "aws_public_zarr":
+            return None
+        try:
+            return run_exists(
+                s3fs_module=self._import_s3fs(),
+                bucket=self.settings.geoglows_forecast_bucket,
+                region=self.settings.geoglows_forecast_region,
+                use_anon=self.settings.geoglows_forecast_use_anon,
+                run_id=run_id,
+                run_suffix=self.settings.geoglows_forecast_run_suffix,
+            )
+        except Exception:
+            return None
 
     def fetch_return_periods(self, reach_ids: list[str | int]) -> list[ReturnPeriodSchema]:
         normalized_ids = _validate_geoglows_reach_ids(reach_ids)
@@ -99,9 +152,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             )
         return output
 
-    def fetch_forecast_timeseries(
-        self, run_id: str, reach_ids: list[str | int]
-    ) -> list[TimeseriesPointSchema]:
+    def fetch_forecast_timeseries(self, run_id: str, reach_ids: list[str | int]) -> list[TimeseriesPointSchema]:
         normalized_ids = _validate_geoglows_reach_ids(reach_ids)
         source = self.settings.geoglows_data_source.lower()
         if source not in {"rest", "aws"}:
@@ -153,14 +204,14 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
 
     def supports_bulk_acquisition(self) -> bool:
         mode = self.bulk_acquisition_mode()
+        if mode == "aws_public_zarr":
+            return True
         if mode == "manual_artifact_only":
             return False
         if mode == "local_file":
             source = self._bulk_raw_source_uri()
             return bool(source and Path(source).exists())
-        if mode == "remote_http":
-            return bool(self.settings.geoglows_bulk_raw_source_uri)
-        if mode == "remote_object_store":
+        if mode in {"remote_http", "remote_object_store"}:
             return bool(self.settings.geoglows_bulk_raw_source_uri)
         return False
 
@@ -172,6 +223,9 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         source = self._bulk_raw_source_uri()
         if mode == "manual_artifact_only":
             return None
+        if mode == "aws_public_zarr":
+            latest = self.get_latest_upstream_run_id()
+            return self.upstream_run_exists(latest)
         if not source:
             return False
         if mode == "local_file":
@@ -189,6 +243,15 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             raise ProviderBackendUnavailableError(
                 "GEOGLOWS acquisition mode is manual_artifact_only. Provide normalized artifact directly and skip acquisition."
             )
+
+        if mode == "aws_public_zarr":
+            exists = self.upstream_run_exists(run_id)
+            if exists is False:
+                raise ProviderOperationalError(
+                    f"GEOGLOWS upstream run does not exist: {self.build_source_zarr_path(run_id)}"
+                )
+            return self.build_source_zarr_path(run_id)
+
         if not source:
             raise ProviderBackendUnavailableError("GEOGLOWS_BULK_RAW_SOURCE_URI must be configured for acquisition modes.")
 
@@ -206,19 +269,19 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         elif mode == "remote_http":
             self._download_http_source(run_id=run_id, source=source, destination=destination)
         elif mode == "remote_object_store":
-            raise ProviderOperationalError(
-                "GEOGLOWS remote_object_store acquisition mode is declared but not yet implemented in this runtime. "
-                "Use local_file/remote_http or pre-stage data and switch to local_file/manual_artifact_only."
-            )
+            raise ProviderOperationalError("GEOGLOWS remote_object_store is not implemented. Use aws_public_zarr instead.")
         else:
             raise ProviderOperationalError(
-                f"Unsupported GEOGLOWS acquisition mode '{mode}'. Supported: manual_artifact_only, local_file, remote_http, remote_object_store"
+                "Unsupported GEOGLOWS acquisition mode. Supported: aws_public_zarr, manual_artifact_only, local_file, remote_http"
             )
 
         return str(destination)
 
     def iter_raw_bulk_records(self, run_id: str, staged_raw_path: str) -> Iterator[dict]:
-        _ = run_id
+        if self.bulk_acquisition_mode() == "aws_public_zarr":
+            yield from self._iter_records_from_public_zarr(run_id)
+            return
+
         source = Path(staged_raw_path)
         if not source.exists():
             raise ProviderOperationalError(f"Staged GEOGLOWS raw source does not exist: {staged_raw_path}")
@@ -237,6 +300,81 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                 item["_line_number"] = line_number
                 yield item
 
+    def _iter_records_from_public_zarr(self, run_id: str) -> Iterator[dict]:
+        xr = self._import_xarray()
+        ds = open_geoglows_public_forecast_run_zarr(
+            xr=xr,
+            run_id=run_id,
+            bucket=self.settings.geoglows_forecast_bucket,
+            region=self.settings.geoglows_forecast_region,
+            use_anon=self.settings.geoglows_forecast_use_anon,
+            run_suffix=self.settings.geoglows_forecast_run_suffix,
+        )
+        structure = detect_forecast_structure(ds, self.settings.geoglows_forecast_variable)
+
+        qout = ds[self.settings.geoglows_forecast_variable]
+        time_values = ds[structure["time_dim"]].values
+        reach_values = ds[structure["reach_dim"]].values
+        ensemble_dims = structure["ensemble_dims"]
+
+        chunk_size = max(1, self.settings.forecast_bulk_artifact_write_batch_size)
+        for reach_start in range(0, len(reach_values), chunk_size):
+            reach_end = min(reach_start + chunk_size, len(reach_values))
+            chunk = qout.isel({structure["reach_dim"]: slice(reach_start, reach_end)})
+
+            for local_reach_index, reach_value in enumerate(reach_values[reach_start:reach_end]):
+                reach_slice = chunk.isel({structure["reach_dim"]: local_reach_index})
+                for time_index, forecast_time in enumerate(time_values):
+                    member_slice = reach_slice.isel({structure["time_dim"]: time_index})
+                    values = np.asarray(member_slice.values, dtype=float).reshape(-1)
+                    finite = values[np.isfinite(values)]
+                    if finite.size == 0:
+                        continue
+
+                    high_res = self._extract_high_res_candidate(
+                        member_slice=member_slice,
+                        ensemble_dims=ensemble_dims,
+                    )
+
+                    yield {
+                        "provider_reach_id": str(reach_value),
+                        "forecast_time_utc": to_utc_datetime(forecast_time).isoformat(),
+                        "flow_mean_cms": float(np.mean(finite)),
+                        "flow_median_cms": float(np.median(finite)),
+                        "flow_p25_cms": float(np.percentile(finite, 25)),
+                        "flow_p75_cms": float(np.percentile(finite, 75)),
+                        "flow_max_cms": float(np.max(finite)),
+                        "raw_payload_json": {
+                            "source": "geoglows_public_forecast_zarr",
+                            "zarr_path": self.build_source_zarr_path(run_id),
+                            "forecast_variable": self.settings.geoglows_forecast_variable,
+                            "forecast_dims": structure["dims"],
+                            "time_dim": structure["time_dim"],
+                            "reach_dim": structure["reach_dim"],
+                            "ensemble_dims": ensemble_dims,
+                            "ensemble_count": int(finite.size),
+                            "high_res": high_res,
+                        },
+                    }
+
+    def _extract_high_res_candidate(self, member_slice: Any, ensemble_dims: list[str]) -> float | None:
+        if not ensemble_dims:
+            values = np.asarray(member_slice.values, dtype=float).reshape(-1)
+            finite = values[np.isfinite(values)]
+            return None if finite.size == 0 else float(finite[0])
+
+        for dim in ensemble_dims:
+            coords = member_slice.coords.get(dim)
+            if coords is None:
+                continue
+            labels = [str(x).lower() for x in np.asarray(coords.values).reshape(-1)]
+            for idx, label in enumerate(labels):
+                if any(token in label for token in ("high", "determin", "control", "member_0", "0")):
+                    flat = np.asarray(member_slice.values, dtype=float).reshape(-1)
+                    if idx < flat.size and np.isfinite(flat[idx]):
+                        return float(flat[idx])
+        return None
+
     def normalize_bulk_record(self, run_id: str, record: dict) -> BulkForecastArtifactRowSchema | None:
         reach_id = str(record.get("provider_reach_id", record.get("river_id", ""))).strip()
         if not reach_id:
@@ -245,10 +383,16 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         dt = record.get("forecast_time_utc") or record.get("time")
         if dt is None:
             return None
-        if isinstance(dt, datetime):
-            forecast_time = dt
+        forecast_time = dt if isinstance(dt, datetime) else datetime.fromisoformat(str(dt)).replace(tzinfo=UTC)
+
+        if isinstance(record.get("raw_payload_json"), dict):
+            payload = dict(record["raw_payload_json"])
         else:
-            forecast_time = datetime.fromisoformat(str(dt)).replace(tzinfo=UTC)
+            payload = {
+                "source": "geoglows_raw_bulk",
+                "line_number": record.get("_line_number"),
+                "raw_record": record,
+            }
 
         return BulkForecastArtifactRowSchema(
             provider=self.get_provider_name(),
@@ -260,14 +404,12 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             flow_p25_cms=_safe_float(record.get("flow_25p", record.get("flow_p25_cms"))),
             flow_p75_cms=_safe_float(record.get("flow_75p", record.get("flow_p75_cms"))),
             flow_max_cms=_safe_float(record.get("flow_max", record.get("flow_max_cms"))),
-            raw_payload_json={
-                "source": "geoglows_raw_bulk",
-                "line_number": record.get("_line_number"),
-                "raw_record": record,
-            },
+            raw_payload_json=payload,
         )
 
     def cleanup_old_raw_staging(self) -> int:
+        if self.bulk_acquisition_mode() == "aws_public_zarr":
+            return 0
         keep_latest = self.settings.geoglows_bulk_raw_retention_runs
         if keep_latest < 1:
             return 0
@@ -359,6 +501,20 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             is_flagged=classification.is_flagged,
             metadata_json={"points": len(timeseries_rows)},
         )
+
+    def _import_xarray(self):
+        try:
+            import xarray as xr
+        except ModuleNotFoundError as exc:
+            raise ProviderOperationalError("xarray is required for GEOGLOWS forecast Zarr ingestion.") from exc
+        return xr
+
+    def _import_s3fs(self):
+        try:
+            import s3fs
+        except ModuleNotFoundError as exc:
+            raise ProviderOperationalError("s3fs is required for GEOGLOWS public S3 run discovery.") from exc
+        return s3fs
 
     def _get_geoglows(self) -> Any:
         if self._geoglows is not None:
