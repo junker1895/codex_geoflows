@@ -235,3 +235,29 @@ def test_describe_forecast_dataset_reports_dims_and_chunking():
     assert summary["dims"] == {"river_id": 2, "time": 2, "ensemble": 3}
     assert summary["chunking"]["river_id"] == [1, 1]
     assert summary["detected_time_dim"] == "time"
+
+def test_provider_bulk_summary_rows_are_one_per_reach(monkeypatch):
+    settings = Settings()
+    provider = GeoglowsForecastProvider(settings)
+    monkeypatch.setattr(provider, "_import_xarray", lambda: _FakeXRThreeTimes)
+    provider.set_supported_reach_filter({"760021611", "760021612"})
+
+    rows = list(provider.iter_bulk_summary_records("2026031400"))
+    provider.set_supported_reach_filter(None)
+
+    assert len(rows) == 2
+    assert {r["provider_reach_id"] for r in rows} == {"760021611", "760021612"}
+    assert all(r["peak_max_cms"] is not None for r in rows)
+
+
+def test_provider_can_extract_selected_reach_detail_from_public_zarr(monkeypatch):
+    settings = Settings()
+    provider = GeoglowsForecastProvider(settings)
+    monkeypatch.setattr(provider, "_import_xarray", lambda: _FakeXRThreeTimes)
+
+    ts_rows = provider.fetch_reach_detail_from_public_zarr("2026031400", "760021611")
+
+    assert len(ts_rows) == 3
+    assert ts_rows[0].provider_reach_id == "760021611"
+    assert ts_rows[0].flow_mean_cms is not None
+    assert "high_res" in (ts_rows[0].raw_payload_json or {})

@@ -178,6 +178,40 @@ def cli_prepare_bulk_artifact(
 
     _safe_run(_inner)
 
+
+@cli.command("prepare-bulk-summaries")
+def cli_prepare_bulk_summaries(
+    provider: str = typer.Option("geoglows", "--provider"),
+    run_id: str = typer.Option("latest", "--run-id"),
+    filter_to_supported_reaches: bool = typer.Option(True, "--filter-supported/--no-filter-supported"),
+    if_present: str = typer.Option("skip", "--if-present", help="Behavior if summary artifact exists: skip|overwrite|error"),
+) -> None:
+    def _inner() -> None:
+        service = _build_service()
+        artifact_path, count = service.prepare_bulk_summaries(
+            provider=provider,
+            run_id=run_id,
+            filter_to_supported_reaches=filter_to_supported_reaches,
+            if_present=if_present,
+        )
+        typer.echo(f"prepared summary bulk artifact: {artifact_path} (rows={count})")
+
+    _safe_run(_inner)
+
+
+@cli.command("ingest-forecast-summaries")
+def cli_ingest_forecast_summaries(
+    provider: str = typer.Option("geoglows", "--provider"),
+    run_id: str = typer.Option("latest", "--run-id"),
+) -> None:
+    def _inner() -> None:
+        service = _build_service()
+        count = service.ingest_forecast_summaries(provider=provider, run_id=run_id)
+        typer.echo(f"upserted summary rows: {count}")
+
+    _safe_run(_inner)
+
+
 @cli.command("ingest-forecast-run")
 def cli_ingest_forecast_run(
     provider: str = typer.Option("geoglows", "--provider"),

@@ -100,6 +100,34 @@ class FakeProvider:
     def cleanup_old_raw_staging(self) -> int:
         return 0
 
+
+    def iter_bulk_summary_records(self, run_id: str):
+        _ = run_id
+        for reach_id in ["101", "102", "103", "104", "105", "100"]:
+            yield {
+                "provider_reach_id": reach_id,
+                "peak_time_utc": datetime(2024, 1, 1, 2, tzinfo=UTC).isoformat(),
+                "peak_mean_cms": 22.0,
+                "peak_median_cms": 22.0,
+                "peak_max_cms": 22.0,
+                "raw_payload_json": {"source": "fake_summary"},
+            }
+
+    def normalize_bulk_summary_record(self, run_id, record):
+        from datetime import datetime
+        from app.forecast.schemas import BulkForecastSummaryArtifactRowSchema
+
+        return BulkForecastSummaryArtifactRowSchema(
+            provider="geoglows",
+            run_id=run_id,
+            provider_reach_id=str(record["provider_reach_id"]),
+            peak_time_utc=datetime.fromisoformat(record["peak_time_utc"]),
+            peak_mean_cms=float(record.get("peak_mean_cms", 0) or 0),
+            peak_median_cms=float(record.get("peak_median_cms", 0) or 0),
+            peak_max_cms=float(record.get("peak_max_cms", 0) or 0),
+            raw_payload_json=dict(record.get("raw_payload_json") or {}),
+        )
+
     def summarize_reach(self, run_id, reach_id, timeseries_rows, return_period_row):
         from app.forecast.classify import classify_peak_flow
         from app.forecast.schemas import ReachSummarySchema

@@ -583,3 +583,78 @@ def test_discover_latest_run_does_not_reset_existing_stage_progress(db_session):
     assert after.map_ready is True
     assert after.completed_stages == before.completed_stages
     assert after.missing_stages == []
+
+def test_prepare_bulk_summaries_and_ingest_use_one_row_per_reach(db_session, tmp_path):
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100", "101", "102", "103", "104", "105"])
+
+    artifact_path, count = service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+    ingested = service.ingest_forecast_summaries("geoglows", run.run_id)
+
+    assert artifact_path.endswith("_summaries.jsonl")
+    assert count == 6
+    assert ingested == 6
+    assert service.repo.count_summaries_for_run("geoglows", run.run_id) == 6
+    assert service.repo.count_timeseries_rows_for_run("geoglows", run.run_id) == 0
+
+
+def test_prepare_bulk_summaries_classifies_from_return_periods(db_session, tmp_path):
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100"])
+
+    service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+    service.ingest_forecast_summaries("geoglows", run.run_id)
+    summary = service.repo.get_summary("geoglows", run.run_id, "100")
+
+    assert summary is not None
+    # FakeProvider emits peak=22.0 and fake RP thresholds are 10,20,30...
+    assert summary.return_period_band == "5"
+    assert summary.severity_score == 2
+    assert summary.is_flagged is True
+
+
+def test_reach_detail_falls_back_to_provider_on_demand_when_no_timeseries(db_session):
+    class _DetailFallbackProvider(FakeProvider):
+        def fetch_reach_detail_from_public_zarr(self, run_id: str, provider_reach_id: str, timeseries_limit: int | None = None):
+            from app.forecast.schemas import TimeseriesPointSchema
+
+            rows = [
+                TimeseriesPointSchema(
+                    provider="geoglows",
+                    run_id=run_id,
+                    provider_reach_id=provider_reach_id,
+                    forecast_time_utc=datetime(2024, 1, 1, i, tzinfo=UTC),
+                    flow_mean_cms=10 + i,
+                    flow_median_cms=10 + i,
+                    flow_p25_cms=9 + i,
+                    flow_p75_cms=11 + i,
+                    flow_max_cms=12 + i,
+                    raw_payload_json={"source": "geoglows_public_forecast_zarr", "high_res": 8 + i},
+                )
+                for i in range(3)
+            ]
+            return rows if timeseries_limit is None else rows[:timeseries_limit]
+
+    service = ForecastService(db_session, Settings(), {"geoglows": _DetailFallbackProvider()})
+    run = service.discover_latest_run("geoglows")
+    detail = service.get_reach_detail("geoglows", "100", run_id=run.run_id, timeseries_limit=2)
+
+    assert len(detail.timeseries) == 2
+    assert detail.timeseries[0].raw_payload_json["source"] == "geoglows_public_forecast_zarr"
+
+
+def test_run_status_map_ready_depends_on_summary_rows(db_session, tmp_path):
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100"])
+    service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+    service.ingest_forecast_summaries("geoglows", run.run_id)
+
+    status = service.get_run_status("geoglows", run.run_id)
+    assert status.map_ready is True
+    assert status.ingest.timeseries_row_count == 0
