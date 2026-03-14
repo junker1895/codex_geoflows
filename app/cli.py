@@ -9,6 +9,7 @@ from app.forecast.exceptions import (
     ProviderOperationalError,
 )
 from app.forecast.jobs import discover_latest_run, ingest_forecast_run, ingest_return_periods, summarize_run
+from app.forecast.jobs import prepare_bulk_artifact
 from app.forecast.providers.geoglows import GeoglowsForecastProvider
 from app.forecast.providers.geoglows_return_periods import open_geoglows_public_return_periods_zarr
 from app.forecast.service import ForecastService
@@ -111,6 +112,26 @@ def cli_return_periods_zarr_open(
         typer.echo(f"selected method: {method}")
         typer.echo(f"dataset dims: {dict(ds.dims)}")
         typer.echo(f"dataset variables: {sorted(ds.data_vars.keys())}")
+
+    _safe_run(_inner)
+
+
+
+@cli.command("prepare-bulk-artifact")
+def cli_prepare_bulk_artifact(
+    provider: str = typer.Option("geoglows", "--provider"),
+    run_id: str = typer.Option("latest", "--run-id"),
+    filter_to_supported_reaches: bool = typer.Option(True, "--filter-supported/--no-filter-supported"),
+) -> None:
+    def _inner() -> None:
+        service = _build_service()
+        artifact_path, count = prepare_bulk_artifact.run(
+            service,
+            provider=provider,
+            run_id=run_id,
+            filter_to_supported_reaches=filter_to_supported_reaches,
+        )
+        typer.echo(f"prepared bulk artifact: {artifact_path} (rows={count})")
 
     _safe_run(_inner)
 

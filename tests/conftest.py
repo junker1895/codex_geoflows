@@ -58,18 +58,32 @@ class FakeProvider:
         return rows
 
 
-    def supports_bulk_forecast_ingest(self) -> bool:
+    def supports_bulk_acquisition(self) -> bool:
         return self._supports_bulk
 
-    def iter_bulk_forecast_timeseries(self, run_id, supported_reach_ids, batch_size):
-        reach_batch = []
-        for reach_id in supported_reach_ids:
-            reach_batch.append(reach_id)
-            if len(reach_batch) >= batch_size:
-                yield self.fetch_forecast_timeseries(run_id, reach_batch)
-                reach_batch = []
-        if reach_batch:
-            yield self.fetch_forecast_timeseries(run_id, reach_batch)
+    def iter_acquired_bulk_records(self, run_id):
+        for reach_id in ["101", "102", "103", "104", "105", "100"]:
+            for i, flow in enumerate([5.0, 12.0, 22.0]):
+                yield {
+                    "provider_reach_id": reach_id,
+                    "forecast_time_utc": datetime(2024, 1, 1, i, tzinfo=UTC).isoformat(),
+                    "flow_max": flow,
+                    "flow_mean_cms": flow,
+                }
+
+    def normalize_bulk_record(self, run_id, record):
+        from datetime import datetime
+        from app.forecast.schemas import BulkForecastArtifactRowSchema
+
+        return BulkForecastArtifactRowSchema(
+            provider="geoglows",
+            run_id=run_id,
+            provider_reach_id=str(record["provider_reach_id"]),
+            forecast_time_utc=datetime.fromisoformat(record["forecast_time_utc"]),
+            flow_mean_cms=float(record.get("flow_mean_cms", 0) or 0),
+            flow_max_cms=float(record.get("flow_max", 0) or 0),
+            raw_payload_json={"source": "fake"},
+        )
 
     def summarize_reach(self, run_id, reach_id, timeseries_rows, return_period_row):
         from app.forecast.classify import classify_peak_flow

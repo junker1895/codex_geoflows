@@ -90,3 +90,29 @@ def test_cli_ingest_forecast_run_rest_single_requires_reach_ids():
     result = runner.invoke(cli_mod.cli, ["ingest-forecast-run", "--mode", "rest_single"])
     assert result.exit_code != 0
     assert "requires at least one --reach-id" in result.stdout
+
+
+def test_cli_prepare_bulk_artifact(monkeypatch):
+    calls = {}
+
+    def _fake_build_service():
+        return _StubService()
+
+    def _fake_prepare(service, provider, run_id, filter_to_supported_reaches=True):
+        calls["provider"] = provider
+        calls["run_id"] = run_id
+        calls["filter"] = filter_to_supported_reaches
+        return "/tmp/a.jsonl", 3
+
+    monkeypatch.setattr(cli_mod, "_build_service", _fake_build_service)
+    monkeypatch.setattr(cli_mod.prepare_bulk_artifact, "run", _fake_prepare)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_mod.cli,
+        ["prepare-bulk-artifact", "--provider", "geoglows", "--run-id", "latest", "--filter-supported"],
+    )
+
+    assert result.exit_code == 0
+    assert "prepared bulk artifact" in result.stdout
+    assert calls["provider"] == "geoglows"

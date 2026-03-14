@@ -8,12 +8,14 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.db import models
 from app.db.repositories import ForecastRepository
+from app.forecast.artifacts import ForecastArtifactStore
 from app.forecast.base import ForecastProviderAdapter
 from app.forecast.providers.geoglows_return_periods import (
     iter_geoglows_return_periods_from_zarr,
     load_geoglows_return_periods_from_path,
 )
 from app.forecast.schemas import (
+    BulkForecastArtifactRowSchema,
     ForecastMapFilters,
     ForecastMapMeta,
     ForecastMapReachesResponse,
@@ -36,6 +38,7 @@ class ForecastService:
         self.settings = settings
         self.repo = ForecastRepository(db)
         self.providers = providers
+        self.artifacts = ForecastArtifactStore(settings.forecast_bulk_artifact_dir)
 
     def list_providers(self) -> list[str]:
         return sorted(self.providers.keys())
@@ -120,6 +123,69 @@ class ForecastService:
         )
         return total_upserted
 
+    def prepare_bulk_artifact(
+        self,
+        provider: str,
+        run_id: str,
+        filter_to_supported_reaches: bool = True,
+    ) -> tuple[str, int]:
+        adapter = self._get_provider(provider)
+        resolved_run = self._resolve_run(provider, run_id)
+
+        if not adapter.supports_bulk_acquisition():
+            raise ValueError(
+                "Bulk artifact preparation requires provider bulk acquisition configuration. "
+                "Configure the provider bulk source before running prepare-bulk-artifact."
+            )
+
+        supported_reaches: set[str] | None = None
+        if filter_to_supported_reaches:
+            supported_reaches = set(self.repo.iter_supported_reach_ids(provider, as_chunks=False))
+            if not supported_reaches:
+                raise ValueError(
+                    f"No supported reaches found for provider '{provider}'. "
+                    "Import return periods first to establish supported map reaches."
+                )
+
+        logger.info(
+            "starting bulk artifact preparation",
+            extra={
+                "provider": provider,
+                "run_id": resolved_run.run_id,
+                "filter_to_supported_reaches": filter_to_supported_reaches,
+                "supported_reach_count": 0 if supported_reaches is None else len(supported_reaches),
+                "write_batch_size": self.settings.forecast_bulk_artifact_write_batch_size,
+            },
+        )
+
+        normalized_count = 0
+
+        def _normalized_rows():
+            nonlocal normalized_count
+            for record in adapter.iter_acquired_bulk_records(resolved_run.run_id):
+                row = adapter.normalize_bulk_record(resolved_run.run_id, record)
+                if row is None:
+                    continue
+                if supported_reaches is not None and row.provider_reach_id not in supported_reaches:
+                    continue
+                normalized_count += 1
+                yield row
+
+        artifact_path, _ = self.artifacts.write_rows(provider, resolved_run.run_id, _normalized_rows())
+        removed = self.artifacts.cleanup_old_runs(provider, keep_latest=self.settings.forecast_bulk_artifact_retention_runs)
+
+        logger.info(
+            "completed bulk artifact preparation",
+            extra={
+                "provider": provider,
+                "run_id": resolved_run.run_id,
+                "artifact_path": str(artifact_path),
+                "rows_written": normalized_count,
+                "removed_old_artifacts": removed,
+            },
+        )
+        return str(artifact_path), normalized_count
+
     def ingest_forecast_run(
         self,
         provider: str,
@@ -180,18 +246,19 @@ class ForecastService:
         return rows_written
 
     def _ingest_via_bulk(self, adapter: ForecastProviderAdapter, provider: str, run_id: str) -> int:
-        if not adapter.supports_bulk_forecast_ingest():
-            raise ValueError(
-                "Bulk ingest was requested, but no provider bulk forecast source is configured. "
-                "REST forecast_stats ingest is intentionally limited to single/small batches and is not used "
-                "for full-network runs due to upstream throttling."
-            )
-
+        _ = adapter
         supported_reach_count = self.repo.count_supported_reaches(provider)
         if supported_reach_count == 0:
             raise ValueError(
                 f"No supported reaches found for provider '{provider}'. "
                 "Import return periods first to establish supported map reaches."
+            )
+
+        artifact_exists = self.artifacts.exists(provider, run_id)
+        if not artifact_exists:
+            raise ValueError(
+                "Bulk ingest was requested, but no normalized bulk artifact exists for this run. "
+                "Run prepare-bulk-artifact first."
             )
 
         logger.info(
@@ -200,7 +267,7 @@ class ForecastService:
                 "provider": provider,
                 "run_id": run_id,
                 "ingest_mode": "bulk",
-                "source": "provider_bulk",
+                "source": "normalized_artifact",
                 "supported_reach_count": supported_reach_count,
                 "batch_size": self.settings.forecast_bulk_ingest_batch_size,
             },
@@ -208,24 +275,40 @@ class ForecastService:
 
         started_at = perf_counter()
         total_rows = 0
-        for chunk_index, rows in enumerate(
-            adapter.iter_bulk_forecast_timeseries(
-                run_id=run_id,
-                supported_reach_ids=self.repo.iter_supported_reach_ids(provider, as_chunks=False),
-                batch_size=self.settings.forecast_bulk_ingest_batch_size,
-            ),
-            start=1,
-        ):
-            chunk_rows = self.repo.bulk_upsert_timeseries(rows)
+        batch: list[BulkForecastArtifactRowSchema] = []
+        chunk_index = 0
+        for row in self.artifacts.iter_rows(provider, run_id):
+            batch.append(row)
+            if len(batch) < self.settings.forecast_bulk_ingest_batch_size:
+                continue
+            chunk_index += 1
+            chunk_rows = self._upsert_artifact_batch(batch)
             total_rows += chunk_rows
-            self.db.commit()
+            batch = []
             logger.info(
                 "ingest chunk complete",
                 extra={
                     "provider": provider,
                     "run_id": run_id,
                     "ingest_mode": "bulk",
-                    "source": "provider_bulk",
+                    "source": "normalized_artifact",
+                    "chunk_number": chunk_index,
+                    "chunk_rows_written": chunk_rows,
+                    "total_rows_written": total_rows,
+                },
+            )
+
+        if batch:
+            chunk_index += 1
+            chunk_rows = self._upsert_artifact_batch(batch)
+            total_rows += chunk_rows
+            logger.info(
+                "ingest chunk complete",
+                extra={
+                    "provider": provider,
+                    "run_id": run_id,
+                    "ingest_mode": "bulk",
+                    "source": "normalized_artifact",
                     "chunk_number": chunk_index,
                     "chunk_rows_written": chunk_rows,
                     "total_rows_written": total_rows,
@@ -243,13 +326,33 @@ class ForecastService:
                 "provider": provider,
                 "run_id": run_id,
                 "ingest_mode": "bulk",
-                "source": "provider_bulk",
+                "source": "normalized_artifact",
                 "supported_reach_count": supported_reach_count,
                 "rows_written": total_rows,
                 "elapsed_seconds": round(perf_counter() - started_at, 3),
             },
         )
         return total_rows
+
+    def _upsert_artifact_batch(self, batch: list[BulkForecastArtifactRowSchema]) -> int:
+        rows = [
+            TimeseriesPointSchema(
+                provider=item.provider,
+                run_id=item.run_id,
+                provider_reach_id=item.provider_reach_id,
+                forecast_time_utc=item.forecast_time_utc,
+                flow_mean_cms=item.flow_mean_cms,
+                flow_median_cms=item.flow_median_cms,
+                flow_p25_cms=item.flow_p25_cms,
+                flow_p75_cms=item.flow_p75_cms,
+                flow_max_cms=item.flow_max_cms,
+                raw_payload_json=item.raw_payload_json,
+            )
+            for item in batch
+        ]
+        count = self.repo.bulk_upsert_timeseries(rows)
+        self.db.commit()
+        return count
 
     def summarize_run(self, provider: str, run_id: str, reach_ids: list[str] | None = None) -> int:
         adapter = self._get_provider(provider)
@@ -394,12 +497,14 @@ class ForecastService:
         supports_forecast_stats_rest = bool(
             getattr(capabilities, "supports_forecast_stats_rest", False)
         )
-        supports_bulk_forecast_ingest = bool(adapter.supports_bulk_forecast_ingest())
+        supports_bulk_forecast_ingest = bool(adapter.supports_bulk_acquisition())
         source = self.settings.geoglows_data_source.lower() if provider == "geoglows" else "unknown"
         supports_return_periods_current_backend = bool(
             getattr(capabilities, f"supports_return_periods_{source}", False)
         )
         local_return_periods_available = self.repo.has_return_periods(provider)
+        latest_run_artifact_exists = bool(latest and self.artifacts.exists(provider, latest.run_id))
+        latest_run_map_ready = bool(latest and latest_run_timeseries_row_count > 0 and summary_count > 0)
 
         return ProviderHealthResponse(
             provider=provider,
@@ -410,11 +515,14 @@ class ForecastService:
             supports_forecast_stats_rest=supports_forecast_stats_rest,
             supports_return_periods_current_backend=supports_return_periods_current_backend,
             supports_bulk_forecast_ingest=supports_bulk_forecast_ingest,
+            bulk_acquisition_configured=supports_bulk_forecast_ingest,
             local_return_periods_available=local_return_periods_available,
             latest_run_has_timeseries=latest_run_timeseries_row_count > 0,
             latest_run_timeseries_row_count=latest_run_timeseries_row_count,
             latest_run_reach_count=latest_run_reach_count,
             latest_run_has_summaries=summary_count > 0,
+            latest_run_artifact_exists=latest_run_artifact_exists,
+            latest_run_map_ready=latest_run_map_ready,
         )
 
     def _resolve_run(

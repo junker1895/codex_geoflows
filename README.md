@@ -105,6 +105,7 @@ python -m app.cli ingest-return-periods --provider geoglows --reach-id 123 --rea
 python -m app.cli import-geoglows-return-periods-zarr
 python -m app.cli import-geoglows-return-periods-zarr --method logpearson3 --batch-size 50000
 python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 123
+python -m app.cli prepare-bulk-artifact --provider geoglows --run-id latest --filter-supported
 python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode bulk
 python -m app.cli summarize-run --provider geoglows --run-id latest
 python -m app.cli smoke-geoglows --river-id 123456789
@@ -149,9 +150,10 @@ HydroRIVERS crosswalk should be added in a separate downstream service or module
 1. `python -m alembic upgrade head`
 2. `python -m app.cli discover-latest-run --provider geoglows`
 3. Optional debug smoke: `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 760021611`
-4. Production bulk ingest (requires `GEOGLOWS_BULK_FORECAST_SOURCE`): `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode bulk`
-5. `python -m app.cli summarize-run --provider geoglows --run-id latest`
-6. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
+4. Prepare normalized artifact (requires `GEOGLOWS_BULK_FORECAST_SOURCE`): `python -m app.cli prepare-bulk-artifact --provider geoglows --run-id latest --filter-supported`
+5. Bulk ingest artifact: `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode bulk`
+6. `python -m app.cli summarize-run --provider geoglows --run-id latest`
+7. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
 
 Return-period ingest can run from the verified GEOGLOWS Zarr object store path for full severity classification in REST-only forecast environments.
 
@@ -217,3 +219,23 @@ After thresholds are loaded and summarize-run is executed, the same fields are p
 For the detailed model-agnostic flood classification design (architecture, thresholds, peak extraction, banding, API mapping, and multi-model integration guidance), see:
 
 - `docs/flood-classification-system.md`
+
+
+### Production bulk workflow
+
+The production bulk pipeline is intentionally split into three layers:
+
+1. **Provider acquisition layer**: fetch provider-native run data (GEOGLOWS bulk source).
+2. **Normalization/export layer**: convert provider-native records into normalized bulk artifact rows.
+3. **Ingest layer**: load normalized artifact rows into `forecast_provider_reach_timeseries`.
+
+Current normalized artifact format is JSONL with schema fields:
+
+- `provider` (string, required)
+- `run_id` (string, required)
+- `provider_reach_id` (string, required)
+- `forecast_time_utc` (datetime, required)
+- `flow_mean_cms`, `flow_median_cms`, `flow_p25_cms`, `flow_p75_cms`, `flow_max_cms` (float, optional)
+- `raw_payload_json` (object, optional)
+
+For production mode, the artifact is the bridge between provider-native bulk acquisition and DB ingest.

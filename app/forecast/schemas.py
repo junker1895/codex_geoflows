@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ORMBaseModel(BaseModel):
@@ -89,6 +89,26 @@ class ForecastMapReachesResponse(ORMBaseModel):
     meta: ForecastMapMeta
 
 
+
+
+class BulkForecastArtifactRowSchema(ORMBaseModel):
+    provider: str
+    run_id: str
+    provider_reach_id: str
+    forecast_time_utc: datetime
+    flow_mean_cms: float | None = None
+    flow_median_cms: float | None = None
+    flow_p25_cms: float | None = None
+    flow_p75_cms: float | None = None
+    flow_max_cms: float | None = None
+    raw_payload_json: dict | None = None
+
+    @field_validator("provider_reach_id", mode="before")
+    @classmethod
+    def _normalize_reach_id(cls, value: object) -> str:
+        return str(value).strip()
+
+
 class ClassificationResult(ORMBaseModel):
     return_period_band: str = "unknown"
     severity_score: int = 0
@@ -112,8 +132,11 @@ class ProviderHealthResponse(ORMBaseModel):
     supports_forecast_stats_rest: bool = False
     supports_return_periods_current_backend: bool = False
     supports_bulk_forecast_ingest: bool = False
+    bulk_acquisition_configured: bool = False
     local_return_periods_available: bool = False
     latest_run_has_timeseries: bool = False
     latest_run_timeseries_row_count: int = 0
     latest_run_reach_count: int = 0
     latest_run_has_summaries: bool = False
+    latest_run_artifact_exists: bool = False
+    latest_run_map_ready: bool = False

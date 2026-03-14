@@ -17,6 +17,7 @@ from app.forecast.exceptions import (
     ProviderOperationalError,
 )
 from app.forecast.schemas import (
+    BulkForecastArtifactRowSchema,
     ForecastRunSchema,
     ReachSummarySchema,
     ReturnPeriodSchema,
@@ -147,31 +148,24 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                 )
         return rows
 
-    def supports_bulk_forecast_ingest(self) -> bool:
+    def supports_bulk_acquisition(self) -> bool:
         return bool(self.settings.geoglows_bulk_forecast_source)
 
-    def iter_bulk_forecast_timeseries(
-        self,
-        run_id: str,
-        supported_reach_ids: Iterable[str],
-        batch_size: int,
-    ) -> Iterator[list[TimeseriesPointSchema]]:
+    def iter_acquired_bulk_records(self, run_id: str) -> Iterator[dict]:
         source_path = self.settings.geoglows_bulk_forecast_source
         if not source_path:
             raise ProviderBackendUnavailableError(
-                "GEOGLOWS bulk ingest source is not configured. REST forecast_stats is only suitable for "
+                "GEOGLOWS bulk acquisition source is not configured. REST forecast_stats is only suitable for "
                 "single/small-scale debug ingest and is not used for full-network runs because provider throttling "
                 "(Too many requests) makes per-reach REST bulk ingest unsafe. Configure GEOGLOWS_BULK_FORECAST_SOURCE."
             )
 
-        allowed = {str(x) for x in supported_reach_ids}
         source = Path(source_path)
         if not source.exists():
             raise ProviderOperationalError(
-                f"GEOGLOWS bulk ingest source file does not exist: {source_path}"
+                f"GEOGLOWS bulk acquisition source file does not exist: {source_path}"
             )
 
-        batch: list[TimeseriesPointSchema] = []
         with source.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
                 text = line.strip()
@@ -183,40 +177,32 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                     raise ProviderOperationalError(
                         f"Invalid GEOGLOWS bulk JSON at line {line_number}: {exc}"
                     ) from exc
+                item["_line_number"] = line_number
+                yield item
 
-                reach_id = str(item.get("provider_reach_id", item.get("river_id", ""))).strip()
-                if not reach_id:
-                    continue
-                if reach_id not in allowed:
-                    continue
+    def normalize_bulk_record(self, run_id: str, record: dict) -> BulkForecastArtifactRowSchema | None:
+        reach_id = str(record.get("provider_reach_id", record.get("river_id", ""))).strip()
+        if not reach_id:
+            return None
 
-                dt = item.get("forecast_time_utc") or item.get("time")
-                if isinstance(dt, datetime):
-                    forecast_time = dt
-                else:
-                    forecast_time = datetime.fromisoformat(str(dt)).replace(tzinfo=UTC)
+        dt = record.get("forecast_time_utc") or record.get("time")
+        if isinstance(dt, datetime):
+            forecast_time = dt
+        else:
+            forecast_time = datetime.fromisoformat(str(dt)).replace(tzinfo=UTC)
 
-                batch.append(
-                    TimeseriesPointSchema(
-                        provider=self.get_provider_name(),
-                        run_id=run_id,
-                        provider_reach_id=reach_id,
-                        forecast_time_utc=forecast_time,
-                        flow_mean_cms=_safe_float(item.get("flow_avg", item.get("flow_mean_cms"))),
-                        flow_median_cms=_safe_float(item.get("flow_med", item.get("flow_median_cms"))),
-                        flow_p25_cms=_safe_float(item.get("flow_25p", item.get("flow_p25_cms"))),
-                        flow_p75_cms=_safe_float(item.get("flow_75p", item.get("flow_p75_cms"))),
-                        flow_max_cms=_safe_float(item.get("flow_max", item.get("flow_max_cms"))),
-                        raw_payload_json={"source": "geoglows_bulk", "line_number": line_number},
-                    )
-                )
-
-                if len(batch) >= batch_size:
-                    yield batch
-                    batch = []
-
-        if batch:
-            yield batch
+        return BulkForecastArtifactRowSchema(
+            provider=self.get_provider_name(),
+            run_id=run_id,
+            provider_reach_id=reach_id,
+            forecast_time_utc=forecast_time,
+            flow_mean_cms=_safe_float(record.get("flow_avg", record.get("flow_mean_cms"))),
+            flow_median_cms=_safe_float(record.get("flow_med", record.get("flow_median_cms"))),
+            flow_p25_cms=_safe_float(record.get("flow_25p", record.get("flow_p25_cms"))),
+            flow_p75_cms=_safe_float(record.get("flow_75p", record.get("flow_p75_cms"))),
+            flow_max_cms=_safe_float(record.get("flow_max", record.get("flow_max_cms"))),
+            raw_payload_json={"source": "geoglows_bulk", "line_number": record.get("_line_number")},
+        )
 
     def summarize_reach(
         self,
