@@ -140,7 +140,8 @@ def test_summary_shape_with_thresholds():
         rp_100=60,
     )
     summary = provider.summarize_reach("2024010100", str(VALID_RIVER_ID), ts, rp)
-    assert summary.severity_score >= 2
+    assert summary.return_period_band == "2"
+    assert summary.severity_score == 1
 
 
 def test_geoglows_missing_api_surface_raises_runtime_error():

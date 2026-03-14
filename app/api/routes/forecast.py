@@ -8,7 +8,13 @@ from app.forecast.exceptions import (
     ProviderBackendUnavailableError,
     ProviderOperationalError,
 )
-from app.forecast.schemas import ForecastRunSchema, ProviderHealthResponse, ReachDetailResponse, ReachSummarySchema
+from app.forecast.schemas import (
+    ForecastMapReachesResponse,
+    ForecastRunSchema,
+    ProviderHealthResponse,
+    ReachDetailResponse,
+    ReachSummarySchema,
+)
 
 router = APIRouter(prefix="/forecast", tags=["forecast"])
 
@@ -43,6 +49,31 @@ def reach_detail(
         return service.get_reach_detail(provider, provider_reach_id, run_id=run_id, timeseries_limit=timeseries_limit)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+
+@router.get("/map/reaches", response_model=ForecastMapReachesResponse)
+def map_reaches(
+    provider: str = Query(...),
+    run_id: str | None = Query(default=None),
+    bbox: str | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1),
+    flagged_only: bool = Query(default=False),
+    min_severity_score: float | None = Query(default=None),
+    db: Session = Depends(get_db_session),
+) -> ForecastMapReachesResponse:
+    service = get_forecast_service(db)
+    try:
+        return service.list_forecast_map_reaches(
+            provider=provider,
+            run_id=run_id,
+            bbox=bbox,
+            limit=limit,
+            flagged_only=flagged_only,
+            min_severity_score=min_severity_score,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/summary", response_model=list[ReachSummarySchema])
