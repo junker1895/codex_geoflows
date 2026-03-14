@@ -1,4 +1,6 @@
 import logging
+from time import perf_counter
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -117,17 +119,76 @@ class ForecastService:
         )
         return total_upserted
 
-    def ingest_forecast_run(self, provider: str, run_id: str, reach_ids: list[str]) -> int:
+    def ingest_forecast_run(self, provider: str, run_id: str, reach_ids: list[str] | None = None) -> int:
         self._get_provider(provider)
         resolved_run = self._resolve_run(provider, run_id)
-        rows = self.providers[provider].fetch_forecast_timeseries(resolved_run.run_id, reach_ids)
-        count = self.repo.bulk_upsert_timeseries(rows)
+        chunk_size = self.settings.forecast_bulk_ingest_chunk_size
+
+        if reach_ids:
+            reach_chunks = [list(reach_ids)]
+            total_reach_count = len(reach_ids)
+            mode = "single" if len(reach_ids) == 1 else "explicit"
+        else:
+            total_reach_count = self.repo.count_supported_reaches(provider)
+            if total_reach_count == 0:
+                raise ValueError(
+                    f"No supported reaches found for provider '{provider}'. "
+                    "Import return periods first to establish supported map reaches."
+                )
+            reach_chunks = self.repo.iter_supported_reach_ids(provider, chunk_size=chunk_size)
+            mode = "bulk"
+
+        logger.info(
+            "starting forecast ingest",
+            extra={
+                "provider": provider,
+                "run_id": resolved_run.run_id,
+                "mode": mode,
+                "total_reach_count": total_reach_count,
+                "chunk_size": chunk_size,
+            },
+        )
+
+        started_at = perf_counter()
+        processed_reaches = 0
+        total_rows = 0
+        for chunk_index, chunk_reach_ids in enumerate(reach_chunks, start=1):
+            rows = self.providers[provider].fetch_forecast_timeseries(resolved_run.run_id, chunk_reach_ids)
+            chunk_rows = self.repo.bulk_upsert_timeseries(rows)
+            total_rows += chunk_rows
+            processed_reaches += len(chunk_reach_ids)
+            self.db.commit()
+            logger.info(
+                "ingest chunk complete",
+                extra={
+                    "provider": provider,
+                    "run_id": resolved_run.run_id,
+                    "chunk_number": chunk_index,
+                    "chunk_reach_count": len(chunk_reach_ids),
+                    "processed_reaches": processed_reaches,
+                    "total_reach_count": total_reach_count,
+                    "chunk_rows_written": chunk_rows,
+                    "total_rows_written": total_rows,
+                },
+            )
+
         run_row = self.repo.get_run(provider, resolved_run.run_id)
         if run_row:
-            run_row.ingest_status = "partial" if count == 0 else "complete"
+            run_row.ingest_status = "partial" if total_rows == 0 else "complete"
         self.db.commit()
-        logger.info("upserted forecast timeseries rows", extra={"provider": provider, "run_id": resolved_run.run_id, "count": count})
-        return count
+
+        logger.info(
+            "completed forecast ingest",
+            extra={
+                "provider": provider,
+                "run_id": resolved_run.run_id,
+                "total_reach_count": total_reach_count,
+                "processed_reaches": processed_reaches,
+                "rows_written": total_rows,
+                "elapsed_seconds": round(perf_counter() - started_at, 3),
+            },
+        )
+        return total_rows
 
     def summarize_run(self, provider: str, run_id: str, reach_ids: list[str] | None = None) -> int:
         adapter = self._get_provider(provider)

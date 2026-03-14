@@ -118,7 +118,7 @@ def cli_return_periods_zarr_open(
 def cli_ingest_forecast_run(
     provider: str = typer.Option("geoglows", "--provider"),
     run_id: str = typer.Option("latest", "--run-id"),
-    reach_id: list[str] = typer.Option(..., "--reach-id"),
+    reach_id: list[str] | None = typer.Option(None, "--reach-id"),
 ) -> None:
     def _inner() -> None:
         service = _build_service()

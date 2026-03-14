@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 
-from sqlalchemy import Select, and_, desc, select
+from sqlalchemy import Select, and_, desc, func, select
 from sqlalchemy.orm import Session
 
 from app.db import models
@@ -137,6 +137,40 @@ class ForecastRepository:
                 and_(models.ForecastRun.provider == provider, models.ForecastRun.run_id == run_id)
             )
         ).scalar_one_or_none()
+
+
+    def count_supported_reaches(self, provider: str) -> int:
+        stmt = select(func.count(models.ForecastProviderReturnPeriod.id)).where(
+            models.ForecastProviderReturnPeriod.provider == provider
+        )
+        return int(self.db.execute(stmt).scalar_one())
+
+    def iter_supported_reach_ids(
+        self,
+        provider: str,
+        chunk_size: int = 1000,
+        as_chunks: bool = True,
+    ):
+        stmt = (
+            select(models.ForecastProviderReturnPeriod.provider_reach_id)
+            .where(models.ForecastProviderReturnPeriod.provider == provider)
+            .order_by(models.ForecastProviderReturnPeriod.provider_reach_id)
+        )
+        stream = self.db.execute(stmt).scalars()
+
+        if not as_chunks:
+            for reach_id in stream:
+                yield str(reach_id)
+            return
+
+        batch: list[str] = []
+        for reach_id in stream:
+            batch.append(str(reach_id))
+            if len(batch) >= chunk_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
 
     def has_return_periods(self, provider: str) -> bool:
         stmt = select(models.ForecastProviderReturnPeriod.id).where(
