@@ -460,13 +460,35 @@ class ForecastService:
 
         summary_path = self.artifacts.summary_artifact_path(provider, resolved_run.run_id)
         if summary_path.exists() and if_present == "skip":
-            return str(summary_path), self.artifacts.count_summary_rows(provider, resolved_run.run_id)
+            existing_count = self.artifacts.count_summary_rows(provider, resolved_run.run_id)
+            logger.info(
+                "skipping bulk summary artifact preparation because artifact exists",
+                extra={
+                    "provider": provider,
+                    "run_id": resolved_run.run_id,
+                    "summary_artifact_path": str(summary_path),
+                    "summary_row_count": existing_count,
+                    "if_present": if_present,
+                },
+            )
+            return str(summary_path), existing_count
         if summary_path.exists() and if_present == "error":
             raise ValueError(f"Summary artifact already exists: {summary_path}")
 
         if hasattr(adapter, "set_supported_reach_filter"):
             adapter.set_supported_reach_filter(supported_reaches)
         try:
+            started_at = perf_counter()
+            logger.info(
+                "starting bulk summary artifact preparation",
+                extra={
+                    "provider": provider,
+                    "run_id": resolved_run.run_id,
+                    "filter_to_supported_reaches": filter_to_supported_reaches,
+                    "supported_reach_count": 0 if supported_reaches is None else len(supported_reaches),
+                    "if_present": if_present,
+                },
+            )
             stats = {"raw_records_seen": 0, "normalized_rows_written": 0, "rows_dropped_invalid": 0, "rows_dropped_filtered": 0}
 
             def _summary_rows() -> Iterator[BulkForecastSummaryArtifactRowSchema]:
@@ -489,6 +511,19 @@ class ForecastService:
                     yield row
 
             path, _ = self.artifacts.write_summary_rows(provider, resolved_run.run_id, _summary_rows())
+            logger.info(
+                "completed bulk summary artifact preparation",
+                extra={
+                    "provider": provider,
+                    "run_id": resolved_run.run_id,
+                    "summary_artifact_path": str(path),
+                    "raw_records_seen": stats["raw_records_seen"],
+                    "summary_rows_written": stats["normalized_rows_written"],
+                    "rows_dropped_filtered": stats["rows_dropped_filtered"],
+                    "rows_dropped_invalid": stats["rows_dropped_invalid"],
+                    "elapsed_seconds": round(perf_counter() - started_at, 3),
+                },
+            )
             return str(path), stats["normalized_rows_written"]
         finally:
             if hasattr(adapter, "set_supported_reach_filter"):
@@ -499,8 +534,13 @@ class ForecastService:
         if not self.artifacts.summary_exists(provider, resolved_run.run_id):
             raise ValueError("Summary bulk ingest requested, but no summary artifact exists. Run prepare-bulk-summaries first.")
 
+        logger.info(
+            "starting summary ingest",
+            extra={"provider": provider, "run_id": resolved_run.run_id, "source": "summary_artifact"},
+        )
         total = 0
         batch: list[ReachSummarySchema] = []
+        chunk_index = 0
         for item in self.artifacts.iter_summary_rows(provider, resolved_run.run_id):
             batch.append(
                 ReachSummarySchema(
@@ -518,12 +558,48 @@ class ForecastService:
                 )
             )
             if len(batch) >= self.settings.forecast_bulk_ingest_batch_size:
-                total += self.repo.upsert_summaries(batch)
+                chunk_index += 1
+                chunk_rows = self.repo.upsert_summaries(batch)
+                total += chunk_rows
                 self.db.commit()
+                logger.info(
+                    "summary ingest chunk complete",
+                    extra={
+                        "provider": provider,
+                        "run_id": resolved_run.run_id,
+                        "source": "summary_artifact",
+                        "chunk_number": chunk_index,
+                        "chunk_rows_written": chunk_rows,
+                        "total_rows_written": total,
+                    },
+                )
                 batch = []
         if batch:
-            total += self.repo.upsert_summaries(batch)
+            chunk_index += 1
+            chunk_rows = self.repo.upsert_summaries(batch)
+            total += chunk_rows
             self.db.commit()
+            logger.info(
+                "summary ingest chunk complete",
+                extra={
+                    "provider": provider,
+                    "run_id": resolved_run.run_id,
+                    "source": "summary_artifact",
+                    "chunk_number": chunk_index,
+                    "chunk_rows_written": chunk_rows,
+                    "total_rows_written": total,
+                },
+            )
+        logger.info(
+            "completed summary ingest",
+            extra={
+                "provider": provider,
+                "run_id": resolved_run.run_id,
+                "source": "summary_artifact",
+                "artifact_rows_read": self.artifacts.count_summary_rows(provider, resolved_run.run_id),
+                "rows_written": total,
+            },
+        )
         return total
 
     def ingest_forecast_run(

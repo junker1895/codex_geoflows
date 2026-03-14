@@ -547,6 +547,22 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         ordered_dims = [*ensemble_dims, structure["time_dim"], structure["reach_dim"]]
         qout_view = qout.transpose(*ordered_dims)
 
+        start = datetime.now(UTC)
+        rows_written = 0
+        logger.info(
+            "GEOGLOWS public Zarr summary preparation started",
+            extra={
+                "run_id": run_id,
+                "source_zarr_path": source_zarr_path,
+                "total_rivid_count": int(len(reach_values)),
+                "chunking": summary["chunking"],
+                "detected_time_dim": structure["time_dim"],
+                "detected_reach_dim": structure["reach_dim"],
+                "detected_ensemble_dims": ensemble_dims,
+                "total_blocks": len(reach_windows),
+            },
+        )
+
         supported_reaches = self._supported_reach_filter
         for block_idx, (reach_start, reach_end) in enumerate(reach_windows, start=1):
             block = qout_view.isel({structure["reach_dim"]: slice(reach_start, reach_end)})
@@ -566,6 +582,19 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                 reach_mask = np.fromiter((rid in supported_reaches for rid in block_reach_ids), dtype=bool)
             selected_idx = np.flatnonzero(reach_mask)
             if selected_idx.size == 0:
+                elapsed = (datetime.now(UTC) - start).total_seconds()
+                logger.info(
+                    "GEOGLOWS public Zarr summary preparation progress",
+                    extra={
+                        "run_id": run_id,
+                        "source_zarr_path": source_zarr_path,
+                        "block_index": block_idx,
+                        "total_blocks": len(reach_windows),
+                        "rows_written_so_far": rows_written,
+                        "elapsed_seconds": round(elapsed, 2),
+                        "rows_per_second": round(rows_written / elapsed, 2) if elapsed > 0 else None,
+                    },
+                )
                 continue
 
             selected_reaches = block_reach_ids[selected_idx]
@@ -584,6 +613,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                 peak_median = None if not np.isfinite(median_series).any() else _safe_float(np.nanmax(median_series))
                 peak_max = None if not np.isfinite(max_series).any() else _safe_float(np.nanmax(max_series))
 
+                rows_written += 1
                 yield {
                     "provider_reach_id": str(reach_id),
                     "peak_time_utc": peak_time_utc,
@@ -604,6 +634,30 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                         "block_end": reach_end,
                     },
                 }
+
+            elapsed = (datetime.now(UTC) - start).total_seconds()
+            logger.info(
+                "GEOGLOWS public Zarr summary preparation progress",
+                extra={
+                    "run_id": run_id,
+                    "source_zarr_path": source_zarr_path,
+                    "block_index": block_idx,
+                    "total_blocks": len(reach_windows),
+                    "rows_written_so_far": rows_written,
+                    "elapsed_seconds": round(elapsed, 2),
+                    "rows_per_second": round(rows_written / elapsed, 2) if elapsed > 0 else None,
+                },
+            )
+
+        logger.info(
+            "GEOGLOWS public Zarr summary preparation completed",
+            extra={
+                "run_id": run_id,
+                "source_zarr_path": source_zarr_path,
+                "rows_written": rows_written,
+                "elapsed_seconds": round((datetime.now(UTC) - start).total_seconds(), 2),
+            },
+        )
 
     def normalize_bulk_summary_record(self, run_id: str, record: dict) -> BulkForecastSummaryArtifactRowSchema | None:
         reach_id = str(record.get("provider_reach_id", record.get("river_id", ""))).strip()
