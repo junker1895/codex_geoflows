@@ -64,6 +64,8 @@ def test_api_endpoints(client, db_session):
     assert "local_return_periods_available" in payload
     assert "supports_bulk_forecast_ingest" in payload
     assert "bulk_acquisition_configured" in payload
+    assert "bulk_acquisition_mode" in payload
+    assert "bulk_raw_source_reachable" in payload
     assert "latest_run_has_timeseries" in payload
     assert "latest_run_has_summaries" in payload
     assert "latest_run_artifact_exists" in payload

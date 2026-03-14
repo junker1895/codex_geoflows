@@ -122,14 +122,20 @@ def cli_prepare_bulk_artifact(
     provider: str = typer.Option("geoglows", "--provider"),
     run_id: str = typer.Option("latest", "--run-id"),
     filter_to_supported_reaches: bool = typer.Option(True, "--filter-supported/--no-filter-supported"),
+    if_present: str = typer.Option("skip", "--if-present", help="Behavior if artifact exists: skip|overwrite|error"),
+    overwrite_raw: bool = typer.Option(False, "--overwrite-raw"),
 ) -> None:
     def _inner() -> None:
+        if if_present not in {"skip", "overwrite", "error"}:
+            raise ValueError("--if-present must be one of: skip, overwrite, error")
         service = _build_service()
         artifact_path, count = prepare_bulk_artifact.run(
             service,
             provider=provider,
             run_id=run_id,
             filter_to_supported_reaches=filter_to_supported_reaches,
+            if_present=if_present,
+            overwrite_raw=overwrite_raw,
         )
         typer.echo(f"prepared bulk artifact: {artifact_path} (rows={count})")
 

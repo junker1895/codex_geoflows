@@ -3,6 +3,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+import shutil
 
 import json
 import math
@@ -149,22 +152,76 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         return rows
 
     def supports_bulk_acquisition(self) -> bool:
-        return bool(self.settings.geoglows_bulk_forecast_source)
+        mode = self.bulk_acquisition_mode()
+        if mode == "manual_artifact_only":
+            return False
+        if mode == "local_file":
+            source = self._bulk_raw_source_uri()
+            return bool(source and Path(source).exists())
+        if mode == "remote_http":
+            return bool(self.settings.geoglows_bulk_raw_source_uri)
+        if mode == "remote_object_store":
+            return bool(self.settings.geoglows_bulk_raw_source_uri)
+        return False
 
-    def iter_acquired_bulk_records(self, run_id: str) -> Iterator[dict]:
-        source_path = self.settings.geoglows_bulk_forecast_source
-        if not source_path:
+    def bulk_acquisition_mode(self) -> str:
+        return (self.settings.geoglows_bulk_acquisition_mode or "manual_artifact_only").strip().lower()
+
+    def is_bulk_source_reachable(self) -> bool | None:
+        mode = self.bulk_acquisition_mode()
+        source = self._bulk_raw_source_uri()
+        if mode == "manual_artifact_only":
+            return None
+        if not source:
+            return False
+        if mode == "local_file":
+            return Path(source).exists()
+        if mode == "remote_http":
+            return source.startswith("http://") or source.startswith("https://")
+        if mode == "remote_object_store":
+            return source.startswith("s3://")
+        return False
+
+    def acquire_bulk_raw_source(self, run_id: str, overwrite: bool = False) -> str:
+        mode = self.bulk_acquisition_mode()
+        source = self._bulk_raw_source_uri()
+        if mode == "manual_artifact_only":
             raise ProviderBackendUnavailableError(
-                "GEOGLOWS bulk acquisition source is not configured. REST forecast_stats is only suitable for "
-                "single/small-scale debug ingest and is not used for full-network runs because provider throttling "
-                "(Too many requests) makes per-reach REST bulk ingest unsafe. Configure GEOGLOWS_BULK_FORECAST_SOURCE."
+                "GEOGLOWS acquisition mode is manual_artifact_only. Provide normalized artifact directly and skip acquisition."
+            )
+        if not source:
+            raise ProviderBackendUnavailableError("GEOGLOWS_BULK_RAW_SOURCE_URI must be configured for acquisition modes.")
+
+        destination = self._staged_raw_path(run_id)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        if destination.exists() and not overwrite and not self.settings.geoglows_bulk_overwrite_existing_raw:
+            return str(destination)
+
+        if mode == "local_file":
+            source_path = Path(source)
+            if not source_path.exists():
+                raise ProviderOperationalError(f"GEOGLOWS local raw source does not exist: {source}")
+            shutil.copyfile(source_path, destination)
+        elif mode == "remote_http":
+            self._download_http_source(run_id=run_id, source=source, destination=destination)
+        elif mode == "remote_object_store":
+            raise ProviderOperationalError(
+                "GEOGLOWS remote_object_store acquisition mode is declared but not yet implemented in this runtime. "
+                "Use local_file/remote_http or pre-stage data and switch to local_file/manual_artifact_only."
+            )
+        else:
+            raise ProviderOperationalError(
+                f"Unsupported GEOGLOWS acquisition mode '{mode}'. Supported: manual_artifact_only, local_file, remote_http, remote_object_store"
             )
 
-        source = Path(source_path)
+        return str(destination)
+
+    def iter_raw_bulk_records(self, run_id: str, staged_raw_path: str) -> Iterator[dict]:
+        _ = run_id
+        source = Path(staged_raw_path)
         if not source.exists():
-            raise ProviderOperationalError(
-                f"GEOGLOWS bulk acquisition source file does not exist: {source_path}"
-            )
+            raise ProviderOperationalError(f"Staged GEOGLOWS raw source does not exist: {staged_raw_path}")
 
         with source.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
@@ -175,7 +232,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                     item = json.loads(text)
                 except json.JSONDecodeError as exc:
                     raise ProviderOperationalError(
-                        f"Invalid GEOGLOWS bulk JSON at line {line_number}: {exc}"
+                        f"Invalid GEOGLOWS raw JSON at line {line_number}: {exc}"
                     ) from exc
                 item["_line_number"] = line_number
                 yield item
@@ -186,6 +243,8 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             return None
 
         dt = record.get("forecast_time_utc") or record.get("time")
+        if dt is None:
+            return None
         if isinstance(dt, datetime):
             forecast_time = dt
         else:
@@ -201,8 +260,62 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             flow_p25_cms=_safe_float(record.get("flow_25p", record.get("flow_p25_cms"))),
             flow_p75_cms=_safe_float(record.get("flow_75p", record.get("flow_p75_cms"))),
             flow_max_cms=_safe_float(record.get("flow_max", record.get("flow_max_cms"))),
-            raw_payload_json={"source": "geoglows_bulk", "line_number": record.get("_line_number")},
+            raw_payload_json={
+                "source": "geoglows_raw_bulk",
+                "line_number": record.get("_line_number"),
+                "raw_record": record,
+            },
         )
+
+    def cleanup_old_raw_staging(self) -> int:
+        keep_latest = self.settings.geoglows_bulk_raw_retention_runs
+        if keep_latest < 1:
+            return 0
+        base = Path(self.settings.geoglows_bulk_staging_dir)
+        provider_dir = base / self.get_provider_name()
+        if not provider_dir.exists():
+            return 0
+        files = sorted(provider_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        removed = 0
+        for path in files[keep_latest:]:
+            path.unlink(missing_ok=True)
+            removed += 1
+        return removed
+
+    def _staged_raw_path(self, run_id: str) -> Path:
+        base = Path(self.settings.geoglows_bulk_staging_dir)
+        provider_dir = base / self.get_provider_name()
+        provider_dir.mkdir(parents=True, exist_ok=True)
+        safe_run_id = run_id.replace("/", "_")
+        return provider_dir / f"{self.get_provider_name()}_{safe_run_id}.jsonl"
+
+    def _download_http_source(self, run_id: str, source: str, destination: Path) -> None:
+        resolved_source = source.format(run_id=run_id)
+        parsed = urlparse(resolved_source)
+        if parsed.scheme not in {"http", "https"}:
+            raise ProviderOperationalError(f"Invalid GEOGLOWS HTTP source URL: {resolved_source}")
+
+        headers = {"User-Agent": "codex-geoflows-bulk-acquisition/1.0"}
+        if self.settings.geoglows_bulk_remote_auth_token:
+            headers["Authorization"] = f"Bearer {self.settings.geoglows_bulk_remote_auth_token}"
+
+        attempts = self.settings.geoglows_bulk_download_max_retries + 1
+        last_exc: Exception | None = None
+        for _ in range(attempts):
+            try:
+                req = Request(resolved_source, headers=headers)
+                with urlopen(req, timeout=self.settings.geoglows_bulk_download_timeout_seconds) as resp:
+                    with destination.open("wb") as out:
+                        shutil.copyfileobj(resp, out)
+                return
+            except Exception as exc:
+                last_exc = exc
+        raise ProviderOperationalError(
+            f"Failed downloading GEOGLOWS bulk source from {resolved_source} after {attempts} attempt(s): {last_exc}"
+        ) from last_exc
+
+    def _bulk_raw_source_uri(self) -> str | None:
+        return self.settings.geoglows_bulk_raw_source_uri or self.settings.geoglows_bulk_forecast_source
 
     def summarize_reach(
         self,

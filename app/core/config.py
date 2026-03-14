@@ -40,6 +40,14 @@ class Settings(BaseSettings):
         default=10000, alias="GEOGLOWS_RETURN_PERIOD_IMPORT_BATCH_SIZE"
     )
     geoglows_bulk_forecast_source: str | None = Field(default=None, alias="GEOGLOWS_BULK_FORECAST_SOURCE")
+    geoglows_bulk_acquisition_mode: str = Field(default="manual_artifact_only", alias="GEOGLOWS_BULK_ACQUISITION_MODE")
+    geoglows_bulk_raw_source_uri: str | None = Field(default=None, alias="GEOGLOWS_BULK_RAW_SOURCE_URI")
+    geoglows_bulk_remote_auth_token: str | None = Field(default=None, alias="GEOGLOWS_BULK_REMOTE_AUTH_TOKEN")
+    geoglows_bulk_staging_dir: str = Field(default="./data/geoglows_raw", alias="GEOGLOWS_BULK_STAGING_DIR")
+    geoglows_bulk_download_timeout_seconds: int = Field(default=120, alias="GEOGLOWS_BULK_DOWNLOAD_TIMEOUT_SECONDS")
+    geoglows_bulk_download_max_retries: int = Field(default=2, alias="GEOGLOWS_BULK_DOWNLOAD_MAX_RETRIES")
+    geoglows_bulk_overwrite_existing_raw: bool = Field(default=False, alias="GEOGLOWS_BULK_OVERWRITE_EXISTING_RAW")
+    geoglows_bulk_raw_retention_runs: int = Field(default=5, alias="GEOGLOWS_BULK_RAW_RETENTION_RUNS")
 
     @field_validator("forecast_enabled_providers", mode="before")
     @classmethod

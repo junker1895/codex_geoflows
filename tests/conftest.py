@@ -61,7 +61,19 @@ class FakeProvider:
     def supports_bulk_acquisition(self) -> bool:
         return self._supports_bulk
 
-    def iter_acquired_bulk_records(self, run_id):
+    def bulk_acquisition_mode(self) -> str:
+        return "local_file"
+
+    def is_bulk_source_reachable(self) -> bool | None:
+        return self._supports_bulk
+
+    def acquire_bulk_raw_source(self, run_id: str, overwrite: bool = False) -> str:
+        _ = overwrite
+        return f"fake://{run_id}"
+
+    def iter_raw_bulk_records(self, run_id: str, staged_raw_path: str):
+        _ = run_id
+        _ = staged_raw_path
         for reach_id in ["101", "102", "103", "104", "105", "100"]:
             for i, flow in enumerate([5.0, 12.0, 22.0]):
                 yield {
@@ -84,6 +96,9 @@ class FakeProvider:
             flow_max_cms=float(record.get("flow_max", 0) or 0),
             raw_payload_json={"source": "fake"},
         )
+
+    def cleanup_old_raw_staging(self) -> int:
+        return 0
 
     def summarize_reach(self, run_id, reach_id, timeseries_rows, return_period_row):
         from app.forecast.classify import classify_peak_flow

@@ -133,6 +133,8 @@ class ProviderHealthResponse(ORMBaseModel):
     supports_return_periods_current_backend: bool = False
     supports_bulk_forecast_ingest: bool = False
     bulk_acquisition_configured: bool = False
+    bulk_acquisition_mode: str = "unknown"
+    bulk_raw_source_reachable: bool | None = None
     local_return_periods_available: bool = False
     latest_run_has_timeseries: bool = False
     latest_run_timeseries_row_count: int = 0

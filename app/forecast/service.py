@@ -128,6 +128,8 @@ class ForecastService:
         provider: str,
         run_id: str,
         filter_to_supported_reaches: bool = True,
+        if_present: str = "skip",
+        overwrite_raw: bool = False,
     ) -> tuple[str, int]:
         adapter = self._get_provider(provider)
         resolved_run = self._resolve_run(provider, run_id)
@@ -138,6 +140,27 @@ class ForecastService:
                 "Configure the provider bulk source before running prepare-bulk-artifact."
             )
 
+        if if_present not in {"skip", "overwrite", "error"}:
+            raise ValueError("if_present must be one of: skip, overwrite, error")
+
+        artifact_path = self.artifacts.artifact_path(provider, resolved_run.run_id)
+        if artifact_path.exists():
+            if if_present == "skip":
+                logger.info(
+                    "skipping bulk artifact preparation because artifact exists",
+                    extra={
+                        "provider": provider,
+                        "run_id": resolved_run.run_id,
+                        "artifact_path": str(artifact_path),
+                        "if_present": if_present,
+                    },
+                )
+                return str(artifact_path), 0
+            if if_present == "error":
+                raise ValueError(
+                    f"Bulk artifact already exists for provider={provider}, run_id={resolved_run.run_id}: {artifact_path}"
+                )
+
         supported_reaches: set[str] | None = None
         if filter_to_supported_reaches:
             supported_reaches = set(self.repo.iter_supported_reach_ids(provider, as_chunks=False))
@@ -147,44 +170,71 @@ class ForecastService:
                     "Import return periods first to establish supported map reaches."
                 )
 
+        started_at = perf_counter()
+        staged_raw_path = adapter.acquire_bulk_raw_source(resolved_run.run_id, overwrite=overwrite_raw)
+
         logger.info(
             "starting bulk artifact preparation",
             extra={
                 "provider": provider,
                 "run_id": resolved_run.run_id,
+                "acquisition_mode": adapter.bulk_acquisition_mode(),
+                "raw_source_location": staged_raw_path,
                 "filter_to_supported_reaches": filter_to_supported_reaches,
                 "supported_reach_count": 0 if supported_reaches is None else len(supported_reaches),
                 "write_batch_size": self.settings.forecast_bulk_artifact_write_batch_size,
+                "if_present": if_present,
             },
         )
 
-        normalized_count = 0
+        stats = {
+            "raw_records_seen": 0,
+            "normalized_rows_written": 0,
+            "rows_dropped_filtered": 0,
+            "rows_dropped_invalid": 0,
+        }
 
         def _normalized_rows():
-            nonlocal normalized_count
-            for record in adapter.iter_acquired_bulk_records(resolved_run.run_id):
-                row = adapter.normalize_bulk_record(resolved_run.run_id, record)
+            for record in adapter.iter_raw_bulk_records(resolved_run.run_id, staged_raw_path):
+                stats["raw_records_seen"] += 1
+                try:
+                    row = adapter.normalize_bulk_record(resolved_run.run_id, record)
+                except Exception:
+                    stats["rows_dropped_invalid"] += 1
+                    continue
                 if row is None:
+                    stats["rows_dropped_invalid"] += 1
                     continue
                 if supported_reaches is not None and row.provider_reach_id not in supported_reaches:
+                    stats["rows_dropped_filtered"] += 1
                     continue
-                normalized_count += 1
+                stats["normalized_rows_written"] += 1
                 yield row
 
         artifact_path, _ = self.artifacts.write_rows(provider, resolved_run.run_id, _normalized_rows())
-        removed = self.artifacts.cleanup_old_runs(provider, keep_latest=self.settings.forecast_bulk_artifact_retention_runs)
+        removed_artifacts = self.artifacts.cleanup_old_runs(
+            provider, keep_latest=self.settings.forecast_bulk_artifact_retention_runs
+        )
+        removed_raw = adapter.cleanup_old_raw_staging()
 
         logger.info(
             "completed bulk artifact preparation",
             extra={
                 "provider": provider,
                 "run_id": resolved_run.run_id,
+                "acquisition_mode": adapter.bulk_acquisition_mode(),
+                "raw_source_location": staged_raw_path,
                 "artifact_path": str(artifact_path),
-                "rows_written": normalized_count,
-                "removed_old_artifacts": removed,
+                "raw_records_seen": stats["raw_records_seen"],
+                "normalized_rows_written": stats["normalized_rows_written"],
+                "rows_dropped_filtered": stats["rows_dropped_filtered"],
+                "rows_dropped_invalid": stats["rows_dropped_invalid"],
+                "removed_old_artifacts": removed_artifacts,
+                "removed_old_raw_files": removed_raw,
+                "elapsed_seconds": round(perf_counter() - started_at, 3),
             },
         )
-        return str(artifact_path), normalized_count
+        return str(artifact_path), stats["normalized_rows_written"]
 
     def ingest_forecast_run(
         self,
@@ -498,6 +548,8 @@ class ForecastService:
             getattr(capabilities, "supports_forecast_stats_rest", False)
         )
         supports_bulk_forecast_ingest = bool(adapter.supports_bulk_acquisition())
+        bulk_acquisition_mode = adapter.bulk_acquisition_mode()
+        bulk_raw_source_reachable = adapter.is_bulk_source_reachable()
         source = self.settings.geoglows_data_source.lower() if provider == "geoglows" else "unknown"
         supports_return_periods_current_backend = bool(
             getattr(capabilities, f"supports_return_periods_{source}", False)
@@ -516,6 +568,8 @@ class ForecastService:
             supports_return_periods_current_backend=supports_return_periods_current_backend,
             supports_bulk_forecast_ingest=supports_bulk_forecast_ingest,
             bulk_acquisition_configured=supports_bulk_forecast_ingest,
+            bulk_acquisition_mode=bulk_acquisition_mode,
+            bulk_raw_source_reachable=bulk_raw_source_reachable,
             local_return_periods_available=local_return_periods_available,
             latest_run_has_timeseries=latest_run_timeseries_row_count > 0,
             latest_run_timeseries_row_count=latest_run_timeseries_row_count,

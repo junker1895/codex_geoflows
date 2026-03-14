@@ -98,10 +98,12 @@ def test_cli_prepare_bulk_artifact(monkeypatch):
     def _fake_build_service():
         return _StubService()
 
-    def _fake_prepare(service, provider, run_id, filter_to_supported_reaches=True):
+    def _fake_prepare(service, provider, run_id, filter_to_supported_reaches=True, if_present="skip", overwrite_raw=False):
         calls["provider"] = provider
         calls["run_id"] = run_id
         calls["filter"] = filter_to_supported_reaches
+        calls["if_present"] = if_present
+        calls["overwrite_raw"] = overwrite_raw
         return "/tmp/a.jsonl", 3
 
     monkeypatch.setattr(cli_mod, "_build_service", _fake_build_service)
@@ -110,9 +112,11 @@ def test_cli_prepare_bulk_artifact(monkeypatch):
     runner = CliRunner()
     result = runner.invoke(
         cli_mod.cli,
-        ["prepare-bulk-artifact", "--provider", "geoglows", "--run-id", "latest", "--filter-supported"],
+        ["prepare-bulk-artifact", "--provider", "geoglows", "--run-id", "latest", "--filter-supported", "--if-present", "overwrite", "--overwrite-raw"],
     )
 
     assert result.exit_code == 0
     assert "prepared bulk artifact" in result.stdout
     assert calls["provider"] == "geoglows"
+    assert calls["if_present"] == "overwrite"
+    assert calls["overwrite_raw"] is True

@@ -379,3 +379,16 @@ def test_bulk_ingest_requires_prepared_artifact(db_session):
         assert "prepare-bulk-artifact" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_prepare_bulk_artifact_if_present_skip_returns_zero(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["101"])
+
+    first_path, first_count = service.prepare_bulk_artifact("geoglows", run.run_id, if_present="overwrite")
+    second_path, second_count = service.prepare_bulk_artifact("geoglows", run.run_id, if_present="skip")
+
+    assert first_path == second_path
+    assert first_count > 0
+    assert second_count == 0
