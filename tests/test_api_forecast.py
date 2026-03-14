@@ -62,3 +62,57 @@ def test_api_endpoints(client, db_session):
     assert "supports_forecast_stats_rest" in payload
     assert "supports_return_periods_current_backend" in payload
     assert "local_return_periods_available" in payload
+
+
+def test_map_reaches_endpoint_contract_and_filters(client, db_session):
+    _seed(db_session)
+
+    # Ensure filter behavior is observable in the API response.
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    summary = service.repo.get_summary("geoglows", "2024010100", "100")
+    assert summary is not None
+    summary.severity_score = 3
+    summary.is_flagged = True
+    db_session.commit()
+
+    response = client.get(
+        "/forecast/map/reaches",
+        params={
+            "provider": "geoglows",
+            "run_id": "latest",
+            "bbox": "-10,-5,10,5",
+            "flagged_only": "true",
+            "min_severity_score": "1",
+            "limit": "10",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["meta"]["provider"] == "geoglows"
+    assert payload["meta"]["run_id"] == "2024010100"
+    assert payload["meta"]["count"] == 1
+    assert payload["meta"]["filters"]["bbox"] == "-10,-5,10,5"
+    assert payload["meta"]["filters"]["flagged_only"] is True
+    assert payload["meta"]["filters"]["min_severity_score"] == 1
+
+    row = payload["data"][0]
+    expected_keys = {
+        "provider",
+        "run_id",
+        "provider_reach_id",
+        "peak_time_utc",
+        "peak_mean_cms",
+        "peak_median_cms",
+        "peak_max_cms",
+        "return_period_band",
+        "severity_score",
+        "is_flagged",
+    }
+    assert set(row.keys()) == expected_keys
+    assert row["provider_reach_id"] == "100"
+
+
+def test_map_reaches_requires_valid_provider(client):
+    response = client.get("/forecast/map/reaches", params={"provider": "unknown"})
+    assert response.status_code == 400

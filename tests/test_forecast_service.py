@@ -4,6 +4,7 @@ import pandas as pd
 
 from app.core.config import Settings
 from app.forecast.providers.geoglows import GeoglowsForecastProvider
+from app.forecast.schemas import ForecastRunSchema
 from app.forecast.service import ForecastService
 from tests.conftest import FakeProvider
 
@@ -180,3 +181,75 @@ def test_summary_with_return_periods_below_two_not_flagged(db_session, tmp_path)
     assert detail.summary.return_period_band == "below_2"
     assert detail.summary.severity_score == 0
     assert detail.summary.is_flagged is False
+
+
+def test_list_forecast_map_reaches_latest_and_filters(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+
+    old_run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["old"])
+    service.ingest_forecast_run("geoglows", old_run.run_id, ["old"])
+    service.summarize_run("geoglows", old_run.run_id, reach_ids=["old"])
+
+    new_run = ForecastRunSchema(
+        provider="geoglows",
+        run_id="2024010200",
+        run_date_utc=datetime(2024, 1, 2, tzinfo=UTC),
+        issued_at_utc=datetime(2024, 1, 2, tzinfo=UTC),
+        source_type="geoglows_api",
+        ingest_status="pending",
+    )
+    service.repo.upsert_run(new_run)
+    db_session.commit()
+    service.ingest_return_periods("geoglows", ["760021611", "760021612"])
+    service.ingest_forecast_run("geoglows", new_run.run_id, ["760021611", "760021612"])
+    service.summarize_run("geoglows", new_run.run_id)
+
+    high = service.repo.get_summary("geoglows", new_run.run_id, "760021611")
+    assert high is not None
+    high.severity_score = 4
+    high.is_flagged = True
+
+    low = service.repo.get_summary("geoglows", new_run.run_id, "760021612")
+    assert low is not None
+    low.severity_score = 0
+    low.is_flagged = False
+    db_session.commit()
+
+    response = service.list_forecast_map_reaches("geoglows", run_id="latest", min_severity_score=1)
+    assert response.meta.run_id == new_run.run_id
+    assert response.meta.provider == "geoglows"
+    assert response.meta.filters.min_severity_score == 1
+    assert response.data
+    assert all(item.provider_reach_id != "old" for item in response.data)
+
+    flagged_response = service.list_forecast_map_reaches("geoglows", run_id="latest", flagged_only=True)
+    assert len(flagged_response.data) == 1
+    assert flagged_response.data[0].provider_reach_id == "760021611"
+
+
+def test_list_forecast_map_reaches_has_lightweight_contract(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["760021611"])
+    service.ingest_forecast_run("geoglows", run.run_id, ["760021611"])
+    service.summarize_run("geoglows", run.run_id)
+
+    response = service.list_forecast_map_reaches("geoglows", run_id=run.run_id, bbox="1,2,3,4")
+    payload = response.model_dump()
+
+    assert payload["data"][0]["provider_reach_id"] == "760021611"
+    assert payload["meta"]["filters"]["bbox"] == "1,2,3,4"
+    assert "timeseries" not in payload["data"][0]
+    assert "return_periods" not in payload["data"][0]
+    assert "raw_payload_json" not in payload["data"][0]
+
+
+def test_map_reaches_reads_summary_table_not_timeseries(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_forecast_run("geoglows", run.run_id, ["760021611"])
+
+    response = service.list_forecast_map_reaches("geoglows", run_id=run.run_id)
+    assert response.data == []
+    assert response.meta.count == 0
