@@ -58,6 +58,37 @@ class ReachSummarySchema(ORMBaseModel):
     metadata_json: dict[str, Any] | None = None
 
 
+class MapReachSummarySchema(ORMBaseModel):
+    provider: str
+    run_id: str
+    provider_reach_id: str
+    peak_time_utc: datetime | None = None
+    peak_mean_cms: float | None = None
+    peak_median_cms: float | None = None
+    peak_max_cms: float | None = None
+    return_period_band: str | None = None
+    severity_score: int = 0
+    is_flagged: bool = False
+
+
+class ForecastMapFilters(ORMBaseModel):
+    bbox: str | None = None
+    flagged_only: bool = False
+    min_severity_score: float | None = None
+
+
+class ForecastMapMeta(ORMBaseModel):
+    provider: str
+    run_id: str
+    count: int
+    filters: ForecastMapFilters
+
+
+class ForecastMapReachesResponse(ORMBaseModel):
+    data: list[MapReachSummarySchema] = Field(default_factory=list)
+    meta: ForecastMapMeta
+
+
 class ClassificationResult(ORMBaseModel):
     return_period_band: str = "unknown"
     severity_score: int = 0
