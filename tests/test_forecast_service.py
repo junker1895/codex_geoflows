@@ -326,3 +326,14 @@ def test_bulk_mode_does_not_fallback_to_rest_per_reach(db_session):
         raise AssertionError("expected ValueError")
 
     assert provider.rest_called is False
+
+
+def test_rest_single_ingest_mode_explicit_path(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+
+    count = service.ingest_forecast_run("geoglows", run.run_id, reach_ids=["101"], ingest_mode="rest_single")
+
+    assert count == 3
+    detail = service.get_reach_detail("geoglows", "101", run_id=run.run_id)
+    assert len(detail.timeseries) == 3
