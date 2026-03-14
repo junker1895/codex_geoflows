@@ -149,16 +149,23 @@ class ForecastService:
     def discover_latest_run(self, provider: str) -> ForecastRunSchema:
         adapter = self._get_provider(provider)
         run = adapter.discover_latest_run()
+        existing = self.repo.get_run(provider, run.run_id)
+        previous_ops = self._run_ops_metadata(existing)
+        previous_ingest_status = None if existing is None else existing.ingest_status
         run_row = self.repo.upsert_run(run)
-        ops = self._run_ops_metadata(run_row)
+        if previous_ingest_status and previous_ingest_status != "pending":
+            run_row.ingest_status = previous_ingest_status
+
+        ops = dict(previous_ops)
         ops.setdefault("raw_acquisition", {})
         ops.setdefault("artifact", {})
         ops.setdefault("ingest", {})
         ops.setdefault("summarize", {})
         ops.setdefault("map", {})
-        ops["completed_stages"] = [self.STAGE_DISCOVERED]
-        ops["current_status"] = self.STAGE_DISCOVERED
-        ops["map_ready"] = False
+        if not previous_ops:
+            ops["completed_stages"] = [self.STAGE_DISCOVERED]
+            ops["current_status"] = self.STAGE_DISCOVERED
+            ops["map_ready"] = False
         ops["raw_acquisition"]["mode"] = adapter.bulk_acquisition_mode()
         self._touch_ops(ops)
         self._set_run_ops_metadata(run_row, ops)
@@ -271,38 +278,6 @@ class ForecastService:
         self._set_run_ops_metadata(run_row, ops)
         self.db.commit()
 
-        artifact_path = self.artifacts.artifact_path(provider, resolved_run.run_id)
-        if artifact_path.exists():
-            existing_count = self.artifacts.count_rows(provider, resolved_run.run_id)
-            if if_present == "skip":
-                raw["succeeded"] = True
-                raw["staged_raw_path"] = raw.get("staged_raw_path")
-                artifact.update({"exists": True, "path": str(artifact_path), "row_count": existing_count})
-                ops["raw_acquisition"] = raw
-                ops["artifact"] = artifact
-                ops["current_status"] = self.STAGE_ARTIFACT_PREPARED
-                self._touch_ops(ops)
-                self._set_run_ops_metadata(run_row, ops)
-                self.db.commit()
-                self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_RAW_ACQUIRED)
-                self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED)
-                logger.info(
-                    "skipping bulk artifact preparation because artifact exists",
-                    extra={
-                        "provider": provider,
-                        "run_id": resolved_run.run_id,
-                        "artifact_path": str(artifact_path),
-                        "if_present": if_present,
-                    },
-                )
-                return str(artifact_path), 0
-            if if_present == "error":
-                message = (
-                    f"Bulk artifact already exists for provider={provider}, run_id={resolved_run.run_id}: {artifact_path}"
-                )
-                self._record_run_failure(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED, message)
-                raise ValueError(message)
-
         supported_reaches: set[str] | None = None
         if filter_to_supported_reaches:
             supported_reaches = set(self.repo.iter_supported_reach_ids(provider, as_chunks=False))
@@ -310,6 +285,54 @@ class ForecastService:
                 message = (
                     f"No supported reaches found for provider '{provider}'. "
                     "Import return periods first to establish supported map reaches."
+                )
+                self._record_run_failure(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED, message)
+                raise ValueError(message)
+
+        artifact_path = self.artifacts.artifact_path(provider, resolved_run.run_id)
+        if artifact_path.exists():
+            existing_count = self.artifacts.count_rows(provider, resolved_run.run_id)
+            if if_present == "skip":
+                if (
+                    adapter.bulk_acquisition_mode() == "aws_public_zarr"
+                    and supported_reaches is not None
+                    and existing_count < len(supported_reaches)
+                ):
+                    logger.warning(
+                        "existing artifact appears incomplete for supported network; rebuilding despite if_present=skip",
+                        extra={
+                            "provider": provider,
+                            "run_id": resolved_run.run_id,
+                            "artifact_path": str(artifact_path),
+                            "existing_row_count": existing_count,
+                            "supported_reach_count": len(supported_reaches),
+                        },
+                    )
+                else:
+                    raw["succeeded"] = True
+                    raw["staged_raw_path"] = raw.get("staged_raw_path")
+                    artifact.update({"exists": True, "path": str(artifact_path), "row_count": existing_count})
+                    ops["raw_acquisition"] = raw
+                    ops["artifact"] = artifact
+                    ops["current_status"] = self.STAGE_ARTIFACT_PREPARED
+                    self._touch_ops(ops)
+                    self._set_run_ops_metadata(run_row, ops)
+                    self.db.commit()
+                    self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_RAW_ACQUIRED)
+                    self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED)
+                    logger.info(
+                        "skipping bulk artifact preparation because artifact exists",
+                        extra={
+                            "provider": provider,
+                            "run_id": resolved_run.run_id,
+                            "artifact_path": str(artifact_path),
+                            "if_present": if_present,
+                        },
+                    )
+                    return str(artifact_path), 0
+            if if_present == "error":
+                message = (
+                    f"Bulk artifact already exists for provider={provider}, run_id={resolved_run.run_id}: {artifact_path}"
                 )
                 self._record_run_failure(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED, message)
                 raise ValueError(message)
@@ -585,7 +608,9 @@ class ForecastService:
                     "ingest_mode": "bulk",
                     "source": "normalized_artifact",
                     "supported_reach_count": supported_reach_count,
+                    "artifact_rows_read": self.artifacts.count_rows(provider, run_id),
                     "rows_written": total_rows,
+                    "distinct_reaches_ingested": self.repo.count_timeseries_reaches_for_run(provider, run_id),
                     "elapsed_seconds": round(perf_counter() - started_at, 3),
                 },
             )
@@ -661,6 +686,15 @@ class ForecastService:
             status = self.get_run_status(provider, resolved_run.run_id)
             if status.map_ready:
                 self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_MAP_READY)
+            logger.info(
+                "completed summarize run",
+                extra={
+                    "provider": provider,
+                    "run_id": resolved_run.run_id,
+                    "summary_rows_upserted": count,
+                    "map_rows_available": self.repo.count_summaries_for_run(provider, resolved_run.run_id),
+                },
+            )
             return count
         except Exception as exc:
             self._record_run_failure(provider, resolved_run.run_id, self.STAGE_SUMMARIZED, str(exc))
@@ -834,7 +868,7 @@ class ForecastService:
 
     def _run_status_from_row(self, provider: str, run_row: models.ForecastRun) -> RunReadinessStatusResponse:
         ops = self._run_ops_metadata(run_row)
-        completed_stages = [stage for stage in self.STAGE_ORDER if stage in set(ops.get("completed_stages", []))]
+        completed_set = set(ops.get("completed_stages", []))
 
         artifact_exists = self.artifacts.exists(provider, run_row.run_id)
         artifact_path = str(self.artifacts.artifact_path(provider, run_row.run_id))
@@ -852,8 +886,20 @@ class ForecastService:
         map_ready = bool(
             artifact_source_completed and timeseries_row_count > 0 and summary_row_count > 0 and map_row_count > 0
         )
-        if map_ready and self.STAGE_MAP_READY not in completed_stages:
-            completed_stages.append(self.STAGE_MAP_READY)
+
+        if raw_meta.get("succeeded"):
+            completed_set.add(self.STAGE_RAW_ACQUIRED)
+        if artifact_exists:
+            completed_set.add(self.STAGE_ARTIFACT_PREPARED)
+        if timeseries_row_count > 0:
+            completed_set.add(self.STAGE_INGESTED)
+        if summary_row_count > 0:
+            completed_set.add(self.STAGE_SUMMARIZED)
+        if map_ready:
+            completed_set.add(self.STAGE_MAP_READY)
+
+        completed_set.add(self.STAGE_DISCOVERED)
+        completed_stages = [stage for stage in self.STAGE_ORDER if stage in completed_set]
 
         missing_stages = [stage for stage in self.STAGE_ORDER if stage not in completed_stages]
 

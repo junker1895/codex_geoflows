@@ -355,6 +355,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         )
 
         supported_reaches = self._supported_reach_filter
+        cumulative_matched_reaches = 0
         for block_idx, (reach_start, reach_end) in enumerate(reach_windows, start=1):
             block = qout_view.isel({structure["reach_dim"]: slice(reach_start, reach_end)})
             values = np.asarray(block.values, dtype=np.float32)
@@ -381,7 +382,28 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                 reach_mask = np.fromiter((rid in supported_reaches for rid in block_reach_ids), dtype=bool)
 
             selected_idx = np.flatnonzero(reach_mask)
+            matched_reach_count = int(selected_idx.size)
+            cumulative_matched_reaches += matched_reach_count
             if selected_idx.size == 0:
+                elapsed = (datetime.now(UTC) - start).total_seconds()
+                logger.info(
+                    "GEOGLOWS public Zarr artifact preparation progress",
+                    extra={
+                        "run_id": run_id,
+                        "source_zarr_path": source_zarr_path,
+                        "block_index": block_idx,
+                        "total_blocks": len(reach_windows),
+                        "rivid_start": reach_start,
+                        "rivid_end": reach_end,
+                        "block_reach_count": int(reach_end - reach_start),
+                        "matched_supported_reaches_block": matched_reach_count,
+                        "matched_supported_reaches_cumulative": cumulative_matched_reaches,
+                        "rows_emitted_block": 0,
+                        "rows_written_so_far": rows_written,
+                        "elapsed_seconds": round(elapsed, 2),
+                        "rows_per_second": round(rows_written / elapsed, 2) if elapsed > 0 else None,
+                    },
+                )
                 continue
 
             block_mean = mean_values[:, selected_idx]
@@ -392,6 +414,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             block_high_res = None if high_res_values is None else high_res_values[:, selected_idx]
             selected_reaches = block_reach_ids[selected_idx]
 
+            rows_before_block = rows_written
             for time_idx, forecast_time in enumerate(time_values):
                 forecast_time_utc = to_utc_datetime(forecast_time).isoformat()
                 for rid_pos, reach_id in enumerate(selected_reaches):
@@ -429,6 +452,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                     }
 
             elapsed = (datetime.now(UTC) - start).total_seconds()
+            rows_emitted_block = rows_written - rows_before_block
             logger.info(
                 "GEOGLOWS public Zarr artifact preparation progress",
                 extra={
@@ -438,6 +462,10 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                     "total_blocks": len(reach_windows),
                     "rivid_start": reach_start,
                     "rivid_end": reach_end,
+                    "block_reach_count": int(reach_end - reach_start),
+                    "matched_supported_reaches_block": matched_reach_count,
+                    "matched_supported_reaches_cumulative": cumulative_matched_reaches,
+                    "rows_emitted_block": rows_emitted_block,
                     "rows_written_so_far": rows_written,
                     "elapsed_seconds": round(elapsed, 2),
                     "rows_per_second": round(rows_written / elapsed, 2) if elapsed > 0 else None,
@@ -449,6 +477,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             extra={
                 "run_id": run_id,
                 "source_zarr_path": source_zarr_path,
+                "matched_supported_reaches_total": cumulative_matched_reaches,
                 "rows_written": rows_written,
                 "elapsed_seconds": round((datetime.now(UTC) - start).total_seconds(), 2),
             },
@@ -485,8 +514,8 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                 return idx
         return 0 if labels else None
 
-    def set_supported_reach_filter(self, reach_ids: set[str] | None) -> None:
-        self._supported_reach_filter = None if reach_ids is None else set(reach_ids)
+    def set_supported_reach_filter(self, reach_ids: set[str] | set[int] | None) -> None:
+        self._supported_reach_filter = None if reach_ids is None else {str(x).strip() for x in reach_ids}
 
     def normalize_bulk_record(self, run_id: str, record: dict) -> BulkForecastArtifactRowSchema | None:
         reach_id = str(record.get("provider_reach_id", record.get("river_id", ""))).strip()

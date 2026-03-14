@@ -394,6 +394,27 @@ def test_prepare_bulk_artifact_if_present_skip_returns_zero(db_session):
     assert second_count == 0
 
 
+def test_prepare_bulk_artifact_skip_rebuilds_incomplete_public_zarr_artifact(db_session):
+    class _PublicModeProvider(FakeProvider):
+        def bulk_acquisition_mode(self) -> str:
+            return "aws_public_zarr"
+
+    service = ForecastService(db_session, Settings(), {"geoglows": _PublicModeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["101", "102"])
+
+    artifact_path = service.artifacts.artifact_path("geoglows", run.run_id)
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(
+        '{"provider":"geoglows","run_id":"%s","provider_reach_id":"101","forecast_time_utc":"2024-01-01T00:00:00+00:00"}\n'
+        % run.run_id
+    )
+
+    _, count = service.prepare_bulk_artifact("geoglows", run.run_id, if_present="skip")
+
+    assert count > 1
+
+
 def test_run_status_reports_map_ready_for_bulk_pipeline(db_session):
     settings = Settings(FORECAST_BULK_INGEST_BATCH_SIZE=2)
     service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
@@ -413,6 +434,15 @@ def test_run_status_reports_map_ready_for_bulk_pipeline(db_session):
     assert status.summarize.summary_row_count > 0
     assert status.map_row_count > 0
     assert status.failure_stage is None
+    assert status.completed_stages == [
+        "discovered",
+        "raw_acquired",
+        "artifact_prepared",
+        "ingested",
+        "summarized",
+        "map_ready",
+    ]
+    assert status.missing_stages == []
 
 
 def test_run_status_tracks_missing_artifact_for_bulk_ingest_failure(db_session):
@@ -534,3 +564,22 @@ def test_latest_resolution_uses_authoritative_upstream_run_across_bulk_lifecycle
     latest = service.get_latest_run("geoglows")
     assert latest is not None
     assert latest.run_id == "2026031400"
+
+
+def test_discover_latest_run_does_not_reset_existing_stage_progress(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["101", "102"])
+    service.prepare_bulk_artifact("geoglows", run.run_id)
+    service.ingest_forecast_run("geoglows", run.run_id, ingest_mode="bulk")
+    service.summarize_run("geoglows", run.run_id)
+
+    before = service.get_run_status("geoglows", run.run_id)
+    assert before.map_ready is True
+
+    service.discover_latest_run("geoglows")
+    after = service.get_run_status("geoglows", run.run_id)
+
+    assert after.map_ready is True
+    assert after.completed_stages == before.completed_stages
+    assert after.missing_stages == []

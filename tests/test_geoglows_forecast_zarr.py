@@ -98,6 +98,42 @@ class _FakeXR:
         return _FakeDataset()
 
 
+class _FakeDatasetThreeTimes(_FakeDataset):
+    def __init__(self):
+        self.coords = {
+            "time": _FakeCoord(
+                [
+                    np.datetime64("2026-03-14T00:00:00"),
+                    np.datetime64("2026-03-14T01:00:00"),
+                    np.datetime64("2026-03-14T02:00:00"),
+                ]
+            ),
+            "river_id": _FakeCoord([760021611, 760021612]),
+            "ensemble": _FakeCoord(["high_res", "ens_1", "ens_2"]),
+        }
+        self.data_vars = {
+            "Qout": _FakeDataArray(
+                values=[
+                    [[10.0, 12.0, 14.0], [20.0, 22.0, 24.0], [30.0, 32.0, 34.0]],
+                    [[40.0, 42.0, 44.0], [50.0, 52.0, 54.0], [60.0, 62.0, 64.0]],
+                ],
+                dims=("river_id", "time", "ensemble"),
+                coords=self.coords,
+                chunks=((2,), (3,), (3,)),
+            )
+        }
+        self.sizes = {"river_id": 2, "time": 3, "ensemble": 3}
+        self.attrs = {"title": "fake3"}
+
+
+class _FakeXRThreeTimes:
+    @staticmethod
+    def open_zarr(path, storage_options=None):
+        _ = path
+        _ = storage_options
+        return _FakeDatasetThreeTimes()
+
+
 def test_latest_run_discovery_parses_zarr_suffix():
     run_id = helper.discover_latest_forecast_run_id(
         s3fs_module=_FakeS3FSModule,
@@ -152,6 +188,32 @@ def test_provider_filters_supported_reaches_within_block(monkeypatch):
 
     assert len(rows) == 2
     assert all(row["provider_reach_id"] == "760021611" for row in rows)
+
+
+def test_provider_supported_reach_filter_normalizes_ints(monkeypatch):
+    settings = Settings()
+    provider = GeoglowsForecastProvider(settings)
+    monkeypatch.setattr(provider, "_import_xarray", lambda: _FakeXR)
+    provider.set_supported_reach_filter({760021611})
+
+    rows = list(provider.iter_raw_bulk_records("2026031400", "ignored"))
+    provider.set_supported_reach_filter(None)
+
+    assert len(rows) == 2
+    assert all(row["provider_reach_id"] == "760021611" for row in rows)
+
+
+def test_provider_emits_full_rows_per_selected_reach_and_time(monkeypatch):
+    settings = Settings()
+    provider = GeoglowsForecastProvider(settings)
+    monkeypatch.setattr(provider, "_import_xarray", lambda: _FakeXRThreeTimes)
+    provider.set_supported_reach_filter({"760021611", "760021612"})
+
+    rows = list(provider.iter_raw_bulk_records("2026031400", "ignored"))
+    provider.set_supported_reach_filter(None)
+
+    # 2 reaches x 3 times
+    assert len(rows) == 6
 
 
 def test_run_exists_uses_bucket_and_suffix():
