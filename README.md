@@ -180,6 +180,9 @@ Print run readiness summary:
 
 ```bash
 python -m app.cli run-status --provider geoglows --run-id latest
+
+# Inspect forecast Zarr structure/chunking for a run
+python -m app.cli forecast-zarr-inspect --run-id latest
 ```
 
 ### Failure tracking
@@ -214,8 +217,8 @@ Provider health responses include capability flags such as `supports_forecast_st
 
 ## Current limitations
 
-- GEOGLOWS run discovery currently uses deterministic local-hour run ID fallback and is designed to be replaced with authoritative run endpoint logic.
-- `forecast_stats` is supported in REST mode (`GEOGLOWS_DATA_SOURCE=rest`) and can ingest forecasts when GEOGLOWS REST is reachable.
+- GEOGLOWS run discovery uses authoritative public bucket listing (`YYYYMMDD00.zarr`) and falls back to `YYYYMMDD00` only if listing fails.
+- `forecast_stats` REST mode is debug-only (`--mode rest_single`) for one/small explicit reaches.
 - `return_periods` is treated as retrospective/AWS-backed in practice; in REST mode this service fails fast with a clear operational message instead of pretending REST support.
 - If retrospective/AWS access is unavailable, return-period ingest will fail and severity classification will degrade to unknown/below-threshold behavior for reaches without thresholds.
 - GEOGLOWS IDs must be 9-digit numeric `river_id` values.
@@ -238,7 +241,7 @@ HydroRIVERS crosswalk should be added in a separate downstream service or module
 1. `python -m alembic upgrade head`
 2. `python -m app.cli discover-latest-run --provider geoglows`
 3. Optional debug smoke: `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 760021611`
-4. Prepare normalized artifact (requires bulk acquisition configuration): `python -m app.cli prepare-bulk-artifact --provider geoglows --run-id latest --filter-supported --if-present overwrite --overwrite-raw`
+4. Prepare normalized artifact from public GEOGLOWS run Zarr: `python -m app.cli prepare-bulk-artifact --provider geoglows --run-id latest --filter-supported --if-present overwrite`
 5. Bulk ingest artifact: `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode bulk`
 6. `python -m app.cli summarize-run --provider geoglows --run-id latest`
 7. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
@@ -313,7 +316,7 @@ For the detailed model-agnostic flood classification design (architecture, thres
 
 The production bulk pipeline is intentionally split into three layers:
 
-1. **Provider acquisition layer**: fetch provider-native run data (GEOGLOWS bulk source).
+1. **Provider acquisition layer**: discover upstream runs and read official GEOGLOWS public forecast Zarr.
 2. **Normalization/export layer**: convert provider-native records into normalized bulk artifact rows.
 3. **Ingest layer**: load normalized artifact rows into `forecast_provider_reach_timeseries`.
 
@@ -328,26 +331,36 @@ Current normalized artifact format is JSONL with schema fields:
 
 For production mode, the artifact is the bridge between provider-native bulk acquisition and DB ingest.
 
+GEOGLOWS preparation is optimized for the real upstream layout by reading contiguous `rivid` blocks aligned to Zarr chunk windows (observed upstream `Qout` chunking: `(52, 280, 686)`) and computing statistics vectorized over ensemble values. This avoids per-reach random-access patterns that can appear stalled on global runs.
+
+The prepare job logs block progress at INFO level (`run_id`, source Zarr path, block index/total, `rivid` start/end, rows written, elapsed seconds, and rows/sec) so long-running runs show clear forward progress.
+
 
 ## GEOGLOWS bulk acquisition modes
 
-Acquisition is explicitly controlled by `GEOGLOWS_BULK_ACQUISITION_MODE`:
+Production mode is `aws_public_zarr` and reads official GEOGLOWS upstream runs from:
 
+- `s3://geoglows-v2-forecasts/`
+- region: `us-west-2`
+- anonymous (`no-sign-request`)
+- one Zarr per run: `YYYYMMDD00.zarr/`
+- forecast variable: `Qout` (confirmed dims: `ensemble, time, rivid`)
+
+Acquisition is controlled by `GEOGLOWS_BULK_ACQUISITION_MODE`:
+
+- `aws_public_zarr` (default, production): discover latest run from bucket object names and read run Zarr directly.
 - `manual_artifact_only`: backend does not acquire raw data; operators provide normalized artifact directly.
 - `local_file`: backend stages a local raw JSONL file from `GEOGLOWS_BULK_RAW_SOURCE_URI`.
 - `remote_http`: backend downloads raw JSONL from HTTP(S) URL in `GEOGLOWS_BULK_RAW_SOURCE_URI` (supports `{run_id}` templating).
-- `remote_object_store`: declared mode for future object-store retrieval (currently fails with clear message).
 
-Key acquisition config:
+Key production config:
 
-- `GEOGLOWS_BULK_ACQUISITION_MODE`
-- `GEOGLOWS_BULK_RAW_SOURCE_URI`
-- `GEOGLOWS_BULK_REMOTE_AUTH_TOKEN`
-- `GEOGLOWS_BULK_STAGING_DIR`
-- `GEOGLOWS_BULK_DOWNLOAD_TIMEOUT_SECONDS`
-- `GEOGLOWS_BULK_DOWNLOAD_MAX_RETRIES`
-- `GEOGLOWS_BULK_OVERWRITE_EXISTING_RAW`
-- `GEOGLOWS_BULK_RAW_RETENTION_RUNS`
+- `GEOGLOWS_BULK_ACQUISITION_MODE=aws_public_zarr`
+- `GEOGLOWS_FORECAST_BUCKET=geoglows-v2-forecasts`
+- `GEOGLOWS_FORECAST_REGION=us-west-2`
+- `GEOGLOWS_FORECAST_USE_ANON=true`
+- `GEOGLOWS_FORECAST_VARIABLE=Qout`
+- `GEOGLOWS_FORECAST_RUN_SUFFIX=.zarr`
 
 Artifact/ingest config:
 
