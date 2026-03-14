@@ -13,6 +13,9 @@ from app.main import app
 
 
 class FakeProvider:
+    def __init__(self, supports_bulk: bool = True):
+        self._supports_bulk = supports_bulk
+
     def get_provider_name(self) -> str:
         return "geoglows"
 
@@ -53,6 +56,20 @@ class FakeProvider:
                     )
                 )
         return rows
+
+
+    def supports_bulk_forecast_ingest(self) -> bool:
+        return self._supports_bulk
+
+    def iter_bulk_forecast_timeseries(self, run_id, supported_reach_ids, batch_size):
+        reach_batch = []
+        for reach_id in supported_reach_ids:
+            reach_batch.append(reach_id)
+            if len(reach_batch) >= batch_size:
+                yield self.fetch_forecast_timeseries(run_id, reach_batch)
+                reach_batch = []
+        if reach_batch:
+            yield self.fetch_forecast_timeseries(run_id, reach_batch)
 
     def summarize_reach(self, run_id, reach_id, timeseries_rows, return_period_row):
         from app.forecast.classify import classify_peak_flow
