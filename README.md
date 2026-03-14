@@ -116,6 +116,94 @@ Reach detail endpoint supports `timeseries_limit` query parameter (default 500, 
 REST mode is debug/smoke only for one or small reach sets. Production full-network ingest uses prepared normalized artifacts and then `--mode bulk`.
 `--mode bulk` and `--reach-id` are intentionally mutually exclusive to prevent accidental fallback semantics.
 
+
+## Run readiness and map-ready semantics
+
+The backend now exposes explicit, provider-agnostic run lifecycle stages:
+
+- `discovered`
+- `raw_acquired`
+- `artifact_prepared`
+- `ingested`
+- `summarized`
+- `map_ready`
+
+These stages are tracked in run operational metadata (`forecast_runs.metadata_json.ops`) with stage completion, failure stage/message, and last-updated timestamps.
+
+### Map-ready definition
+
+A run is `map_ready=true` only when all of the following are true:
+
+1. Run exists.
+2. Artifact source is prepared (`artifact_prepared`; normalized artifact exists).
+3. Timeseries rows exist for the run.
+4. Summary rows exist for the run.
+5. `/forecast/map/reaches` can serve rows for the run (same summary row backing table).
+
+The same rule is used by:
+
+- `GET /forecast/health`
+- `GET /forecast/runs/{provider}/{run_id}/status`
+- `python -m app.cli run-status`
+
+### Operational status fields
+
+`GET /forecast/health?provider=...` keeps existing fields and now includes latest-run operational fields:
+
+- `latest_run_artifact_exists`
+- `latest_run_artifact_row_count`
+- `latest_run_timeseries_row_count`
+- `latest_run_summary_count`
+- `latest_run_map_count`
+- `latest_run_status`
+- `latest_run_missing_stages`
+- `latest_run_map_ready`
+- `latest_run_failure_stage`
+- `latest_run_failure_message`
+
+Detailed run readiness endpoint:
+
+```bash
+curl "http://localhost:8000/forecast/runs/geoglows/latest/status"
+```
+
+### Operational CLI commands
+
+Inspect artifact:
+
+```bash
+python -m app.cli inspect-run-artifact --provider geoglows --run-id latest
+python -m app.cli inspect-run-artifact --provider geoglows --run-id latest --preview-limit 3
+```
+
+Print run readiness summary:
+
+```bash
+python -m app.cli run-status --provider geoglows --run-id latest
+```
+
+### Failure tracking
+
+Failures are explicitly tracked by stage with a short message for:
+
+- raw acquisition
+- normalization/artifact preparation
+- bulk ingest
+- summarization
+
+Use `run-status` or `/forecast/runs/{provider}/{run_id}/status` to inspect `failure_stage` and `failure_message`.
+
+### Rerun and idempotency notes
+
+- `prepare-bulk-artifact` supports `--if-present skip|overwrite|error`.
+  - `skip`: preserves existing artifact.
+  - `overwrite`: rewrites artifact.
+  - `error`: fails if artifact exists.
+- `ingest-forecast-run --mode bulk` is upsert-based and safe to rerun from the same artifact.
+- `summarize-run` is upsert-based and safe to rerun after ingest.
+- In operational practice, run `summarize-run` after each ingest refresh to keep map rows current.
+
+
 ## Tests
 
 ```bash

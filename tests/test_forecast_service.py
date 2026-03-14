@@ -392,3 +392,41 @@ def test_prepare_bulk_artifact_if_present_skip_returns_zero(db_session):
     assert first_path == second_path
     assert first_count > 0
     assert second_count == 0
+
+
+def test_run_status_reports_map_ready_for_bulk_pipeline(db_session):
+    settings = Settings(FORECAST_BULK_INGEST_BATCH_SIZE=2)
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["101", "102"])
+    service.prepare_bulk_artifact("geoglows", run.run_id)
+    service.ingest_forecast_run("geoglows", run.run_id, ingest_mode="bulk")
+    service.summarize_run("geoglows", run.run_id)
+
+    status = service.get_run_status("geoglows", run.run_id)
+
+    assert status.map_ready is True
+    assert status.current_status == "map_ready"
+    assert status.artifact.exists is True
+    assert status.artifact.row_count > 0
+    assert status.ingest.timeseries_row_count > 0
+    assert status.summarize.summary_row_count > 0
+    assert status.map_row_count > 0
+    assert status.failure_stage is None
+
+
+def test_run_status_tracks_missing_artifact_for_bulk_ingest_failure(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["101"])
+
+    try:
+        service.ingest_forecast_run("geoglows", run.run_id, ingest_mode="bulk")
+    except ValueError:
+        pass
+
+    status = service.get_run_status("geoglows", run.run_id)
+    assert status.map_ready is False
+    assert "artifact_prepared" in status.missing_stages
+    assert status.failure_stage == "ingested"
+    assert status.failure_message is not None

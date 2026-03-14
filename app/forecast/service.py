@@ -1,6 +1,7 @@
 import logging
+from datetime import UTC, datetime
 from time import perf_counter
-from typing import Literal
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -22,6 +23,11 @@ from app.forecast.schemas import (
     ForecastRunSchema,
     MapReachSummarySchema,
     ProviderHealthResponse,
+    RawAcquisitionStatus,
+    ArtifactStatus,
+    IngestStatus,
+    SummarizeStatus,
+    RunReadinessStatusResponse,
     ReachDetailResponse,
     ReachSummarySchema,
     ReturnPeriodSchema,
@@ -43,14 +49,92 @@ class ForecastService:
     def list_providers(self) -> list[str]:
         return sorted(self.providers.keys())
 
+    STAGE_DISCOVERED = "discovered"
+    STAGE_RAW_ACQUIRED = "raw_acquired"
+    STAGE_ARTIFACT_PREPARED = "artifact_prepared"
+    STAGE_INGESTED = "ingested"
+    STAGE_SUMMARIZED = "summarized"
+    STAGE_MAP_READY = "map_ready"
+    STAGE_ORDER = [
+        STAGE_DISCOVERED,
+        STAGE_RAW_ACQUIRED,
+        STAGE_ARTIFACT_PREPARED,
+        STAGE_INGESTED,
+        STAGE_SUMMARIZED,
+        STAGE_MAP_READY,
+    ]
+    MAP_READY_DEFINITION = (
+        "run exists; artifact prepared (or equivalent ingest source completed); timeseries rows exist; "
+        "summary rows exist; map rows exist via /forecast/map/reaches"
+    )
+
     def _get_provider(self, provider: str) -> ForecastProviderAdapter:
         if provider not in self.providers:
             raise ValueError(f"Provider '{provider}' is not enabled")
         return self.providers[provider]
 
+    def _run_ops_metadata(self, run_row: models.ForecastRun | None) -> dict[str, Any]:
+        if run_row is None or not run_row.metadata_json:
+            return {}
+        metadata = run_row.metadata_json
+        if not isinstance(metadata, dict):
+            return {}
+        return dict(metadata.get("ops", {})) if isinstance(metadata.get("ops", {}), dict) else {}
+
+    def _set_run_ops_metadata(self, run_row: models.ForecastRun, ops: dict[str, Any]) -> None:
+        base = run_row.metadata_json if isinstance(run_row.metadata_json, dict) else {}
+        merged = dict(base)
+        merged["ops"] = ops
+        run_row.metadata_json = merged
+
+    def _touch_ops(self, ops: dict[str, Any]) -> dict[str, Any]:
+        ops["last_updated_utc"] = datetime.now(UTC).isoformat()
+        return ops
+
+    def _record_run_failure(self, provider: str, run_id: str, stage: str, message: str) -> None:
+        run_row = self.repo.get_run(provider, run_id)
+        if run_row is None:
+            return
+        ops = self._run_ops_metadata(run_row)
+        ops["failure_stage"] = stage
+        ops["failure_message"] = str(message)
+        self._touch_ops(ops)
+        self._set_run_ops_metadata(run_row, ops)
+        self.db.commit()
+
+    def _mark_stage_complete(self, provider: str, run_id: str, stage: str) -> None:
+        run_row = self.repo.get_run(provider, run_id)
+        if run_row is None:
+            return
+        ops = self._run_ops_metadata(run_row)
+        completed = set(ops.get("completed_stages", []))
+        completed.add(stage)
+        ops["completed_stages"] = [item for item in self.STAGE_ORDER if item in completed]
+        if stage == self.STAGE_MAP_READY:
+            ops["map_ready"] = True
+        if ops.get("failure_stage") == stage:
+            ops["failure_stage"] = None
+            ops["failure_message"] = None
+        self._touch_ops(ops)
+        self._set_run_ops_metadata(run_row, ops)
+        self.db.commit()
+
     def discover_latest_run(self, provider: str) -> ForecastRunSchema:
-        run = self._get_provider(provider).discover_latest_run()
-        self.repo.upsert_run(run)
+        adapter = self._get_provider(provider)
+        run = adapter.discover_latest_run()
+        run_row = self.repo.upsert_run(run)
+        ops = self._run_ops_metadata(run_row)
+        ops.setdefault("raw_acquisition", {})
+        ops.setdefault("artifact", {})
+        ops.setdefault("ingest", {})
+        ops.setdefault("summarize", {})
+        ops.setdefault("map", {})
+        ops["completed_stages"] = [self.STAGE_DISCOVERED]
+        ops["current_status"] = self.STAGE_DISCOVERED
+        ops["map_ready"] = False
+        ops["raw_acquisition"]["mode"] = adapter.bulk_acquisition_mode()
+        self._touch_ops(ops)
+        self._set_run_ops_metadata(run_row, ops)
         self.db.commit()
         return run
 
@@ -143,9 +227,38 @@ class ForecastService:
         if if_present not in {"skip", "overwrite", "error"}:
             raise ValueError("if_present must be one of: skip, overwrite, error")
 
+        run_row = self.repo.get_run(provider, resolved_run.run_id)
+        if run_row is None:
+            raise ValueError(f"Run '{resolved_run.run_id}' not found for provider '{provider}'")
+
+        ops = self._run_ops_metadata(run_row)
+        raw = dict(ops.get("raw_acquisition", {}))
+        artifact = dict(ops.get("artifact", {}))
+        raw["attempted"] = True
+        raw["succeeded"] = False
+        raw["mode"] = adapter.bulk_acquisition_mode()
+        ops["raw_acquisition"] = raw
+        ops["artifact"] = artifact
+        ops["current_status"] = self.STAGE_DISCOVERED
+        self._touch_ops(ops)
+        self._set_run_ops_metadata(run_row, ops)
+        self.db.commit()
+
         artifact_path = self.artifacts.artifact_path(provider, resolved_run.run_id)
         if artifact_path.exists():
+            existing_count = self.artifacts.count_rows(provider, resolved_run.run_id)
             if if_present == "skip":
+                raw["succeeded"] = True
+                raw["staged_raw_path"] = raw.get("staged_raw_path")
+                artifact.update({"exists": True, "path": str(artifact_path), "row_count": existing_count})
+                ops["raw_acquisition"] = raw
+                ops["artifact"] = artifact
+                ops["current_status"] = self.STAGE_ARTIFACT_PREPARED
+                self._touch_ops(ops)
+                self._set_run_ops_metadata(run_row, ops)
+                self.db.commit()
+                self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_RAW_ACQUIRED)
+                self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED)
                 logger.info(
                     "skipping bulk artifact preparation because artifact exists",
                     extra={
@@ -157,84 +270,115 @@ class ForecastService:
                 )
                 return str(artifact_path), 0
             if if_present == "error":
-                raise ValueError(
+                message = (
                     f"Bulk artifact already exists for provider={provider}, run_id={resolved_run.run_id}: {artifact_path}"
                 )
+                self._record_run_failure(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED, message)
+                raise ValueError(message)
 
         supported_reaches: set[str] | None = None
         if filter_to_supported_reaches:
             supported_reaches = set(self.repo.iter_supported_reach_ids(provider, as_chunks=False))
             if not supported_reaches:
-                raise ValueError(
+                message = (
                     f"No supported reaches found for provider '{provider}'. "
                     "Import return periods first to establish supported map reaches."
                 )
+                self._record_run_failure(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED, message)
+                raise ValueError(message)
 
-        started_at = perf_counter()
-        staged_raw_path = adapter.acquire_bulk_raw_source(resolved_run.run_id, overwrite=overwrite_raw)
+        try:
+            started_at = perf_counter()
+            staged_raw_path = adapter.acquire_bulk_raw_source(resolved_run.run_id, overwrite=overwrite_raw)
+            raw["source_uri"] = staged_raw_path
+            raw["staged_raw_path"] = staged_raw_path
+            raw["succeeded"] = True
+            ops["raw_acquisition"] = raw
+            ops["current_status"] = self.STAGE_RAW_ACQUIRED
+            self._touch_ops(ops)
+            self._set_run_ops_metadata(run_row, ops)
+            self.db.commit()
+            self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_RAW_ACQUIRED)
 
-        logger.info(
-            "starting bulk artifact preparation",
-            extra={
-                "provider": provider,
-                "run_id": resolved_run.run_id,
-                "acquisition_mode": adapter.bulk_acquisition_mode(),
-                "raw_source_location": staged_raw_path,
-                "filter_to_supported_reaches": filter_to_supported_reaches,
-                "supported_reach_count": 0 if supported_reaches is None else len(supported_reaches),
-                "write_batch_size": self.settings.forecast_bulk_artifact_write_batch_size,
-                "if_present": if_present,
-            },
-        )
+            logger.info(
+                "starting bulk artifact preparation",
+                extra={
+                    "provider": provider,
+                    "run_id": resolved_run.run_id,
+                    "acquisition_mode": adapter.bulk_acquisition_mode(),
+                    "raw_source_location": staged_raw_path,
+                    "filter_to_supported_reaches": filter_to_supported_reaches,
+                    "supported_reach_count": 0 if supported_reaches is None else len(supported_reaches),
+                    "write_batch_size": self.settings.forecast_bulk_artifact_write_batch_size,
+                    "if_present": if_present,
+                },
+            )
 
-        stats = {
-            "raw_records_seen": 0,
-            "normalized_rows_written": 0,
-            "rows_dropped_filtered": 0,
-            "rows_dropped_invalid": 0,
-        }
+            stats = {
+                "raw_records_seen": 0,
+                "normalized_rows_written": 0,
+                "rows_dropped_filtered": 0,
+                "rows_dropped_invalid": 0,
+            }
 
-        def _normalized_rows():
-            for record in adapter.iter_raw_bulk_records(resolved_run.run_id, staged_raw_path):
-                stats["raw_records_seen"] += 1
-                try:
-                    row = adapter.normalize_bulk_record(resolved_run.run_id, record)
-                except Exception:
-                    stats["rows_dropped_invalid"] += 1
-                    continue
-                if row is None:
-                    stats["rows_dropped_invalid"] += 1
-                    continue
-                if supported_reaches is not None and row.provider_reach_id not in supported_reaches:
-                    stats["rows_dropped_filtered"] += 1
-                    continue
-                stats["normalized_rows_written"] += 1
-                yield row
+            def _normalized_rows():
+                for record in adapter.iter_raw_bulk_records(resolved_run.run_id, staged_raw_path):
+                    stats["raw_records_seen"] += 1
+                    try:
+                        row = adapter.normalize_bulk_record(resolved_run.run_id, record)
+                    except Exception:
+                        stats["rows_dropped_invalid"] += 1
+                        continue
+                    if row is None:
+                        stats["rows_dropped_invalid"] += 1
+                        continue
+                    if supported_reaches is not None and row.provider_reach_id not in supported_reaches:
+                        stats["rows_dropped_filtered"] += 1
+                        continue
+                    stats["normalized_rows_written"] += 1
+                    yield row
 
-        artifact_path, _ = self.artifacts.write_rows(provider, resolved_run.run_id, _normalized_rows())
-        removed_artifacts = self.artifacts.cleanup_old_runs(
-            provider, keep_latest=self.settings.forecast_bulk_artifact_retention_runs
-        )
-        removed_raw = adapter.cleanup_old_raw_staging()
+            artifact_path, _ = self.artifacts.write_rows(provider, resolved_run.run_id, _normalized_rows())
+            removed_artifacts = self.artifacts.cleanup_old_runs(
+                provider, keep_latest=self.settings.forecast_bulk_artifact_retention_runs
+            )
+            removed_raw = adapter.cleanup_old_raw_staging()
 
-        logger.info(
-            "completed bulk artifact preparation",
-            extra={
-                "provider": provider,
-                "run_id": resolved_run.run_id,
-                "acquisition_mode": adapter.bulk_acquisition_mode(),
-                "raw_source_location": staged_raw_path,
-                "artifact_path": str(artifact_path),
-                "raw_records_seen": stats["raw_records_seen"],
-                "normalized_rows_written": stats["normalized_rows_written"],
-                "rows_dropped_filtered": stats["rows_dropped_filtered"],
-                "rows_dropped_invalid": stats["rows_dropped_invalid"],
-                "removed_old_artifacts": removed_artifacts,
-                "removed_old_raw_files": removed_raw,
-                "elapsed_seconds": round(perf_counter() - started_at, 3),
-            },
-        )
-        return str(artifact_path), stats["normalized_rows_written"]
+            artifact.update(
+                {
+                    "exists": True,
+                    "path": str(artifact_path),
+                    "row_count": stats["normalized_rows_written"],
+                }
+            )
+            ops["artifact"] = artifact
+            ops["current_status"] = self.STAGE_ARTIFACT_PREPARED
+            self._touch_ops(ops)
+            self._set_run_ops_metadata(run_row, ops)
+            self.db.commit()
+            self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED)
+
+            logger.info(
+                "completed bulk artifact preparation",
+                extra={
+                    "provider": provider,
+                    "run_id": resolved_run.run_id,
+                    "acquisition_mode": adapter.bulk_acquisition_mode(),
+                    "raw_source_location": staged_raw_path,
+                    "artifact_path": str(artifact_path),
+                    "raw_records_seen": stats["raw_records_seen"],
+                    "normalized_rows_written": stats["normalized_rows_written"],
+                    "rows_dropped_filtered": stats["rows_dropped_filtered"],
+                    "rows_dropped_invalid": stats["rows_dropped_invalid"],
+                    "removed_old_artifacts": removed_artifacts,
+                    "removed_old_raw_files": removed_raw,
+                    "elapsed_seconds": round(perf_counter() - started_at, 3),
+                },
+            )
+            return str(artifact_path), stats["normalized_rows_written"]
+        except Exception as exc:
+            self._record_run_failure(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED, str(exc))
+            raise
 
     def ingest_forecast_run(
         self,
@@ -275,41 +419,60 @@ class ForecastService:
                 "total_reach_count": len(reach_ids),
             },
         )
-        started_at = perf_counter()
-        rows = adapter.fetch_forecast_timeseries(run_id, reach_ids)
-        rows_written = self.repo.bulk_upsert_timeseries(rows)
-        run_row = self.repo.get_run(provider, run_id)
-        if run_row:
-            run_row.ingest_status = "partial" if rows_written == 0 else "complete"
-        self.db.commit()
-        logger.info(
-            "completed forecast ingest",
-            extra={
-                "provider": provider,
-                "run_id": run_id,
-                "ingest_mode": "rest_single",
-                "source": "forecast_stats_rest",
-                "rows_written": rows_written,
-                "elapsed_seconds": round(perf_counter() - started_at, 3),
-            },
-        )
-        return rows_written
+        try:
+            started_at = perf_counter()
+            rows = adapter.fetch_forecast_timeseries(run_id, reach_ids)
+            rows_written = self.repo.bulk_upsert_timeseries(rows)
+            run_row = self.repo.get_run(provider, run_id)
+            if run_row:
+                run_row.ingest_status = "partial" if rows_written == 0 else "complete"
+                ops = self._run_ops_metadata(run_row)
+                ingest = dict(ops.get("ingest", {}))
+                ingest["completed"] = rows_written > 0
+                ingest["timeseries_row_count"] = self.repo.count_timeseries_rows_for_run(provider, run_id)
+                ingest["mode"] = "rest_single"
+                ops["ingest"] = ingest
+                ops["current_status"] = self.STAGE_INGESTED if ingest["completed"] else self.STAGE_DISCOVERED
+                self._touch_ops(ops)
+                self._set_run_ops_metadata(run_row, ops)
+            self.db.commit()
+            if rows_written > 0:
+                self._mark_stage_complete(provider, run_id, self.STAGE_INGESTED)
+            logger.info(
+                "completed forecast ingest",
+                extra={
+                    "provider": provider,
+                    "run_id": run_id,
+                    "ingest_mode": "rest_single",
+                    "source": "forecast_stats_rest",
+                    "rows_written": rows_written,
+                    "elapsed_seconds": round(perf_counter() - started_at, 3),
+                },
+            )
+            return rows_written
+        except Exception as exc:
+            self._record_run_failure(provider, run_id, self.STAGE_INGESTED, str(exc))
+            raise
 
     def _ingest_via_bulk(self, adapter: ForecastProviderAdapter, provider: str, run_id: str) -> int:
         _ = adapter
         supported_reach_count = self.repo.count_supported_reaches(provider)
         if supported_reach_count == 0:
-            raise ValueError(
+            message = (
                 f"No supported reaches found for provider '{provider}'. "
                 "Import return periods first to establish supported map reaches."
             )
+            self._record_run_failure(provider, run_id, self.STAGE_INGESTED, message)
+            raise ValueError(message)
 
         artifact_exists = self.artifacts.exists(provider, run_id)
         if not artifact_exists:
-            raise ValueError(
+            message = (
                 "Bulk ingest was requested, but no normalized bulk artifact exists for this run. "
                 "Run prepare-bulk-artifact first."
             )
+            self._record_run_failure(provider, run_id, self.STAGE_INGESTED, message)
+            raise ValueError(message)
 
         logger.info(
             "starting forecast ingest",
@@ -323,66 +486,81 @@ class ForecastService:
             },
         )
 
-        started_at = perf_counter()
-        total_rows = 0
-        batch: list[BulkForecastArtifactRowSchema] = []
-        chunk_index = 0
-        for row in self.artifacts.iter_rows(provider, run_id):
-            batch.append(row)
-            if len(batch) < self.settings.forecast_bulk_ingest_batch_size:
-                continue
-            chunk_index += 1
-            chunk_rows = self._upsert_artifact_batch(batch)
-            total_rows += chunk_rows
-            batch = []
+        try:
+            started_at = perf_counter()
+            total_rows = 0
+            batch: list[BulkForecastArtifactRowSchema] = []
+            chunk_index = 0
+            for row in self.artifacts.iter_rows(provider, run_id):
+                batch.append(row)
+                if len(batch) < self.settings.forecast_bulk_ingest_batch_size:
+                    continue
+                chunk_index += 1
+                chunk_rows = self._upsert_artifact_batch(batch)
+                total_rows += chunk_rows
+                batch = []
+                logger.info(
+                    "ingest chunk complete",
+                    extra={
+                        "provider": provider,
+                        "run_id": run_id,
+                        "ingest_mode": "bulk",
+                        "source": "normalized_artifact",
+                        "chunk_number": chunk_index,
+                        "chunk_rows_written": chunk_rows,
+                        "total_rows_written": total_rows,
+                    },
+                )
+
+            if batch:
+                chunk_index += 1
+                chunk_rows = self._upsert_artifact_batch(batch)
+                total_rows += chunk_rows
+                logger.info(
+                    "ingest chunk complete",
+                    extra={
+                        "provider": provider,
+                        "run_id": run_id,
+                        "ingest_mode": "bulk",
+                        "source": "normalized_artifact",
+                        "chunk_number": chunk_index,
+                        "chunk_rows_written": chunk_rows,
+                        "total_rows_written": total_rows,
+                    },
+                )
+
+            run_row = self.repo.get_run(provider, run_id)
+            if run_row:
+                run_row.ingest_status = "partial" if total_rows == 0 else "complete"
+                ops = self._run_ops_metadata(run_row)
+                ingest = dict(ops.get("ingest", {}))
+                ingest["completed"] = total_rows > 0
+                ingest["timeseries_row_count"] = self.repo.count_timeseries_rows_for_run(provider, run_id)
+                ingest["mode"] = "bulk"
+                ops["ingest"] = ingest
+                ops["current_status"] = self.STAGE_INGESTED if ingest["completed"] else self.STAGE_DISCOVERED
+                self._touch_ops(ops)
+                self._set_run_ops_metadata(run_row, ops)
+            self.db.commit()
+            if total_rows > 0:
+                self._mark_stage_complete(provider, run_id, self.STAGE_INGESTED)
+
             logger.info(
-                "ingest chunk complete",
+                "completed forecast ingest",
                 extra={
                     "provider": provider,
                     "run_id": run_id,
                     "ingest_mode": "bulk",
                     "source": "normalized_artifact",
-                    "chunk_number": chunk_index,
-                    "chunk_rows_written": chunk_rows,
-                    "total_rows_written": total_rows,
+                    "supported_reach_count": supported_reach_count,
+                    "rows_written": total_rows,
+                    "elapsed_seconds": round(perf_counter() - started_at, 3),
                 },
             )
-
-        if batch:
-            chunk_index += 1
-            chunk_rows = self._upsert_artifact_batch(batch)
-            total_rows += chunk_rows
-            logger.info(
-                "ingest chunk complete",
-                extra={
-                    "provider": provider,
-                    "run_id": run_id,
-                    "ingest_mode": "bulk",
-                    "source": "normalized_artifact",
-                    "chunk_number": chunk_index,
-                    "chunk_rows_written": chunk_rows,
-                    "total_rows_written": total_rows,
-                },
-            )
-
-        run_row = self.repo.get_run(provider, run_id)
-        if run_row:
-            run_row.ingest_status = "partial" if total_rows == 0 else "complete"
-        self.db.commit()
-
-        logger.info(
-            "completed forecast ingest",
-            extra={
-                "provider": provider,
-                "run_id": run_id,
-                "ingest_mode": "bulk",
-                "source": "normalized_artifact",
-                "supported_reach_count": supported_reach_count,
-                "rows_written": total_rows,
-                "elapsed_seconds": round(perf_counter() - started_at, 3),
-            },
-        )
-        return total_rows
+            return total_rows
+        except Exception as exc:
+            self._record_run_failure(provider, run_id, self.STAGE_INGESTED, str(exc))
+            raise
 
     def _upsert_artifact_batch(self, batch: list[BulkForecastArtifactRowSchema]) -> int:
         rows = [
@@ -408,32 +586,53 @@ class ForecastService:
         adapter = self._get_provider(provider)
         resolved_run = self._resolve_run(provider, run_id)
 
-        if reach_ids is None:
-            reach_ids = list(
-                self.db.execute(
-                    select(models.ForecastProviderReachTimeseries.provider_reach_id)
-                    .where(
-                        models.ForecastProviderReachTimeseries.provider == provider,
-                        models.ForecastProviderReachTimeseries.run_id == resolved_run.run_id,
-                    )
-                    .distinct()
-                ).scalars()
-            )
+        try:
+            if reach_ids is None:
+                reach_ids = list(
+                    self.db.execute(
+                        select(models.ForecastProviderReachTimeseries.provider_reach_id)
+                        .where(
+                            models.ForecastProviderReachTimeseries.provider == provider,
+                            models.ForecastProviderReachTimeseries.run_id == resolved_run.run_id,
+                        )
+                        .distinct()
+                    ).scalars()
+                )
 
-        summaries: list[ReachSummarySchema] = []
-        for reach_id in reach_ids:
-            ts_rows = [to_timeseries_schema(x) for x in self.repo.get_timeseries(provider, resolved_run.run_id, reach_id)]
-            rp_model = self.repo.get_return_period(provider, reach_id)
-            rp_schema = None if not rp_model else to_return_period_schema(rp_model)
-            if rp_schema is None:
-                logger.info("generating summary without return periods", extra={"provider": provider, "run_id": resolved_run.run_id, "reach_id": reach_id})
-            summary = adapter.summarize_reach(resolved_run.run_id, reach_id, ts_rows, rp_schema)
-            logger.info("summary peak values", extra={"provider": provider, "run_id": resolved_run.run_id, "reach_id": reach_id, "peak_mean_cms": summary.peak_mean_cms, "peak_median_cms": summary.peak_median_cms, "peak_max_cms": summary.peak_max_cms})
-            summaries.append(summary)
+            summaries: list[ReachSummarySchema] = []
+            for reach_id in reach_ids:
+                ts_rows = [to_timeseries_schema(x) for x in self.repo.get_timeseries(provider, resolved_run.run_id, reach_id)]
+                rp_model = self.repo.get_return_period(provider, reach_id)
+                rp_schema = None if not rp_model else to_return_period_schema(rp_model)
+                if rp_schema is None:
+                    logger.info("generating summary without return periods", extra={"provider": provider, "run_id": resolved_run.run_id, "reach_id": reach_id})
+                summary = adapter.summarize_reach(resolved_run.run_id, reach_id, ts_rows, rp_schema)
+                logger.info("summary peak values", extra={"provider": provider, "run_id": resolved_run.run_id, "reach_id": reach_id, "peak_mean_cms": summary.peak_mean_cms, "peak_median_cms": summary.peak_median_cms, "peak_max_cms": summary.peak_max_cms})
+                summaries.append(summary)
 
-        count = self.repo.upsert_summaries(summaries)
-        self.db.commit()
-        return count
+            count = self.repo.upsert_summaries(summaries)
+            run_row = self.repo.get_run(provider, resolved_run.run_id)
+            if run_row:
+                ops = self._run_ops_metadata(run_row)
+                summarize = dict(ops.get("summarize", {}))
+                summary_count = self.repo.count_summaries_for_run(provider, resolved_run.run_id)
+                summarize["completed"] = summary_count > 0
+                summarize["summary_row_count"] = summary_count
+                ops["summarize"] = summarize
+                ops["map"] = {"map_row_count": summary_count}
+                ops["current_status"] = self.STAGE_SUMMARIZED if summary_count > 0 else ops.get("current_status", self.STAGE_DISCOVERED)
+                self._touch_ops(ops)
+                self._set_run_ops_metadata(run_row, ops)
+            self.db.commit()
+            if count > 0:
+                self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_SUMMARIZED)
+            status = self.get_run_status(provider, resolved_run.run_id)
+            if status.map_ready:
+                self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_MAP_READY)
+            return count
+        except Exception as exc:
+            self._record_run_failure(provider, resolved_run.run_id, self.STAGE_SUMMARIZED, str(exc))
+            raise
 
     def get_latest_run(self, provider: str) -> ForecastRunSchema | None:
         self._get_provider(provider)
@@ -537,11 +736,13 @@ class ForecastService:
         status = None
         latest_run_timeseries_row_count = 0
         latest_run_reach_count = 0
+        latest_status: RunReadinessStatusResponse | None = None
         if latest:
             status = latest.ingest_status
             summary_count = self.repo.count_summaries_for_run(provider, latest.run_id)
             latest_run_timeseries_row_count = self.repo.count_timeseries_rows_for_run(provider, latest.run_id)
             latest_run_reach_count = self.repo.count_timeseries_reaches_for_run(provider, latest.run_id)
+            latest_status = self.get_run_status(provider, latest.run_id)
 
         capabilities = getattr(adapter, "capabilities", None)
         supports_forecast_stats_rest = bool(
@@ -555,8 +756,8 @@ class ForecastService:
             getattr(capabilities, f"supports_return_periods_{source}", False)
         )
         local_return_periods_available = self.repo.has_return_periods(provider)
-        latest_run_artifact_exists = bool(latest and self.artifacts.exists(provider, latest.run_id))
-        latest_run_map_ready = bool(latest and latest_run_timeseries_row_count > 0 and summary_count > 0)
+        latest_run_artifact_exists = bool(latest_status and latest_status.artifact.exists)
+        latest_run_map_ready = bool(latest_status and latest_status.map_ready)
 
         return ProviderHealthResponse(
             provider=provider,
@@ -576,8 +777,111 @@ class ForecastService:
             latest_run_reach_count=latest_run_reach_count,
             latest_run_has_summaries=summary_count > 0,
             latest_run_artifact_exists=latest_run_artifact_exists,
+            latest_run_artifact_row_count=0 if latest_status is None else latest_status.artifact.row_count,
+            latest_run_summary_count=0 if latest_status is None else latest_status.summarize.summary_row_count,
+            latest_run_map_count=0 if latest_status is None else latest_status.map_row_count,
+            latest_run_status=None if latest_status is None else latest_status.current_status,
+            latest_run_missing_stages=[] if latest_status is None else latest_status.missing_stages,
             latest_run_map_ready=latest_run_map_ready,
+            latest_run_failure_stage=None if latest_status is None else latest_status.failure_stage,
+            latest_run_failure_message=None if latest_status is None else latest_status.failure_message,
         )
+
+    def _parse_last_updated(self, value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+    def _run_status_from_row(self, provider: str, run_row: models.ForecastRun) -> RunReadinessStatusResponse:
+        ops = self._run_ops_metadata(run_row)
+        completed_stages = [stage for stage in self.STAGE_ORDER if stage in set(ops.get("completed_stages", []))]
+
+        artifact_exists = self.artifacts.exists(provider, run_row.run_id)
+        artifact_path = str(self.artifacts.artifact_path(provider, run_row.run_id))
+        artifact_row_count = self.artifacts.count_rows(provider, run_row.run_id) if artifact_exists else 0
+        timeseries_row_count = self.repo.count_timeseries_rows_for_run(provider, run_row.run_id)
+        summary_row_count = self.repo.count_summaries_for_run(provider, run_row.run_id)
+        map_row_count = summary_row_count
+
+        raw_meta = dict(ops.get("raw_acquisition", {}))
+        artifact_meta = dict(ops.get("artifact", {}))
+        ingest_meta = dict(ops.get("ingest", {}))
+        summarize_meta = dict(ops.get("summarize", {}))
+
+        artifact_source_completed = artifact_exists
+        map_ready = bool(
+            artifact_source_completed and timeseries_row_count > 0 and summary_row_count > 0 and map_row_count > 0
+        )
+        if map_ready and self.STAGE_MAP_READY not in completed_stages:
+            completed_stages.append(self.STAGE_MAP_READY)
+
+        missing_stages = [stage for stage in self.STAGE_ORDER if stage not in completed_stages]
+
+        raw = RawAcquisitionStatus(
+            attempted=bool(raw_meta.get("attempted", False)),
+            succeeded=bool(raw_meta.get("succeeded", False)),
+            mode=raw_meta.get("mode"),
+            source_uri=raw_meta.get("source_uri"),
+            staged_raw_path=raw_meta.get("staged_raw_path"),
+        )
+        artifact = ArtifactStatus(
+            exists=artifact_exists,
+            path=artifact_meta.get("path") or artifact_path,
+            row_count=artifact_row_count,
+        )
+        ingest = IngestStatus(
+            completed=timeseries_row_count > 0,
+            timeseries_row_count=timeseries_row_count,
+        )
+        summarize = SummarizeStatus(
+            completed=summary_row_count > 0,
+            summary_row_count=summary_row_count,
+        )
+
+        current_status = ops.get("current_status") or run_row.ingest_status or self.STAGE_DISCOVERED
+        if map_ready:
+            current_status = self.STAGE_MAP_READY
+        elif summarize.completed:
+            current_status = self.STAGE_SUMMARIZED
+        elif ingest.completed:
+            current_status = self.STAGE_INGESTED
+        elif artifact.exists:
+            current_status = self.STAGE_ARTIFACT_PREPARED
+        elif raw.succeeded:
+            current_status = self.STAGE_RAW_ACQUIRED
+        else:
+            current_status = self.STAGE_DISCOVERED
+
+        return RunReadinessStatusResponse(
+            provider=provider,
+            run_id=run_row.run_id,
+            current_status=current_status,
+            completed_stages=completed_stages,
+            missing_stages=missing_stages,
+            raw_acquisition=raw,
+            artifact=artifact,
+            ingest=ingest,
+            summarize=summarize,
+            map_row_count=map_row_count,
+            map_ready=map_ready,
+            map_ready_definition=self.MAP_READY_DEFINITION,
+            failure_stage=ops.get("failure_stage"),
+            failure_message=ops.get("failure_message"),
+            last_updated_utc=self._parse_last_updated(ops.get("last_updated_utc")) or run_row.updated_at,
+        )
+
+    def get_run_status(self, provider: str, run_id: str) -> RunReadinessStatusResponse:
+        self._get_provider(provider)
+        resolved = self._resolve_run(provider, run_id, require_existing=False)
+        if not resolved:
+            raise ValueError(f"Run '{run_id}' not found for provider '{provider}'")
+        run_row = self.repo.get_run(provider, resolved.run_id)
+        if run_row is None:
+            raise ValueError(f"Run '{resolved.run_id}' not found for provider '{provider}'")
+        return self._run_status_from_row(provider, run_row)
 
     def _resolve_run(
         self, provider: str, run_id: str, require_existing: bool = True

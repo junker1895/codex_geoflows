@@ -69,7 +69,27 @@ def test_api_endpoints(client, db_session):
     assert "latest_run_has_timeseries" in payload
     assert "latest_run_has_summaries" in payload
     assert "latest_run_artifact_exists" in payload
+    assert "latest_run_artifact_row_count" in payload
+    assert "latest_run_summary_count" in payload
+    assert "latest_run_map_count" in payload
+    assert "latest_run_status" in payload
+    assert "latest_run_missing_stages" in payload
+    assert "latest_run_failure_stage" in payload
+    assert "latest_run_failure_message" in payload
     assert "latest_run_map_ready" in payload
+
+    run_status = client.get("/forecast/runs/geoglows/2024010100/status")
+    assert run_status.status_code == 200
+    status_payload = run_status.json()
+    assert status_payload["provider"] == "geoglows"
+    assert status_payload["run_id"] == "2024010100"
+    assert "current_status" in status_payload
+    assert "completed_stages" in status_payload
+    assert "missing_stages" in status_payload
+    assert "raw_acquisition" in status_payload
+    assert "artifact" in status_payload
+    assert "ingest" in status_payload
+    assert "summarize" in status_payload
 
 
 def test_map_reaches_endpoint_contract_and_filters(client, db_session):
