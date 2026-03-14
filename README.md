@@ -113,6 +113,7 @@ python -m app.cli smoke-geoglows --river-id 123456789
 Reach detail endpoint supports `timeseries_limit` query parameter (default 500, max 5000) to avoid oversized responses.
 
 REST mode is debug/smoke only for one or small reach sets. Production full-network ingest must use a configured provider bulk source (`--mode bulk`) and will fail fast when that source is missing.
+`--mode bulk` and `--reach-id` are intentionally mutually exclusive to prevent accidental fallback semantics.
 
 ## Tests
 

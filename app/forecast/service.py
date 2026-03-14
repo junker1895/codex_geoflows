@@ -138,6 +138,8 @@ class ForecastService:
 
         if selected_mode != "bulk":
             raise ValueError(f"Unsupported ingest mode '{selected_mode}'")
+        if reach_ids:
+            raise ValueError("ingest_mode=bulk does not accept explicit reach_ids; use rest_single for targeted ingest")
         return self._ingest_via_bulk(adapter, provider, resolved_run.run_id)
 
     def _ingest_via_rest(
@@ -176,78 +178,6 @@ class ForecastService:
             },
         )
         return rows_written
-
-    def _ingest_via_bulk(self, adapter: ForecastProviderAdapter, provider: str, run_id: str) -> int:
-        if not adapter.supports_bulk_forecast_ingest():
-            raise ValueError(
-                "Bulk ingest was requested, but no provider bulk forecast source is configured. "
-                "REST forecast_stats ingest is intentionally limited to single/small batches and is not used "
-                "for full-network runs due to upstream throttling."
-            )
-
-        supported_reach_count = self.repo.count_supported_reaches(provider)
-        if supported_reach_count == 0:
-            raise ValueError(
-                f"No supported reaches found for provider '{provider}'. "
-                "Import return periods first to establish supported map reaches."
-            )
-
-        logger.info(
-            "starting forecast ingest",
-            extra={
-                "provider": provider,
-                "run_id": run_id,
-                "ingest_mode": "bulk",
-                "source": "provider_bulk",
-                "supported_reach_count": supported_reach_count,
-                "batch_size": self.settings.forecast_bulk_ingest_batch_size,
-            },
-        )
-
-        started_at = perf_counter()
-        total_rows = 0
-        for chunk_index, rows in enumerate(
-            adapter.iter_bulk_forecast_timeseries(
-                run_id=run_id,
-                supported_reach_ids=self.repo.iter_supported_reach_ids(provider, as_chunks=False),
-                batch_size=self.settings.forecast_bulk_ingest_batch_size,
-            ),
-            start=1,
-        ):
-            chunk_rows = self.repo.bulk_upsert_timeseries(rows)
-            total_rows += chunk_rows
-            self.db.commit()
-            logger.info(
-                "ingest chunk complete",
-                extra={
-                    "provider": provider,
-                    "run_id": run_id,
-                    "ingest_mode": "bulk",
-                    "source": "provider_bulk",
-                    "chunk_number": chunk_index,
-                    "chunk_rows_written": chunk_rows,
-                    "total_rows_written": total_rows,
-                },
-            )
-
-        run_row = self.repo.get_run(provider, run_id)
-        if run_row:
-            run_row.ingest_status = "partial" if total_rows == 0 else "complete"
-        self.db.commit()
-
-        logger.info(
-            "completed forecast ingest",
-            extra={
-                "provider": provider,
-                "run_id": run_id,
-                "ingest_mode": "bulk",
-                "source": "provider_bulk",
-                "supported_reach_count": supported_reach_count,
-                "rows_written": total_rows,
-                "elapsed_seconds": round(perf_counter() - started_at, 3),
-            },
-        )
-        return total_rows
 
     def _ingest_via_bulk(self, adapter: ForecastProviderAdapter, provider: str, run_id: str) -> int:
         if not adapter.supports_bulk_forecast_ingest():

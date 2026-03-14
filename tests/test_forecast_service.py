@@ -337,3 +337,15 @@ def test_rest_single_ingest_mode_explicit_path(db_session):
     assert count == 3
     detail = service.get_reach_detail("geoglows", "101", run_id=run.run_id)
     assert len(detail.timeseries) == 3
+
+
+def test_bulk_mode_rejects_explicit_reach_ids(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+
+    try:
+        service.ingest_forecast_run("geoglows", run.run_id, reach_ids=["101"], ingest_mode="bulk")
+    except ValueError as exc:
+        assert "does not accept explicit reach_ids" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")

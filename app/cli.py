@@ -131,6 +131,10 @@ def cli_ingest_forecast_run(
             selected_mode = "rest_single" if reach_id else "bulk"
         if selected_mode not in {"rest_single", "bulk"}:
             raise ValueError("--mode must be one of: rest_single, bulk")
+        if selected_mode == "rest_single" and not reach_id:
+            raise ValueError("--mode rest_single requires at least one --reach-id")
+        if selected_mode == "bulk" and reach_id:
+            raise ValueError("--mode bulk cannot be combined with --reach-id; remove --reach-id for full ingest")
 
         service = _build_service()
         count = ingest_forecast_run.run(service, provider, run_id, reach_id, ingest_mode=selected_mode)
