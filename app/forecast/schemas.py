@@ -109,6 +109,25 @@ class BulkForecastArtifactRowSchema(ORMBaseModel):
         return str(value).strip()
 
 
+class BulkForecastSummaryArtifactRowSchema(ORMBaseModel):
+    provider: str
+    run_id: str
+    provider_reach_id: str
+    peak_time_utc: datetime | None = None
+    peak_mean_cms: float | None = None
+    peak_median_cms: float | None = None
+    peak_max_cms: float | None = None
+    return_period_band: str | None = None
+    severity_score: int = 0
+    is_flagged: bool = False
+    raw_payload_json: dict | None = None
+
+    @field_validator("provider_reach_id", mode="before")
+    @classmethod
+    def _normalize_summary_reach_id(cls, value: object) -> str:
+        return str(value).strip()
+
+
 class ClassificationResult(ORMBaseModel):
     return_period_band: str = "unknown"
     severity_score: int = 0

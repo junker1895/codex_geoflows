@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from app.forecast.exceptions import ProviderBackendUnavailableError
 from app.forecast.schemas import (
     BulkForecastArtifactRowSchema,
+    BulkForecastSummaryArtifactRowSchema,
     ForecastRunSchema,
     ReachSummarySchema,
     ReturnPeriodSchema,
@@ -53,6 +54,16 @@ class ForecastProviderAdapter(ABC):
     def cleanup_old_raw_staging(self) -> int:
         return 0
 
+
+    def iter_bulk_summary_records(self, run_id: str) -> Iterator[dict]:
+        raise ProviderBackendUnavailableError(
+            f"Provider '{self.get_provider_name()}' does not support iterating bulk summary records."
+        )
+
+    def normalize_bulk_summary_record(self, run_id: str, record: dict) -> BulkForecastSummaryArtifactRowSchema | None:
+        raise ProviderBackendUnavailableError(
+            f"Provider '{self.get_provider_name()}' does not implement bulk summary normalization."
+        )
     @abstractmethod
     def summarize_reach(
         self,
