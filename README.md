@@ -104,12 +104,17 @@ python -m app.cli discover-latest-run --provider geoglows
 python -m app.cli ingest-return-periods --provider geoglows --reach-id 123 --reach-id 456
 python -m app.cli import-geoglows-return-periods-zarr
 python -m app.cli import-geoglows-return-periods-zarr --method logpearson3 --batch-size 50000
-python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --reach-id 123 --reach-id 456
+python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 123
+python -m app.cli prepare-bulk-artifact --provider geoglows --run-id latest --filter-supported
+python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode bulk
 python -m app.cli summarize-run --provider geoglows --run-id latest
 python -m app.cli smoke-geoglows --river-id 123456789
 ```
 
 Reach detail endpoint supports `timeseries_limit` query parameter (default 500, max 5000) to avoid oversized responses.
+
+REST mode is debug/smoke only for one or small reach sets. Production full-network ingest must use a configured provider bulk source (`--mode bulk`) and will fail fast when that source is missing.
+`--mode bulk` and `--reach-id` are intentionally mutually exclusive to prevent accidental fallback semantics.
 
 ## Tests
 
@@ -126,7 +131,7 @@ Provider health responses include capability flags such as `supports_forecast_st
 - `return_periods` is treated as retrospective/AWS-backed in practice; in REST mode this service fails fast with a clear operational message instead of pretending REST support.
 - If retrospective/AWS access is unavailable, return-period ingest will fail and severity classification will degrade to unknown/below-threshold behavior for reaches without thresholds.
 - GEOGLOWS IDs must be 9-digit numeric `river_id` values.
-- Ingestion is selective by reach IDs (not full global bulk).
+- Bulk ingestion uses the supported-reach universe already loaded in `forecast_provider_return_periods` (typically from GEOGLOWS Zarr import), with configurable chunking via `FORECAST_BULK_INGEST_BATCH_SIZE`.
 - No auth/rate limiting.
 
 ## Extending to future providers
@@ -144,9 +149,11 @@ HydroRIVERS crosswalk should be added in a separate downstream service or module
 
 1. `python -m alembic upgrade head`
 2. `python -m app.cli discover-latest-run --provider geoglows`
-3. `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --reach-id 760021611`
-4. `python -m app.cli summarize-run --provider geoglows --run-id latest`
-5. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
+3. Optional debug smoke: `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 760021611`
+4. Prepare normalized artifact (requires `GEOGLOWS_BULK_FORECAST_SOURCE`): `python -m app.cli prepare-bulk-artifact --provider geoglows --run-id latest --filter-supported`
+5. Bulk ingest artifact: `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode bulk`
+6. `python -m app.cli summarize-run --provider geoglows --run-id latest`
+7. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
 
 Return-period ingest can run from the verified GEOGLOWS Zarr object store path for full severity classification in REST-only forecast environments.
 
@@ -212,3 +219,23 @@ After thresholds are loaded and summarize-run is executed, the same fields are p
 For the detailed model-agnostic flood classification design (architecture, thresholds, peak extraction, banding, API mapping, and multi-model integration guidance), see:
 
 - `docs/flood-classification-system.md`
+
+
+### Production bulk workflow
+
+The production bulk pipeline is intentionally split into three layers:
+
+1. **Provider acquisition layer**: fetch provider-native run data (GEOGLOWS bulk source).
+2. **Normalization/export layer**: convert provider-native records into normalized bulk artifact rows.
+3. **Ingest layer**: load normalized artifact rows into `forecast_provider_reach_timeseries`.
+
+Current normalized artifact format is JSONL with schema fields:
+
+- `provider` (string, required)
+- `run_id` (string, required)
+- `provider_reach_id` (string, required)
+- `forecast_time_utc` (datetime, required)
+- `flow_mean_cms`, `flow_median_cms`, `flow_p25_cms`, `flow_p75_cms`, `flow_max_cms` (float, optional)
+- `raw_payload_json` (object, optional)
+
+For production mode, the artifact is the bridge between provider-native bulk acquisition and DB ingest.

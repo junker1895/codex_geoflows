@@ -148,3 +148,10 @@ def test_geoglows_missing_api_surface_raises_runtime_error():
     provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsInvalid())
     with pytest.raises(Exception, match="does not expose 'forecast_stats'"):
         provider.fetch_forecast_timeseries("2024010100", [VALID_RIVER_ID])
+
+
+def test_bulk_ingest_requires_configured_source():
+    provider = GeoglowsForecastProvider(Settings(), geoglows_module=_MockGeoglowsRestForecastOnly())
+    assert provider.supports_bulk_acquisition() is False
+    with pytest.raises(ProviderBackendUnavailableError, match="bulk acquisition source is not configured"):
+        next(provider.iter_acquired_bulk_records("2024010100"))

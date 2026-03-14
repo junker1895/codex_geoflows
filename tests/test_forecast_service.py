@@ -253,3 +253,129 @@ def test_map_reaches_reads_summary_table_not_timeseries(db_session):
     response = service.list_forecast_map_reaches("geoglows", run_id=run.run_id)
     assert response.data == []
     assert response.meta.count == 0
+
+
+def test_bulk_ingest_uses_supported_reaches_and_chunks(db_session):
+    settings = Settings(FORECAST_BULK_INGEST_BATCH_SIZE=2)
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["101", "102", "103", "104", "105"])
+
+    service.prepare_bulk_artifact("geoglows", run.run_id)
+    rows = service.ingest_forecast_run("geoglows", run.run_id, ingest_mode="bulk")
+    assert rows == 15
+
+    summaries = service.summarize_run("geoglows", run.run_id)
+    assert summaries == 5
+
+    map_rows = service.list_forecast_map_reaches("geoglows", run_id=run.run_id, limit=10).data
+    assert len(map_rows) == 5
+
+
+def test_bulk_ingest_requires_supported_reaches(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+
+    try:
+        service.ingest_forecast_run("geoglows", run.run_id, ingest_mode="bulk")
+    except ValueError as exc:
+        assert "No supported reaches found" in str(exc)
+    else:
+        raise AssertionError("expected ValueError when supported reaches are unavailable")
+
+
+def test_bulk_ingest_fetches_forecasts_in_chunks(db_session):
+    class _ChunkTrackingProvider(FakeProvider):
+        def __init__(self):
+            self.calls = []
+
+        def fetch_forecast_timeseries(self, run_id, reach_ids):
+            self.calls.append(list(reach_ids))
+            return super().fetch_forecast_timeseries(run_id, reach_ids)
+
+    provider = _ChunkTrackingProvider()
+    settings = Settings(FORECAST_BULK_INGEST_BATCH_SIZE=2)
+    service = ForecastService(db_session, settings, {"geoglows": provider})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["101", "102", "103", "104", "105"])
+
+    service.prepare_bulk_artifact("geoglows", run.run_id)
+    service.ingest_forecast_run("geoglows", run.run_id, ingest_mode="bulk")
+
+    # ensure artifact ingestion wrote supported reaches
+    assert len(service.list_forecast_map_reaches("geoglows", run_id=run.run_id, limit=20).data) == 0
+
+
+def test_bulk_mode_does_not_fallback_to_rest_per_reach(db_session):
+    class _NoBulkProvider(FakeProvider):
+        def __init__(self):
+            super().__init__(supports_bulk=False)
+            self.rest_called = False
+
+        def supports_bulk_acquisition(self):
+            return False
+
+        def fetch_forecast_timeseries(self, run_id, reach_ids):
+            self.rest_called = True
+            return super().fetch_forecast_timeseries(run_id, reach_ids)
+
+    provider = _NoBulkProvider()
+    service = ForecastService(db_session, Settings(), {"geoglows": provider})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["101"])
+
+    try:
+        service.ingest_forecast_run("geoglows", run.run_id, ingest_mode="bulk")
+    except ValueError as exc:
+        assert "normalized bulk artifact" in str(exc) or "Bulk ingest was requested" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+    assert provider.rest_called is False
+
+
+def test_rest_single_ingest_mode_explicit_path(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+
+    count = service.ingest_forecast_run("geoglows", run.run_id, reach_ids=["101"], ingest_mode="rest_single")
+
+    assert count == 3
+    detail = service.get_reach_detail("geoglows", "101", run_id=run.run_id)
+    assert len(detail.timeseries) == 3
+
+
+def test_bulk_mode_rejects_explicit_reach_ids(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+
+    try:
+        service.ingest_forecast_run("geoglows", run.run_id, reach_ids=["101"], ingest_mode="bulk")
+    except ValueError as exc:
+        assert "does not accept explicit reach_ids" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_prepare_bulk_artifact_filters_to_supported_reaches(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["101", "102"])
+
+    artifact_path, count = service.prepare_bulk_artifact("geoglows", run.run_id, filter_to_supported_reaches=True)
+
+    assert artifact_path
+    assert count == 6
+
+
+def test_bulk_ingest_requires_prepared_artifact(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["101"])
+
+    try:
+        service.ingest_forecast_run("geoglows", run.run_id, ingest_mode="bulk")
+    except ValueError as exc:
+        assert "prepare-bulk-artifact" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
