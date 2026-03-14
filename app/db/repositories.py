@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 
-from sqlalchemy import Select, and_, desc, select
+from sqlalchemy import Select, and_, desc, func, select
 from sqlalchemy.orm import Session
 
 from app.db import models
@@ -123,6 +123,34 @@ class ForecastRepository:
         self.db.flush()
         return count
 
+
+    def count_timeseries_rows_for_run(self, provider: str, run_id: str) -> int:
+        stmt = select(func.count(models.ForecastProviderReachTimeseries.id)).where(
+            and_(
+                models.ForecastProviderReachTimeseries.provider == provider,
+                models.ForecastProviderReachTimeseries.run_id == run_id,
+            )
+        )
+        return int(self.db.execute(stmt).scalar_one())
+
+    def count_timeseries_reaches_for_run(self, provider: str, run_id: str) -> int:
+        stmt = select(func.count(models.ForecastProviderReachTimeseries.provider_reach_id.distinct())).where(
+            and_(
+                models.ForecastProviderReachTimeseries.provider == provider,
+                models.ForecastProviderReachTimeseries.run_id == run_id,
+            )
+        )
+        return int(self.db.execute(stmt).scalar_one())
+
+    def count_summaries_for_run(self, provider: str, run_id: str) -> int:
+        stmt = select(func.count(models.ForecastProviderReachSummary.id)).where(
+            and_(
+                models.ForecastProviderReachSummary.provider == provider,
+                models.ForecastProviderReachSummary.run_id == run_id,
+            )
+        )
+        return int(self.db.execute(stmt).scalar_one())
+
     def get_latest_run(self, provider: str) -> models.ForecastRun | None:
         return self.db.execute(
             select(models.ForecastRun)
@@ -137,6 +165,40 @@ class ForecastRepository:
                 and_(models.ForecastRun.provider == provider, models.ForecastRun.run_id == run_id)
             )
         ).scalar_one_or_none()
+
+
+    def count_supported_reaches(self, provider: str) -> int:
+        stmt = select(func.count(models.ForecastProviderReturnPeriod.id)).where(
+            models.ForecastProviderReturnPeriod.provider == provider
+        )
+        return int(self.db.execute(stmt).scalar_one())
+
+    def iter_supported_reach_ids(
+        self,
+        provider: str,
+        chunk_size: int = 1000,
+        as_chunks: bool = True,
+    ):
+        stmt = (
+            select(models.ForecastProviderReturnPeriod.provider_reach_id)
+            .where(models.ForecastProviderReturnPeriod.provider == provider)
+            .order_by(models.ForecastProviderReturnPeriod.provider_reach_id)
+        )
+        stream = self.db.execute(stmt).scalars()
+
+        if not as_chunks:
+            for reach_id in stream:
+                yield str(reach_id)
+            return
+
+        batch: list[str] = []
+        for reach_id in stream:
+            batch.append(str(reach_id))
+            if len(batch) >= chunk_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
 
     def has_return_periods(self, provider: str) -> bool:
         stmt = select(models.ForecastProviderReturnPeriod.id).where(
