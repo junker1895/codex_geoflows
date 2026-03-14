@@ -104,13 +104,15 @@ python -m app.cli discover-latest-run --provider geoglows
 python -m app.cli ingest-return-periods --provider geoglows --reach-id 123 --reach-id 456
 python -m app.cli import-geoglows-return-periods-zarr
 python -m app.cli import-geoglows-return-periods-zarr --method logpearson3 --batch-size 50000
-python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --reach-id 123 --reach-id 456
-python -m app.cli ingest-forecast-run --provider geoglows --run-id latest
+python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 123
+python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode bulk
 python -m app.cli summarize-run --provider geoglows --run-id latest
 python -m app.cli smoke-geoglows --river-id 123456789
 ```
 
 Reach detail endpoint supports `timeseries_limit` query parameter (default 500, max 5000) to avoid oversized responses.
+
+REST mode is debug/smoke only for one or small reach sets. Production full-network ingest must use a configured provider bulk source (`--mode bulk`) and will fail fast when that source is missing.
 
 ## Tests
 
@@ -127,7 +129,7 @@ Provider health responses include capability flags such as `supports_forecast_st
 - `return_periods` is treated as retrospective/AWS-backed in practice; in REST mode this service fails fast with a clear operational message instead of pretending REST support.
 - If retrospective/AWS access is unavailable, return-period ingest will fail and severity classification will degrade to unknown/below-threshold behavior for reaches without thresholds.
 - GEOGLOWS IDs must be 9-digit numeric `river_id` values.
-- Bulk ingestion uses the supported-reach universe already loaded in `forecast_provider_return_periods` (typically from GEOGLOWS Zarr import), with configurable chunking via `FORECAST_BULK_INGEST_CHUNK_SIZE`.
+- Bulk ingestion uses the supported-reach universe already loaded in `forecast_provider_return_periods` (typically from GEOGLOWS Zarr import), with configurable chunking via `FORECAST_BULK_INGEST_BATCH_SIZE`.
 - No auth/rate limiting.
 
 ## Extending to future providers
@@ -145,9 +147,10 @@ HydroRIVERS crosswalk should be added in a separate downstream service or module
 
 1. `python -m alembic upgrade head`
 2. `python -m app.cli discover-latest-run --provider geoglows`
-3. `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest`
-4. `python -m app.cli summarize-run --provider geoglows --run-id latest`
-5. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
+3. Optional debug smoke: `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 760021611`
+4. Production bulk ingest (requires `GEOGLOWS_BULK_FORECAST_SOURCE`): `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode bulk`
+5. `python -m app.cli summarize-run --provider geoglows --run-id latest`
+6. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
 
 Return-period ingest can run from the verified GEOGLOWS Zarr object store path for full severity classification in REST-only forecast environments.
 

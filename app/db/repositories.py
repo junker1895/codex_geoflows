@@ -123,6 +123,34 @@ class ForecastRepository:
         self.db.flush()
         return count
 
+
+    def count_timeseries_rows_for_run(self, provider: str, run_id: str) -> int:
+        stmt = select(func.count(models.ForecastProviderReachTimeseries.id)).where(
+            and_(
+                models.ForecastProviderReachTimeseries.provider == provider,
+                models.ForecastProviderReachTimeseries.run_id == run_id,
+            )
+        )
+        return int(self.db.execute(stmt).scalar_one())
+
+    def count_timeseries_reaches_for_run(self, provider: str, run_id: str) -> int:
+        stmt = select(func.count(models.ForecastProviderReachTimeseries.provider_reach_id.distinct())).where(
+            and_(
+                models.ForecastProviderReachTimeseries.provider == provider,
+                models.ForecastProviderReachTimeseries.run_id == run_id,
+            )
+        )
+        return int(self.db.execute(stmt).scalar_one())
+
+    def count_summaries_for_run(self, provider: str, run_id: str) -> int:
+        stmt = select(func.count(models.ForecastProviderReachSummary.id)).where(
+            and_(
+                models.ForecastProviderReachSummary.provider == provider,
+                models.ForecastProviderReachSummary.run_id == run_id,
+            )
+        )
+        return int(self.db.execute(stmt).scalar_one())
+
     def get_latest_run(self, provider: str) -> models.ForecastRun | None:
         return self.db.execute(
             select(models.ForecastRun)

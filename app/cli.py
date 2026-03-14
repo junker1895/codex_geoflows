@@ -119,10 +119,21 @@ def cli_ingest_forecast_run(
     provider: str = typer.Option("geoglows", "--provider"),
     run_id: str = typer.Option("latest", "--run-id"),
     reach_id: list[str] | None = typer.Option(None, "--reach-id"),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help="Ingest mode: rest_single (debug/small batch) or bulk (full supported network via bulk source)",
+    ),
 ) -> None:
     def _inner() -> None:
+        selected_mode = mode
+        if selected_mode is None:
+            selected_mode = "rest_single" if reach_id else "bulk"
+        if selected_mode not in {"rest_single", "bulk"}:
+            raise ValueError("--mode must be one of: rest_single, bulk")
+
         service = _build_service()
-        count = ingest_forecast_run.run(service, provider, run_id, reach_id)
+        count = ingest_forecast_run.run(service, provider, run_id, reach_id, ingest_mode=selected_mode)
         typer.echo(f"upserted timeseries rows: {count}")
 
     _safe_run(_inner)
