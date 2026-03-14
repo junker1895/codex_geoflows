@@ -73,6 +73,33 @@ class ForecastService:
             raise ValueError(f"Provider '{provider}' is not enabled")
         return self.providers[provider]
 
+    def _latest_upstream_run_id(self, adapter: ForecastProviderAdapter) -> str | None:
+        fn = getattr(adapter, "get_latest_upstream_run_id", None)
+        if callable(fn):
+            try:
+                return fn()
+            except Exception:
+                return None
+        return None
+
+    def _upstream_run_exists(self, adapter: ForecastProviderAdapter, run_id: str) -> bool | None:
+        fn = getattr(adapter, "upstream_run_exists", None)
+        if callable(fn):
+            try:
+                return fn(run_id)
+            except Exception:
+                return None
+        return None
+
+    def _source_zarr_path(self, adapter: ForecastProviderAdapter, run_id: str) -> str | None:
+        fn = getattr(adapter, "build_source_zarr_path", None)
+        if callable(fn):
+            try:
+                return fn(run_id)
+            except Exception:
+                return None
+        return None
+
     def _run_ops_metadata(self, run_row: models.ForecastRun | None) -> dict[str, Any]:
         if run_row is None or not run_row.metadata_json:
             return {}
@@ -122,16 +149,23 @@ class ForecastService:
     def discover_latest_run(self, provider: str) -> ForecastRunSchema:
         adapter = self._get_provider(provider)
         run = adapter.discover_latest_run()
+        existing = self.repo.get_run(provider, run.run_id)
+        previous_ops = self._run_ops_metadata(existing)
+        previous_ingest_status = None if existing is None else existing.ingest_status
         run_row = self.repo.upsert_run(run)
-        ops = self._run_ops_metadata(run_row)
+        if previous_ingest_status and previous_ingest_status != "pending":
+            run_row.ingest_status = previous_ingest_status
+
+        ops = dict(previous_ops)
         ops.setdefault("raw_acquisition", {})
         ops.setdefault("artifact", {})
         ops.setdefault("ingest", {})
         ops.setdefault("summarize", {})
         ops.setdefault("map", {})
-        ops["completed_stages"] = [self.STAGE_DISCOVERED]
-        ops["current_status"] = self.STAGE_DISCOVERED
-        ops["map_ready"] = False
+        if not previous_ops:
+            ops["completed_stages"] = [self.STAGE_DISCOVERED]
+            ops["current_status"] = self.STAGE_DISCOVERED
+            ops["map_ready"] = False
         ops["raw_acquisition"]["mode"] = adapter.bulk_acquisition_mode()
         self._touch_ops(ops)
         self._set_run_ops_metadata(run_row, ops)
@@ -216,7 +250,7 @@ class ForecastService:
         overwrite_raw: bool = False,
     ) -> tuple[str, int]:
         adapter = self._get_provider(provider)
-        resolved_run = self._resolve_run(provider, run_id)
+        resolved_run = self.resolve_requested_run_id(provider, run_id)
 
         if not adapter.supports_bulk_acquisition():
             raise ValueError(
@@ -244,38 +278,6 @@ class ForecastService:
         self._set_run_ops_metadata(run_row, ops)
         self.db.commit()
 
-        artifact_path = self.artifacts.artifact_path(provider, resolved_run.run_id)
-        if artifact_path.exists():
-            existing_count = self.artifacts.count_rows(provider, resolved_run.run_id)
-            if if_present == "skip":
-                raw["succeeded"] = True
-                raw["staged_raw_path"] = raw.get("staged_raw_path")
-                artifact.update({"exists": True, "path": str(artifact_path), "row_count": existing_count})
-                ops["raw_acquisition"] = raw
-                ops["artifact"] = artifact
-                ops["current_status"] = self.STAGE_ARTIFACT_PREPARED
-                self._touch_ops(ops)
-                self._set_run_ops_metadata(run_row, ops)
-                self.db.commit()
-                self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_RAW_ACQUIRED)
-                self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED)
-                logger.info(
-                    "skipping bulk artifact preparation because artifact exists",
-                    extra={
-                        "provider": provider,
-                        "run_id": resolved_run.run_id,
-                        "artifact_path": str(artifact_path),
-                        "if_present": if_present,
-                    },
-                )
-                return str(artifact_path), 0
-            if if_present == "error":
-                message = (
-                    f"Bulk artifact already exists for provider={provider}, run_id={resolved_run.run_id}: {artifact_path}"
-                )
-                self._record_run_failure(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED, message)
-                raise ValueError(message)
-
         supported_reaches: set[str] | None = None
         if filter_to_supported_reaches:
             supported_reaches = set(self.repo.iter_supported_reach_ids(provider, as_chunks=False))
@@ -287,8 +289,58 @@ class ForecastService:
                 self._record_run_failure(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED, message)
                 raise ValueError(message)
 
+        artifact_path = self.artifacts.artifact_path(provider, resolved_run.run_id)
+        if artifact_path.exists():
+            existing_count = self.artifacts.count_rows(provider, resolved_run.run_id)
+            if if_present == "skip":
+                if (
+                    adapter.bulk_acquisition_mode() == "aws_public_zarr"
+                    and supported_reaches is not None
+                    and existing_count < len(supported_reaches)
+                ):
+                    logger.warning(
+                        "existing artifact appears incomplete for supported network; rebuilding despite if_present=skip",
+                        extra={
+                            "provider": provider,
+                            "run_id": resolved_run.run_id,
+                            "artifact_path": str(artifact_path),
+                            "existing_row_count": existing_count,
+                            "supported_reach_count": len(supported_reaches),
+                        },
+                    )
+                else:
+                    raw["succeeded"] = True
+                    raw["staged_raw_path"] = raw.get("staged_raw_path")
+                    artifact.update({"exists": True, "path": str(artifact_path), "row_count": existing_count})
+                    ops["raw_acquisition"] = raw
+                    ops["artifact"] = artifact
+                    ops["current_status"] = self.STAGE_ARTIFACT_PREPARED
+                    self._touch_ops(ops)
+                    self._set_run_ops_metadata(run_row, ops)
+                    self.db.commit()
+                    self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_RAW_ACQUIRED)
+                    self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED)
+                    logger.info(
+                        "skipping bulk artifact preparation because artifact exists",
+                        extra={
+                            "provider": provider,
+                            "run_id": resolved_run.run_id,
+                            "artifact_path": str(artifact_path),
+                            "if_present": if_present,
+                        },
+                    )
+                    return str(artifact_path), 0
+            if if_present == "error":
+                message = (
+                    f"Bulk artifact already exists for provider={provider}, run_id={resolved_run.run_id}: {artifact_path}"
+                )
+                self._record_run_failure(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED, message)
+                raise ValueError(message)
+
         try:
             started_at = perf_counter()
+            if hasattr(adapter, "set_supported_reach_filter"):
+                adapter.set_supported_reach_filter(supported_reaches)
             staged_raw_path = adapter.acquire_bulk_raw_source(resolved_run.run_id, overwrite=overwrite_raw)
             raw["source_uri"] = staged_raw_path
             raw["staged_raw_path"] = staged_raw_path
@@ -379,6 +431,9 @@ class ForecastService:
         except Exception as exc:
             self._record_run_failure(provider, resolved_run.run_id, self.STAGE_ARTIFACT_PREPARED, str(exc))
             raise
+        finally:
+            if hasattr(adapter, "set_supported_reach_filter"):
+                adapter.set_supported_reach_filter(None)
 
     def ingest_forecast_run(
         self,
@@ -388,7 +443,7 @@ class ForecastService:
         ingest_mode: Literal["rest_single", "bulk"] | None = None,
     ) -> int:
         adapter = self._get_provider(provider)
-        resolved_run = self._resolve_run(provider, run_id)
+        resolved_run = self.resolve_requested_run_id(provider, run_id)
         selected_mode = ingest_mode or ("rest_single" if reach_ids else "bulk")
 
         if selected_mode == "rest_single":
@@ -553,7 +608,9 @@ class ForecastService:
                     "ingest_mode": "bulk",
                     "source": "normalized_artifact",
                     "supported_reach_count": supported_reach_count,
+                    "artifact_rows_read": self.artifacts.count_rows(provider, run_id),
                     "rows_written": total_rows,
+                    "distinct_reaches_ingested": self.repo.count_timeseries_reaches_for_run(provider, run_id),
                     "elapsed_seconds": round(perf_counter() - started_at, 3),
                 },
             )
@@ -584,7 +641,7 @@ class ForecastService:
 
     def summarize_run(self, provider: str, run_id: str, reach_ids: list[str] | None = None) -> int:
         adapter = self._get_provider(provider)
-        resolved_run = self._resolve_run(provider, run_id)
+        resolved_run = self.resolve_requested_run_id(provider, run_id)
 
         try:
             if reach_ids is None:
@@ -629,21 +686,28 @@ class ForecastService:
             status = self.get_run_status(provider, resolved_run.run_id)
             if status.map_ready:
                 self._mark_stage_complete(provider, resolved_run.run_id, self.STAGE_MAP_READY)
+            logger.info(
+                "completed summarize run",
+                extra={
+                    "provider": provider,
+                    "run_id": resolved_run.run_id,
+                    "summary_rows_upserted": count,
+                    "map_rows_available": self.repo.count_summaries_for_run(provider, resolved_run.run_id),
+                },
+            )
             return count
         except Exception as exc:
             self._record_run_failure(provider, resolved_run.run_id, self.STAGE_SUMMARIZED, str(exc))
             raise
 
     def get_latest_run(self, provider: str) -> ForecastRunSchema | None:
-        self._get_provider(provider)
-        row = self.repo.get_latest_run(provider)
-        return None if row is None else to_run_schema(row)
+        return self.resolve_requested_run_id(provider, "latest", require_existing=False)
 
     def get_reach_detail(
         self, provider: str, provider_reach_id: str, run_id: str | None = None, timeseries_limit: int | None = None
     ) -> ReachDetailResponse:
         self._get_provider(provider)
-        run = self._resolve_run(provider, run_id or "latest")
+        run = self.resolve_requested_run_id(provider, run_id or "latest")
         rp_row = self.repo.get_return_period(provider, provider_reach_id)
         ts_rows = self.repo.get_timeseries(provider, run.run_id, provider_reach_id, limit=timeseries_limit)
         summary = self.repo.get_summary(provider, run.run_id, provider_reach_id)
@@ -659,7 +723,7 @@ class ForecastService:
         self, provider: str, run_id: str | None = None, severity_min: int | None = None, limit: int | None = None
     ) -> list[ReachSummarySchema]:
         self._get_provider(provider)
-        run = self._resolve_run(provider, run_id or "latest", require_existing=False)
+        run = self.resolve_requested_run_id(provider, run_id or "latest", require_existing=False)
         if not run:
             return []
         rows = self.repo.get_summaries(
@@ -691,7 +755,7 @@ class ForecastService:
         no reach geometry/bounds table, so bbox filtering is not applied yet.
         """
         self._get_provider(provider)
-        run = self._resolve_run(provider, run_id or "latest", require_existing=False)
+        run = self.resolve_requested_run_id(provider, run_id or "latest", require_existing=False)
         if not run:
             return ForecastMapReachesResponse(
                 data=[],
@@ -758,6 +822,9 @@ class ForecastService:
         local_return_periods_available = self.repo.has_return_periods(provider)
         latest_run_artifact_exists = bool(latest_status and latest_status.artifact.exists)
         latest_run_map_ready = bool(latest_status and latest_status.map_ready)
+        upstream_latest_run_id = self._latest_upstream_run_id(adapter)
+        latest_upstream_run_exists = self._upstream_run_exists(adapter, upstream_latest_run_id) if upstream_latest_run_id else None
+        latest_source_zarr_path = self._source_zarr_path(adapter, latest.run_id) if latest else None
 
         return ProviderHealthResponse(
             provider=provider,
@@ -785,6 +852,10 @@ class ForecastService:
             latest_run_map_ready=latest_run_map_ready,
             latest_run_failure_stage=None if latest_status is None else latest_status.failure_stage,
             latest_run_failure_message=None if latest_status is None else latest_status.failure_message,
+            authoritative_latest_upstream_run_id=upstream_latest_run_id,
+            latest_upstream_run_exists=latest_upstream_run_exists,
+            source_bucket=getattr(self.settings, "geoglows_forecast_bucket", None) if provider == "geoglows" else None,
+            source_zarr_path=latest_source_zarr_path,
         )
 
     def _parse_last_updated(self, value: Any) -> datetime | None:
@@ -797,7 +868,7 @@ class ForecastService:
 
     def _run_status_from_row(self, provider: str, run_row: models.ForecastRun) -> RunReadinessStatusResponse:
         ops = self._run_ops_metadata(run_row)
-        completed_stages = [stage for stage in self.STAGE_ORDER if stage in set(ops.get("completed_stages", []))]
+        completed_set = set(ops.get("completed_stages", []))
 
         artifact_exists = self.artifacts.exists(provider, run_row.run_id)
         artifact_path = str(self.artifacts.artifact_path(provider, run_row.run_id))
@@ -815,8 +886,20 @@ class ForecastService:
         map_ready = bool(
             artifact_source_completed and timeseries_row_count > 0 and summary_row_count > 0 and map_row_count > 0
         )
-        if map_ready and self.STAGE_MAP_READY not in completed_stages:
-            completed_stages.append(self.STAGE_MAP_READY)
+
+        if raw_meta.get("succeeded"):
+            completed_set.add(self.STAGE_RAW_ACQUIRED)
+        if artifact_exists:
+            completed_set.add(self.STAGE_ARTIFACT_PREPARED)
+        if timeseries_row_count > 0:
+            completed_set.add(self.STAGE_INGESTED)
+        if summary_row_count > 0:
+            completed_set.add(self.STAGE_SUMMARIZED)
+        if map_ready:
+            completed_set.add(self.STAGE_MAP_READY)
+
+        completed_set.add(self.STAGE_DISCOVERED)
+        completed_stages = [stage for stage in self.STAGE_ORDER if stage in completed_set]
 
         missing_stages = [stage for stage in self.STAGE_ORDER if stage not in completed_stages]
 
@@ -855,6 +938,9 @@ class ForecastService:
         else:
             current_status = self.STAGE_DISCOVERED
 
+        authoritative_latest_upstream_run_id = self._latest_upstream_run_id(self._get_provider(provider))
+        source_zarr_path = self._source_zarr_path(self._get_provider(provider), run_row.run_id)
+
         return RunReadinessStatusResponse(
             provider=provider,
             run_id=run_row.run_id,
@@ -871,11 +957,16 @@ class ForecastService:
             failure_stage=ops.get("failure_stage"),
             failure_message=ops.get("failure_message"),
             last_updated_utc=self._parse_last_updated(ops.get("last_updated_utc")) or run_row.updated_at,
+            authoritative_latest_upstream_run_id=authoritative_latest_upstream_run_id,
+            upstream_run_exists=self._upstream_run_exists(self._get_provider(provider), run_row.run_id),
+            acquisition_mode=self._get_provider(provider).bulk_acquisition_mode(),
+            source_bucket=getattr(self.settings, "geoglows_forecast_bucket", None) if provider == "geoglows" else None,
+            source_zarr_path=source_zarr_path,
         )
 
     def get_run_status(self, provider: str, run_id: str) -> RunReadinessStatusResponse:
         self._get_provider(provider)
-        resolved = self._resolve_run(provider, run_id, require_existing=False)
+        resolved = self.resolve_requested_run_id(provider, run_id, require_existing=False)
         if not resolved:
             raise ValueError(f"Run '{run_id}' not found for provider '{provider}'")
         run_row = self.repo.get_run(provider, resolved.run_id)
@@ -883,16 +974,24 @@ class ForecastService:
             raise ValueError(f"Run '{resolved.run_id}' not found for provider '{provider}'")
         return self._run_status_from_row(provider, run_row)
 
+    def resolve_requested_run_id(
+        self, provider: str, requested_run_id: str, require_existing: bool = True
+    ) -> ForecastRunSchema | None:
+        return self._resolve_run(provider, requested_run_id, require_existing=require_existing)
+
     def _resolve_run(
         self, provider: str, run_id: str, require_existing: bool = True
     ) -> ForecastRunSchema | None:
         if run_id == "latest":
-            latest = self.repo.get_latest_run(provider)
-            if latest:
-                return to_run_schema(latest)
-            if require_existing:
+            # Always resolve authoritative upstream latest for providers that support it,
+            # and reconcile a local run row for the resolved run_id.
+            try:
                 return self.discover_latest_run(provider)
-            return None
+            except Exception:
+                if require_existing:
+                    raise
+                latest = self.repo.get_latest_run(provider)
+                return None if latest is None else to_run_schema(latest)
 
         run = self.repo.get_run(provider, run_id)
         if run:

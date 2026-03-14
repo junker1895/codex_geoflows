@@ -149,6 +149,10 @@ class ProviderHealthResponse(ORMBaseModel):
     latest_run_missing_stages: list[str] = Field(default_factory=list)
     latest_run_failure_stage: str | None = None
     latest_run_failure_message: str | None = None
+    authoritative_latest_upstream_run_id: str | None = None
+    latest_upstream_run_exists: bool | None = None
+    source_bucket: str | None = None
+    source_zarr_path: str | None = None
 
 
 class RawAcquisitionStatus(ORMBaseModel):
@@ -191,3 +195,8 @@ class RunReadinessStatusResponse(ORMBaseModel):
     failure_stage: str | None = None
     failure_message: str | None = None
     last_updated_utc: datetime | None = None
+    authoritative_latest_upstream_run_id: str | None = None
+    upstream_run_exists: bool | None = None
+    acquisition_mode: str | None = None
+    source_bucket: str | None = None
+    source_zarr_path: str | None = None

@@ -1,6 +1,8 @@
 from typer.testing import CliRunner
+from datetime import UTC, datetime
 
 import app.cli as cli_mod
+from app.forecast.schemas import ArtifactStatus, IngestStatus, RawAcquisitionStatus, RunReadinessStatusResponse, SummarizeStatus
 
 
 class _StubService:
@@ -120,3 +122,97 @@ def test_cli_prepare_bulk_artifact(monkeypatch):
     assert calls["provider"] == "geoglows"
     assert calls["if_present"] == "overwrite"
     assert calls["overwrite_raw"] is True
+
+
+def _resolved_latest_status() -> RunReadinessStatusResponse:
+    return RunReadinessStatusResponse(
+        provider="geoglows",
+        run_id="2026031400",
+        current_status="artifact_prepared",
+        completed_stages=["discovered", "raw_acquired", "artifact_prepared"],
+        missing_stages=["ingested", "summarized", "map_ready"],
+        raw_acquisition=RawAcquisitionStatus(attempted=True, succeeded=True, mode="aws_public_zarr"),
+        artifact=ArtifactStatus(exists=True, path="/tmp/a.jsonl", row_count=10),
+        ingest=IngestStatus(completed=False, timeseries_row_count=0),
+        summarize=SummarizeStatus(completed=False, summary_row_count=0),
+        map_row_count=0,
+        map_ready=False,
+        map_ready_definition="x",
+        last_updated_utc=datetime(2026, 3, 14, tzinfo=UTC),
+        authoritative_latest_upstream_run_id="2026031400",
+        upstream_run_exists=True,
+        acquisition_mode="aws_public_zarr",
+        source_bucket="geoglows-v2-forecasts",
+        source_zarr_path="s3://geoglows-v2-forecasts/2026031400.zarr",
+    )
+
+
+def test_cli_inspect_run_artifact_latest_shows_authoritative_resolved_run(monkeypatch):
+    class _Svc:
+        artifacts = type("_A", (), {"preview_rows": staticmethod(lambda *_a, **_k: [])})()
+
+        def get_run_status(self, provider, run_id):
+            assert provider == "geoglows"
+            assert run_id == "latest"
+            return _resolved_latest_status()
+
+    monkeypatch.setattr(cli_mod, "_build_service", lambda: _Svc())
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_mod.cli,
+        ["inspect-run-artifact", "--provider", "geoglows", "--run-id", "latest"],
+    )
+    assert result.exit_code == 0
+    assert "run_id: 2026031400" in result.stdout
+
+
+def test_cli_run_status_latest_shows_authoritative_resolved_run(monkeypatch):
+    class _Svc:
+        def get_run_status(self, provider, run_id):
+            assert provider == "geoglows"
+            assert run_id == "latest"
+            return _resolved_latest_status()
+
+    monkeypatch.setattr(cli_mod, "_build_service", lambda: _Svc())
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_mod.cli,
+        ["run-status", "--provider", "geoglows", "--run-id", "latest"],
+    )
+    assert result.exit_code == 0
+    assert "run_id: 2026031400" in result.stdout
+    assert "authoritative_latest_upstream_run_id: 2026031400" in result.stdout
+
+
+def test_cli_forecast_zarr_inspect(monkeypatch):
+    class _Provider:
+        @staticmethod
+        def build_source_zarr_path(run_id: str) -> str:
+            return f"s3://geoglows-v2-forecasts/{run_id}.zarr"
+
+    class _Svc:
+        providers = {"geoglows": _Provider()}
+
+        @staticmethod
+        def resolve_requested_run_id(provider, run_id):
+            assert provider == "geoglows"
+            assert run_id == "latest"
+            return type("_R", (), {"run_id": "2026031400"})()
+
+    monkeypatch.setattr(cli_mod, "_build_service", lambda: _Svc())
+    monkeypatch.setattr(
+        cli_mod,
+        "open_geoglows_public_forecast_run_zarr",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "describe_forecast_dataset",
+        lambda _ds, _var: {"dims": {"ensemble": 52, "time": 280, "rivid": 6838900}, "chunking": {"rivid": [686]}},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.cli, ["forecast-zarr-inspect", "--run-id", "latest"])
+    assert result.exit_code == 0
+    assert '"run_id": "2026031400"' in result.stdout
+    assert '"rivid": 6838900' in result.stdout
