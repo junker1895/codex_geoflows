@@ -161,7 +161,7 @@ class ForecastService:
         count = self.repo.bulk_upsert_timeseries(rows)
         run_row = self.repo.get_run(provider, run_id)
         if run_row:
-            run_row.ingest_status = "partial" if count == 0 else "complete"
+            run_row.ingest_status = "partial" if total_rows == 0 else "complete"
         self.db.commit()
         logger.info(
             "completed forecast ingest",
