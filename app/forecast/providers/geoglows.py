@@ -36,6 +36,7 @@ from app.forecast.providers.geoglows_forecast_zarr import (
 logger = logging.getLogger(__name__)
 from app.forecast.schemas import (
     BulkForecastArtifactRowSchema,
+    BulkForecastSummaryArtifactRowSchema,
     ForecastRunSchema,
     ReachSummarySchema,
     ReturnPeriodSchema,
@@ -516,6 +517,178 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
 
     def set_supported_reach_filter(self, reach_ids: set[str] | set[int] | None) -> None:
         self._supported_reach_filter = None if reach_ids is None else {str(x).strip() for x in reach_ids}
+
+    def iter_bulk_summary_records(self, run_id: str) -> Iterator[dict]:
+        if self.bulk_acquisition_mode() != "aws_public_zarr":
+            raise ProviderOperationalError("GEOGLOWS bulk summary preparation currently supports aws_public_zarr mode only.")
+
+        xr = self._import_xarray()
+        source_zarr_path = self.build_source_zarr_path(run_id)
+        ds = open_geoglows_public_forecast_run_zarr(
+            xr=xr,
+            run_id=run_id,
+            bucket=self.settings.geoglows_forecast_bucket,
+            region=self.settings.geoglows_forecast_region,
+            use_anon=self.settings.geoglows_forecast_use_anon,
+            run_suffix=self.settings.geoglows_forecast_run_suffix,
+        )
+        structure = detect_forecast_structure(ds, self.settings.geoglows_forecast_variable)
+        summary = describe_forecast_dataset(ds, self.settings.geoglows_forecast_variable)
+
+        qout = ds[self.settings.geoglows_forecast_variable]
+        time_values = ds[structure["time_dim"]].values
+        reach_values = ds[structure["reach_dim"]].values
+        ensemble_dims = structure["ensemble_dims"]
+
+        chunking = dataarray_chunking(qout)
+        reach_chunks = chunking.get(structure["reach_dim"])
+        reach_windows = chunk_aligned_windows(len(reach_values), reach_chunks)
+
+        ordered_dims = [*ensemble_dims, structure["time_dim"], structure["reach_dim"]]
+        qout_view = qout.transpose(*ordered_dims)
+
+        supported_reaches = self._supported_reach_filter
+        for block_idx, (reach_start, reach_end) in enumerate(reach_windows, start=1):
+            block = qout_view.isel({structure["reach_dim"]: slice(reach_start, reach_end)})
+            values = np.asarray(block.values, dtype=np.float32)
+
+            if ensemble_dims:
+                ensemble_axes = tuple(range(len(ensemble_dims)))
+                mean_values = np.nanmean(values, axis=ensemble_axes)
+                median_values = np.nanmedian(values, axis=ensemble_axes)
+                max_values = np.nanmax(values, axis=ensemble_axes)
+            else:
+                mean_values = median_values = max_values = values
+
+            block_reach_ids = np.asarray(reach_values[reach_start:reach_end]).astype(str)
+            reach_mask = np.ones(block_reach_ids.shape[0], dtype=bool)
+            if supported_reaches is not None:
+                reach_mask = np.fromiter((rid in supported_reaches for rid in block_reach_ids), dtype=bool)
+            selected_idx = np.flatnonzero(reach_mask)
+            if selected_idx.size == 0:
+                continue
+
+            selected_reaches = block_reach_ids[selected_idx]
+            block_mean = mean_values[:, selected_idx]
+            block_median = median_values[:, selected_idx]
+            block_max = max_values[:, selected_idx]
+
+            for rid_pos, reach_id in enumerate(selected_reaches):
+                mean_series = block_mean[:, rid_pos]
+                median_series = block_median[:, rid_pos]
+                max_series = block_max[:, rid_pos]
+
+                peak_idx = int(np.nanargmax(max_series)) if np.isfinite(max_series).any() else None
+                peak_time_utc = None if peak_idx is None else to_utc_datetime(time_values[peak_idx]).isoformat()
+                peak_mean = None if not np.isfinite(mean_series).any() else _safe_float(np.nanmax(mean_series))
+                peak_median = None if not np.isfinite(median_series).any() else _safe_float(np.nanmax(median_series))
+                peak_max = None if not np.isfinite(max_series).any() else _safe_float(np.nanmax(max_series))
+
+                yield {
+                    "provider_reach_id": str(reach_id),
+                    "peak_time_utc": peak_time_utc,
+                    "peak_mean_cms": peak_mean,
+                    "peak_median_cms": peak_median,
+                    "peak_max_cms": peak_max,
+                    "raw_payload_json": {
+                        "source": "geoglows_public_forecast_zarr",
+                        "zarr_path": source_zarr_path,
+                        "forecast_variable": self.settings.geoglows_forecast_variable,
+                        "forecast_dims": structure["dims"],
+                        "time_dim": structure["time_dim"],
+                        "reach_dim": structure["reach_dim"],
+                        "ensemble_dims": ensemble_dims,
+                        "chunking": summary["chunking"],
+                        "block_index": block_idx,
+                        "block_start": reach_start,
+                        "block_end": reach_end,
+                    },
+                }
+
+    def normalize_bulk_summary_record(self, run_id: str, record: dict) -> BulkForecastSummaryArtifactRowSchema | None:
+        reach_id = str(record.get("provider_reach_id", record.get("river_id", ""))).strip()
+        if not reach_id:
+            return None
+
+        peak_time = record.get("peak_time_utc")
+        peak_time_utc = None
+        if peak_time:
+            peak_time_utc = peak_time if isinstance(peak_time, datetime) else datetime.fromisoformat(str(peak_time)).replace(tzinfo=UTC)
+
+        payload = record.get("raw_payload_json") if isinstance(record.get("raw_payload_json"), dict) else {"source": "geoglows_public_forecast_zarr"}
+        return BulkForecastSummaryArtifactRowSchema(
+            provider=self.get_provider_name(),
+            run_id=run_id,
+            provider_reach_id=reach_id,
+            peak_time_utc=peak_time_utc,
+            peak_mean_cms=_safe_float(record.get("peak_mean_cms")),
+            peak_median_cms=_safe_float(record.get("peak_median_cms")),
+            peak_max_cms=_safe_float(record.get("peak_max_cms")),
+            raw_payload_json=payload,
+        )
+
+    def fetch_reach_detail_from_public_zarr(
+        self, run_id: str, provider_reach_id: str, timeseries_limit: int | None = None
+    ) -> list[TimeseriesPointSchema]:
+        xr = self._import_xarray()
+        ds = open_geoglows_public_forecast_run_zarr(
+            xr=xr,
+            run_id=run_id,
+            bucket=self.settings.geoglows_forecast_bucket,
+            region=self.settings.geoglows_forecast_region,
+            use_anon=self.settings.geoglows_forecast_use_anon,
+            run_suffix=self.settings.geoglows_forecast_run_suffix,
+        )
+        structure = detect_forecast_structure(ds, self.settings.geoglows_forecast_variable)
+        qout = ds[self.settings.geoglows_forecast_variable]
+        ordered_dims = [*structure["ensemble_dims"], structure["time_dim"], structure["reach_dim"]]
+        qout_view = qout.transpose(*ordered_dims)
+
+        reach_values = np.asarray(ds[structure["reach_dim"]].values).astype(str)
+        matches = np.where(reach_values == str(provider_reach_id))[0]
+        if matches.size == 0:
+            raise ProviderOperationalError(f"GEOGLOWS reach_id {provider_reach_id} not found in run {run_id}")
+        reach_index = int(matches[0])
+
+        series = np.asarray(qout_view.isel({structure["reach_dim"]: reach_index}).values, dtype=np.float32)
+        ensemble_dims = structure["ensemble_dims"]
+        if ensemble_dims:
+            ensemble_axes = tuple(range(len(ensemble_dims)))
+            mean_values = np.nanmean(series, axis=ensemble_axes)
+            median_values = np.nanmedian(series, axis=ensemble_axes)
+            p25_values = np.nanpercentile(series, 25, axis=ensemble_axes)
+            p75_values = np.nanpercentile(series, 75, axis=ensemble_axes)
+            max_values = np.nanmax(series, axis=ensemble_axes)
+            high_res_index = self._detect_high_res_member_index(qout_view=qout_view, ensemble_dims=ensemble_dims)
+            high_res_values = None if high_res_index is None else np.asarray(np.take(series, indices=high_res_index, axis=0), dtype=np.float32)
+        else:
+            mean_values = median_values = p25_values = p75_values = max_values = series
+            high_res_values = series
+
+        time_values = ds[structure["time_dim"]].values
+        rows: list[TimeseriesPointSchema] = []
+        for time_idx, forecast_time in enumerate(time_values):
+            rows.append(
+                TimeseriesPointSchema(
+                    provider=self.get_provider_name(),
+                    run_id=run_id,
+                    provider_reach_id=str(provider_reach_id),
+                    forecast_time_utc=to_utc_datetime(forecast_time),
+                    flow_mean_cms=_safe_float(mean_values[time_idx]),
+                    flow_median_cms=_safe_float(median_values[time_idx]),
+                    flow_p25_cms=_safe_float(p25_values[time_idx]),
+                    flow_p75_cms=_safe_float(p75_values[time_idx]),
+                    flow_max_cms=_safe_float(max_values[time_idx]),
+                    raw_payload_json={
+                        "source": "geoglows_public_forecast_zarr",
+                        "reach_index": reach_index,
+                        "high_res": None if high_res_values is None else _safe_float(high_res_values[time_idx]),
+                    },
+                )
+            )
+        if timeseries_limit is not None:
+            rows = rows[:timeseries_limit]
+        return rows
 
     def normalize_bulk_record(self, run_id: str, record: dict) -> BulkForecastArtifactRowSchema | None:
         reach_id = str(record.get("provider_reach_id", record.get("river_id", ""))).strip()

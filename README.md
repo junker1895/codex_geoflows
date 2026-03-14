@@ -105,6 +105,9 @@ python -m app.cli ingest-return-periods --provider geoglows --reach-id 123 --rea
 python -m app.cli import-geoglows-return-periods-zarr
 python -m app.cli import-geoglows-return-periods-zarr --method logpearson3 --batch-size 50000
 python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 123
+python -m app.cli prepare-bulk-summaries --provider geoglows --run-id latest --filter-supported --if-present overwrite
+python -m app.cli ingest-forecast-summaries --provider geoglows --run-id latest
+# optional debug/detail materialization only:
 python -m app.cli prepare-bulk-artifact --provider geoglows --run-id latest --filter-supported --if-present overwrite --overwrite-raw
 python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode bulk
 python -m app.cli summarize-run --provider geoglows --run-id latest
@@ -113,7 +116,7 @@ python -m app.cli smoke-geoglows --river-id 123456789
 
 Reach detail endpoint supports `timeseries_limit` query parameter (default 500, max 5000) to avoid oversized responses.
 
-REST mode is debug/smoke only for one or small reach sets. Production full-network ingest uses prepared normalized artifacts and then `--mode bulk`.
+REST mode is debug/smoke only for one or small reach sets. Production bulk uses summary generation from public GEOGLOWS run Zarr (`prepare-bulk-summaries` + `ingest-forecast-summaries`) and intentionally does not materialize full-network per-timestep rows.
 `--mode bulk` and `--reach-id` are intentionally mutually exclusive to prevent accidental fallback semantics.
 
 
@@ -241,10 +244,10 @@ HydroRIVERS crosswalk should be added in a separate downstream service or module
 1. `python -m alembic upgrade head`
 2. `python -m app.cli discover-latest-run --provider geoglows`
 3. Optional debug smoke: `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 760021611`
-4. Prepare normalized artifact from public GEOGLOWS run Zarr: `python -m app.cli prepare-bulk-artifact --provider geoglows --run-id latest --filter-supported --if-present overwrite`
-5. Bulk ingest artifact: `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode bulk`
-6. `python -m app.cli summarize-run --provider geoglows --run-id latest`
-7. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"`
+4. Prepare map-summary artifact from public GEOGLOWS run Zarr: `python -m app.cli prepare-bulk-summaries --provider geoglows --run-id latest --filter-supported --if-present overwrite`
+5. Ingest summary artifact: `python -m app.cli ingest-forecast-summaries --provider geoglows --run-id latest`
+6. `/forecast/map/reaches` is now served from the summary table only (lightweight).
+7. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"` (on-demand detail extraction from run Zarr if timeseries rows are absent).
 
 Return-period ingest can run from the verified GEOGLOWS Zarr object store path for full severity classification in REST-only forecast environments.
 
@@ -392,3 +395,6 @@ Run-scoped paths are deterministic:
 - normalized artifact: `${FORECAST_BULK_ARTIFACT_DIR}/geoglows/geoglows_{run_id}.jsonl`
 
 Prepare behavior when artifact exists is controlled with CLI `--if-present skip|overwrite|error`.
+
+
+Production note: full-network per-timestep materialization is intentionally not used at global GEOGLOWS scale because `(reach × timestep)` expansion is not operationally viable; only one summary row per reach is bulk-produced.
