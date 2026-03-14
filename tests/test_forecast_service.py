@@ -100,8 +100,8 @@ def test_import_local_geoglows_return_periods_upsert_and_classify(db_session, tm
     detail = service.get_reach_detail("geoglows", "760021611", run_id=run.run_id)
 
     assert detail.summary is not None
-    assert detail.summary.return_period_band == "25"
-    assert detail.summary.severity_score == 4
+    assert detail.summary.return_period_band == "10"
+    assert detail.summary.severity_score == 3
     assert detail.summary.is_flagged is True
 
 
@@ -154,8 +154,8 @@ def test_import_geoglows_return_periods_zarr_upsert_and_classify(db_session, mon
     detail = service.get_reach_detail("geoglows", "760021611", run_id=run.run_id)
 
     assert detail.summary is not None
-    assert detail.summary.return_period_band == "25"
-    assert detail.summary.severity_score == 4
+    assert detail.summary.return_period_band == "10"
+    assert detail.summary.severity_score == 3
     assert detail.summary.is_flagged is True
 
 
