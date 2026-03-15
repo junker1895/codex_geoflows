@@ -1040,7 +1040,7 @@ class ForecastService:
                 "provider": provider,
                 "run_id": run.run_id,
                 "provider_reach_id": provider_reach_id,
-                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
                 "timeseries_query_seconds": round(timeseries_query_seconds, 6),
                 "return_period_query_seconds": round(return_period_query_seconds, 6),
                 "summary_query_seconds": round(summary_query_seconds, 6),
@@ -1128,7 +1128,7 @@ class ForecastService:
             extra={
                 "provider": provider,
                 "run_id": run.run_id,
-                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
                 "summary_query_seconds": round(summary_query_seconds, 6),
                 "total_seconds": round(perf_counter() - started, 6),
             },
@@ -1192,17 +1192,7 @@ class ForecastService:
             extra={
                 "provider": provider,
                 "refresh_upstream": refresh_upstream,
-                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
-                "health_assembly_seconds": round(perf_counter() - started, 6),
-            },
-        )
-
-        logger.info(
-            "forecast health assembled",
-            extra={
-                "provider": provider,
-                "refresh_upstream": refresh_upstream,
-                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
                 "health_assembly_seconds": round(perf_counter() - started, 6),
             },
         )
@@ -1256,8 +1246,16 @@ class ForecastService:
         summary_exists = self.artifacts.summary_exists(provider, run_row.run_id)
         artifact_exists = summary_exists or self.artifacts.exists(provider, run_row.run_id)
         artifact_path = str(self.artifacts.summary_artifact_path(provider, run_row.run_id)) if summary_exists else str(self.artifacts.artifact_path(provider, run_row.run_id))
-        artifact_row_count = self.artifacts.count_summary_rows(provider, run_row.run_id) if summary_exists else (self.artifacts.count_rows(provider, run_row.run_id) if artifact_exists else 0)
-        artifact_size = self.artifacts.summary_artifact_size_bytes(provider, run_row.run_id) if summary_exists else 0
+        try:
+            artifact_row_count = self.artifacts.count_summary_rows(provider, run_row.run_id) if summary_exists else (self.artifacts.count_rows(provider, run_row.run_id) if artifact_exists else 0)
+            artifact_size = self.artifacts.summary_artifact_size_bytes(provider, run_row.run_id) if summary_exists else 0
+        except RuntimeError as exc:
+            logger.warning(
+                "summary artifact metadata unavailable during run status assembly",
+                extra={"provider": provider, "run_id": run_row.run_id, "error": str(exc)},
+            )
+            artifact_row_count = 0
+            artifact_size = 0
         timeseries_row_count = self.repo.count_timeseries_rows_for_run(provider, run_row.run_id)
         summary_row_count = self.repo.count_summaries_for_run(provider, run_row.run_id)
         map_row_count = summary_row_count
@@ -1390,7 +1388,7 @@ class ForecastService:
                 "provider": provider,
                 "run_id": response.run_id,
                 "refresh_upstream": refresh_upstream,
-                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
                 "status_assembly_seconds": round(perf_counter() - t1, 6),
                 "total_seconds": round(perf_counter() - started, 6),
             },
