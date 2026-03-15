@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 import json
 
+
 from app.forecast.exceptions import ForecastValidationError
 from app.forecast.schemas import BulkForecastArtifactRowSchema, BulkForecastSummaryArtifactRowSchema
 
