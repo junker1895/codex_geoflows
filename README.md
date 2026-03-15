@@ -105,7 +105,7 @@ python -m app.cli ingest-return-periods --provider geoglows --reach-id 123 --rea
 python -m app.cli import-geoglows-return-periods-zarr
 python -m app.cli import-geoglows-return-periods-zarr --method logpearson3 --batch-size 50000
 python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 123
-python -m app.cli prepare-bulk-summaries --provider geoglows --run-id latest --filter-supported --if-present overwrite
+python -m app.cli prepare-bulk-summaries --provider geoglows --run-id latest --filter-supported --max-blocks 20
 python -m app.cli ingest-forecast-summaries --provider geoglows --run-id latest
 # optional debug/detail materialization only:
 python -m app.cli prepare-bulk-artifact --provider geoglows --run-id latest --filter-supported --if-present overwrite --overwrite-raw
@@ -244,7 +244,7 @@ HydroRIVERS crosswalk should be added in a separate downstream service or module
 1. `python -m alembic upgrade head`
 2. `python -m app.cli discover-latest-run --provider geoglows`
 3. Optional debug smoke: `python -m app.cli ingest-forecast-run --provider geoglows --run-id latest --mode rest_single --reach-id 760021611`
-4. Prepare map-summary artifact from public GEOGLOWS run Zarr: `python -m app.cli prepare-bulk-summaries --provider geoglows --run-id latest --filter-supported --if-present overwrite`
+4. Prepare map-summary artifact from public GEOGLOWS run Zarr: `python -m app.cli prepare-bulk-summaries --provider geoglows --run-id latest --filter-supported --max-blocks 20`
 5. Ingest summary artifact: `python -m app.cli ingest-forecast-summaries --provider geoglows --run-id latest`
 6. `/forecast/map/reaches` is now served from the summary table only (lightweight).
 7. `curl "http://localhost:8000/forecast/reaches/geoglows/760021611?timeseries_limit=50"` (on-demand detail extraction from run Zarr if timeseries rows are absent).
@@ -392,9 +392,42 @@ Timestamp parsing uses ISO datetime conversion; invalid/missing rows are dropped
 Run-scoped paths are deterministic:
 
 - raw staging: `${GEOGLOWS_BULK_STAGING_DIR}/geoglows/geoglows_{run_id}.jsonl`
-- normalized artifact: `${FORECAST_BULK_ARTIFACT_DIR}/geoglows/geoglows_{run_id}.jsonl`
+- summary artifact (Parquet default): `${FORECAST_BULK_ARTIFACT_DIR}/geoglows/run_id={run_id}/part-000.parquet`
 
 Prepare behavior when artifact exists is controlled with CLI `--if-present skip|overwrite|error`.
 
 
 Production note: full-network per-timestep materialization is intentionally not used at global GEOGLOWS scale because `(reach × timestep)` expansion is not operationally viable; only one summary row per reach is bulk-produced.
+
+
+## Safe local GEOGLOWS summary-first commands
+
+```bash
+python -m alembic upgrade head
+python -m app.cli discover-latest-run --provider geoglows
+python -m app.cli prepare-bulk-summaries --provider geoglows --run-id latest --filter-supported --max-blocks 20
+python -m app.cli ingest-forecast-summaries --provider geoglows --run-id latest
+python -m app.cli run-status --provider geoglows --run-id latest
+python -m app.cli cleanup-forecast-cache
+```
+
+## Full production-style explicit run
+
+```bash
+python -m alembic upgrade head
+python -m app.cli discover-latest-run --provider geoglows
+python -m app.cli prepare-bulk-summaries --provider geoglows --run-id latest --filter-supported --full-run
+python -m app.cli ingest-forecast-summaries --provider geoglows --run-id latest
+python -m app.cli run-status --provider geoglows --run-id latest
+```
+
+Key runtime settings:
+- `FORECAST_ENVIRONMENT=local|production`
+- `FORECAST_CACHE_DIR`
+- `FORECAST_CACHE_MAX_GB`
+- `FORECAST_CLEANUP_CACHE_AFTER_RUN`
+- `FORECAST_DEFAULT_MAX_REACHES`
+- `FORECAST_DEFAULT_MAX_BLOCKS`
+- `FORECAST_DEFAULT_MAX_SECONDS`
+
+`/forecast/reaches/{provider}/{provider_reach_id}` remains on-demand from public Zarr (`Qout(ensemble,time,rivid)`) when timeseries rows are not materialized, and `ingest-forecast-run --mode rest_single` remains debug-only.

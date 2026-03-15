@@ -518,7 +518,15 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
     def set_supported_reach_filter(self, reach_ids: set[str] | set[int] | None) -> None:
         self._supported_reach_filter = None if reach_ids is None else {str(x).strip() for x in reach_ids}
 
-    def iter_bulk_summary_records(self, run_id: str) -> Iterator[dict]:
+    def iter_bulk_summary_records(
+        self,
+        run_id: str,
+        *,
+        max_reaches: int | None = None,
+        max_blocks: int | None = None,
+        max_seconds: int | None = None,
+        full_run: bool = False,
+    ) -> Iterator[dict]:
         if self.bulk_acquisition_mode() != "aws_public_zarr":
             raise ProviderOperationalError("GEOGLOWS bulk summary preparation currently supports aws_public_zarr mode only.")
 
@@ -539,35 +547,45 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         time_values = ds[structure["time_dim"]].values
         reach_values = ds[structure["reach_dim"]].values
         ensemble_dims = structure["ensemble_dims"]
-
-        chunking = dataarray_chunking(qout)
-        reach_chunks = chunking.get(structure["reach_dim"])
-        reach_windows = chunk_aligned_windows(len(reach_values), reach_chunks)
-
-        ordered_dims = [*ensemble_dims, structure["time_dim"], structure["reach_dim"]]
-        qout_view = qout.transpose(*ordered_dims)
+        reach_windows = chunk_aligned_windows(len(reach_values), dataarray_chunking(qout).get(structure["reach_dim"]))
+        qout_view = qout.transpose(*[*ensemble_dims, structure["time_dim"], structure["reach_dim"]])
 
         start = datetime.now(UTC)
         rows_written = 0
+        emitted_reaches = 0
+        supported_reaches = self._supported_reach_filter
+        partial_reason = None
+
         logger.info(
             "GEOGLOWS public Zarr summary preparation started",
             extra={
+                "provider": self.get_provider_name(),
                 "run_id": run_id,
                 "source_zarr_path": source_zarr_path,
-                "total_rivid_count": int(len(reach_values)),
-                "chunking": summary["chunking"],
-                "detected_time_dim": structure["time_dim"],
-                "detected_reach_dim": structure["reach_dim"],
-                "detected_ensemble_dims": ensemble_dims,
+                "variable": self.settings.geoglows_forecast_variable,
+                "detected_dims": structure["dims"],
+                "chunk_layout": summary["chunking"],
+                "supported_filter_enabled": supported_reaches is not None,
+                "supported_reach_count": None if supported_reaches is None else len(supported_reaches),
                 "total_blocks": len(reach_windows),
+                "bounded": not full_run,
+                "max_reaches": max_reaches,
+                "max_blocks": max_blocks,
+                "max_seconds": max_seconds,
             },
         )
 
-        supported_reaches = self._supported_reach_filter
         for block_idx, (reach_start, reach_end) in enumerate(reach_windows, start=1):
+            elapsed = (datetime.now(UTC) - start).total_seconds()
+            if max_blocks is not None and block_idx > max_blocks:
+                partial_reason = "max_blocks"
+                break
+            if max_seconds is not None and elapsed >= max_seconds:
+                partial_reason = "max_seconds"
+                break
+
             block = qout_view.isel({structure["reach_dim"]: slice(reach_start, reach_end)})
             values = np.asarray(block.values, dtype=np.float32)
-
             if ensemble_dims:
                 ensemble_axes = tuple(range(len(ensemble_dims)))
                 mean_values = np.nanmean(values, axis=ensemble_axes)
@@ -582,20 +600,16 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                 reach_mask = np.fromiter((rid in supported_reaches for rid in block_reach_ids), dtype=bool)
             selected_idx = np.flatnonzero(reach_mask)
             if selected_idx.size == 0:
-                elapsed = (datetime.now(UTC) - start).total_seconds()
-                logger.info(
-                    "GEOGLOWS public Zarr summary preparation progress",
-                    extra={
-                        "run_id": run_id,
-                        "source_zarr_path": source_zarr_path,
-                        "block_index": block_idx,
-                        "total_blocks": len(reach_windows),
-                        "rows_written_so_far": rows_written,
-                        "elapsed_seconds": round(elapsed, 2),
-                        "rows_per_second": round(rows_written / elapsed, 2) if elapsed > 0 else None,
-                    },
-                )
                 continue
+
+            if max_reaches is not None:
+                remaining = max_reaches - emitted_reaches
+                if remaining <= 0:
+                    partial_reason = "max_reaches"
+                    break
+                if selected_idx.size > remaining:
+                    selected_idx = selected_idx[:remaining]
+                    partial_reason = "max_reaches"
 
             selected_reaches = block_reach_ids[selected_idx]
             block_mean = mean_values[:, selected_idx]
@@ -606,29 +620,18 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                 mean_series = block_mean[:, rid_pos]
                 median_series = block_median[:, rid_pos]
                 max_series = block_max[:, rid_pos]
-
                 peak_idx = int(np.nanargmax(max_series)) if np.isfinite(max_series).any() else None
-                peak_time_utc = None if peak_idx is None else to_utc_datetime(time_values[peak_idx]).isoformat()
-                peak_mean = None if not np.isfinite(mean_series).any() else _safe_float(np.nanmax(mean_series))
-                peak_median = None if not np.isfinite(median_series).any() else _safe_float(np.nanmax(median_series))
-                peak_max = None if not np.isfinite(max_series).any() else _safe_float(np.nanmax(max_series))
-
                 rows_written += 1
+                emitted_reaches += 1
                 yield {
                     "provider_reach_id": str(reach_id),
-                    "peak_time_utc": peak_time_utc,
-                    "peak_mean_cms": peak_mean,
-                    "peak_median_cms": peak_median,
-                    "peak_max_cms": peak_max,
+                    "peak_time_utc": None if peak_idx is None else to_utc_datetime(time_values[peak_idx]).isoformat(),
+                    "peak_mean_cms": None if not np.isfinite(mean_series).any() else _safe_float(np.nanmax(mean_series)),
+                    "peak_median_cms": None if not np.isfinite(median_series).any() else _safe_float(np.nanmax(median_series)),
+                    "peak_max_cms": None if not np.isfinite(max_series).any() else _safe_float(np.nanmax(max_series)),
                     "raw_payload_json": {
                         "source": "geoglows_public_forecast_zarr",
                         "zarr_path": source_zarr_path,
-                        "forecast_variable": self.settings.geoglows_forecast_variable,
-                        "forecast_dims": structure["dims"],
-                        "time_dim": structure["time_dim"],
-                        "reach_dim": structure["reach_dim"],
-                        "ensemble_dims": ensemble_dims,
-                        "chunking": summary["chunking"],
                         "block_index": block_idx,
                         "block_start": reach_start,
                         "block_end": reach_end,
@@ -639,11 +642,15 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             logger.info(
                 "GEOGLOWS public Zarr summary preparation progress",
                 extra={
+                    "provider": self.get_provider_name(),
                     "run_id": run_id,
-                    "source_zarr_path": source_zarr_path,
                     "block_index": block_idx,
                     "total_blocks": len(reach_windows),
-                    "rows_written_so_far": rows_written,
+                    "reach_start": reach_start,
+                    "reach_end": reach_end,
+                    "reaches_in_block": int(reach_end - reach_start),
+                    "total_summary_rows_written": rows_written,
+                    "matched_supported_reaches_total": emitted_reaches,
                     "elapsed_seconds": round(elapsed, 2),
                     "rows_per_second": round(rows_written / elapsed, 2) if elapsed > 0 else None,
                 },
@@ -652,10 +659,13 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         logger.info(
             "GEOGLOWS public Zarr summary preparation completed",
             extra={
+                "provider": self.get_provider_name(),
                 "run_id": run_id,
                 "source_zarr_path": source_zarr_path,
-                "rows_written": rows_written,
-                "elapsed_seconds": round((datetime.now(UTC) - start).total_seconds(), 2),
+                "total_rows_written": rows_written,
+                "total_duration_seconds": round((datetime.now(UTC) - start).total_seconds(), 2),
+                "bounded": not full_run,
+                "partial_reason": partial_reason,
             },
         )
 
