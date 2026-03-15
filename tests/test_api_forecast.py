@@ -222,16 +222,18 @@ def test_status_latest_matches_explicit_run(client, db_session):
     assert explicit.json()["map_ready"] == latest.json()["map_ready"]
 
 
-def test_map_detail_parity_for_known_reach(client, db_session):
+def test_map_detail_parity_for_known_flagged_reach(client, db_session):
     _seed(db_session)
-    map_resp = client.get("/forecast/map/reaches", params={"provider": "geoglows", "run_id": "latest", "limit": 1})
+    map_resp = client.get("/forecast/map/reaches", params={"provider": "geoglows", "run_id": "latest", "flagged_only": "true", "limit": 1})
     assert map_resp.status_code == 200
     map_row = map_resp.json()["data"][0]
+    assert map_row["is_flagged"] is True
 
     detail_resp = client.get(f"/forecast/reaches/geoglows/{map_row['provider_reach_id']}", params={"run_id": "latest", "timeseries_limit": 20})
     assert detail_resp.status_code == 200
     detail_summary = detail_resp.json()["summary"]
     assert detail_summary is not None
+    assert detail_summary["is_flagged"] is True
     assert detail_summary["peak_max_cms"] == map_row["peak_max_cms"]
     assert detail_summary["return_period_band"] == map_row["return_period_band"]
 
@@ -251,8 +253,11 @@ def test_api_health_and_status_match_cli_semantics_after_summary_ingest(client, 
 
     assert status_payload["current_status"] == cli_status.current_status
     assert status_payload["map_ready"] == cli_status.map_ready
+    assert status_payload["completed_stages"] == cli_status.completed_stages
+    assert status_payload["missing_stages"] == cli_status.missing_stages
     assert health_payload["latest_run_status"] == cli_status.current_status
     assert health_payload["latest_run_map_ready"] == cli_status.map_ready
+    assert health_payload["latest_run_missing_stages"] == cli_status.missing_stages
 
 
 def test_map_repeated_requests_do_not_fail(client, db_session):

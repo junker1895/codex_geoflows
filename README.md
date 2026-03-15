@@ -444,3 +444,10 @@ docker compose build app
 docker compose up -d app
 docker compose logs -f app
 ```
+
+
+For hot-reload local iteration (not final acceptance), run:
+
+```bash
+docker compose run --service-ports app uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
