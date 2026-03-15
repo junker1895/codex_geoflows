@@ -19,6 +19,7 @@ dependencies = [
   "xarray>=2024.6.0",
   "zarr>=2.18.2",
   "s3fs>=2024.6.0",
+  "pyarrow>=17.0.0",
 ]
 
 
