@@ -433,3 +433,14 @@ Key runtime settings:
 - `FORECAST_DEFAULT_MAX_SECONDS`
 
 `/forecast/reaches/{provider}/{provider_reach_id}` remains on-demand from public Zarr (`Qout(ensemble,time,rivid)`) when timeseries rows are not materialized, and `ingest-forecast-run --mode rest_single` remains debug-only.
+
+
+### Stable container acceptance mode
+
+For final backend acceptance in Docker, run the app without auto-reload to avoid transient worker restarts during request checks.
+
+```bash
+docker compose build app
+docker compose up -d app
+docker compose logs -f app
+```

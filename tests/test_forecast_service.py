@@ -780,3 +780,19 @@ def test_no_repo_query_receives_latest_after_resolution(db_session):
 
     service.list_forecast_map_reaches("geoglows", run_id="latest", limit=1)
     service.get_run_status("geoglows", "latest")
+
+
+def test_summary_ingest_persists_final_ops_state(db_session, tmp_path):
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100"])
+    service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+    service.ingest_forecast_summaries("geoglows", run.run_id)
+
+    run_row = service.repo.get_run("geoglows", run.run_id)
+    assert run_row is not None
+    ops = (run_row.metadata_json or {}).get("ops", {})
+    assert ops.get("current_status") == "map_ready"
+    assert ops.get("map_ready") is True
+    assert "map_ready" in ops.get("completed_stages", [])

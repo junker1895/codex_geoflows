@@ -702,6 +702,23 @@ class ForecastService:
             ingest_meta["artifact_signature"] = artifact_signature
             ingest_meta["artifact_row_count"] = self.artifacts.count_summary_rows(provider, resolved_run.run_id)
             ops["summary_ingest"] = ingest_meta
+
+            summary_count = self.repo.count_summaries_for_run(provider, resolved_run.run_id)
+            ops["summarize"] = {"completed": summary_count > 0, "summary_row_count": summary_count}
+            ops["map"] = {"map_row_count": summary_count}
+            completed = set(ops.get("completed_stages", []))
+            completed.add(self.STAGE_DISCOVERED)
+            completed.add(self.STAGE_ARTIFACT_PREPARED)
+            if summary_count > 0:
+                completed.add(self.STAGE_SUMMARIZED)
+                completed.add(self.STAGE_MAP_READY)
+                ops["map_ready"] = True
+                ops["current_status"] = self.STAGE_MAP_READY
+            else:
+                ops["map_ready"] = False
+                ops["current_status"] = self.STAGE_ARTIFACT_PREPARED
+            ops["completed_stages"] = [item for item in self.STAGE_ORDER if item in completed]
+
             ops["failure_stage"] = None
             ops["failure_message"] = None
             self._touch_ops(ops)
