@@ -1057,7 +1057,7 @@ class ForecastService:
                 "provider": provider,
                 "run_id": run.run_id,
                 "provider_reach_id": provider_reach_id,
-                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
                 "timeseries_query_seconds": round(timeseries_query_seconds, 6),
                 "return_period_query_seconds": round(return_period_query_seconds, 6),
                 "summary_query_seconds": round(summary_query_seconds, 6),
@@ -1145,7 +1145,7 @@ class ForecastService:
             extra={
                 "provider": provider,
                 "run_id": run.run_id,
-                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
                 "summary_query_seconds": round(summary_query_seconds, 6),
                 "total_seconds": round(perf_counter() - started, 6),
             },
@@ -1209,7 +1209,7 @@ class ForecastService:
             extra={
                 "provider": provider,
                 "refresh_upstream": refresh_upstream,
-                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
                 "health_assembly_seconds": round(perf_counter() - started, 6),
             },
         )
@@ -1405,7 +1405,7 @@ class ForecastService:
                 "provider": provider,
                 "run_id": response.run_id,
                 "refresh_upstream": refresh_upstream,
-                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
                 "status_assembly_seconds": round(perf_counter() - t1, 6),
                 "total_seconds": round(perf_counter() - started, 6),
             },
