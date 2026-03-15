@@ -185,6 +185,10 @@ def cli_prepare_bulk_summaries(
     run_id: str = typer.Option("latest", "--run-id"),
     filter_to_supported_reaches: bool = typer.Option(True, "--filter-supported/--no-filter-supported"),
     if_present: str = typer.Option("skip", "--if-present", help="Behavior if summary artifact exists: skip|overwrite|error"),
+    max_reaches: int | None = typer.Option(None, "--max-reaches"),
+    max_blocks: int | None = typer.Option(None, "--max-blocks"),
+    max_seconds: int | None = typer.Option(None, "--max-seconds"),
+    full_run: bool = typer.Option(False, "--full-run"),
 ) -> None:
     def _inner() -> None:
         service = _build_service()
@@ -193,6 +197,10 @@ def cli_prepare_bulk_summaries(
             run_id=run_id,
             filter_to_supported_reaches=filter_to_supported_reaches,
             if_present=if_present,
+            max_reaches=max_reaches,
+            max_blocks=max_blocks,
+            max_seconds=max_seconds,
+            full_run=full_run,
         )
         typer.echo(f"prepared summary bulk artifact: {artifact_path} (rows={count})")
 
@@ -290,7 +298,7 @@ def cli_run_status(
         typer.echo(f"current_status: {status.current_status}")
         typer.echo(f"completed_stages: {', '.join(status.completed_stages) or '(none)'}")
         typer.echo(f"missing_stages: {', '.join(status.missing_stages) or '(none)'}")
-        typer.echo(f"artifact: exists={status.artifact.exists} rows={status.artifact.row_count}")
+        typer.echo(f"artifact: exists={status.artifact.exists} rows={status.artifact.row_count} size_bytes={status.artifact.size_bytes}")
         typer.echo(f"timeseries_rows: {status.ingest.timeseries_row_count}")
         typer.echo(f"summary_rows: {status.summarize.summary_row_count}")
         typer.echo(f"map_rows: {status.map_row_count}")
@@ -300,11 +308,24 @@ def cli_run_status(
         typer.echo(f"acquisition_mode: {status.acquisition_mode or ''}")
         typer.echo(f"source_bucket: {status.source_bucket or ''}")
         typer.echo(f"source_zarr_path: {status.source_zarr_path or ''}")
+        typer.echo(f"bounded_run: {status.bounded_run}")
+        typer.echo(f"configured_limits: {status.configured_limits}")
         if status.failure_stage or status.failure_message:
             typer.echo(f"failure_stage: {status.failure_stage or ''}")
             typer.echo(f"failure_message: {status.failure_message or ''}")
 
     _safe_run(_inner)
+
+
+@cli.command("cleanup-forecast-cache")
+def cli_cleanup_forecast_cache() -> None:
+    def _inner() -> None:
+        service = _build_service()
+        removed = service.cleanup_forecast_cache()
+        typer.echo(f"removed cache entries: {removed}")
+
+    _safe_run(_inner)
+
 
 @cli.command("smoke-geoglows")
 def cli_smoke_geoglows(

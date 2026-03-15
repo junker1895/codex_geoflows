@@ -4,25 +4,41 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 import json
 
+
 from app.forecast.exceptions import ForecastValidationError
 from app.forecast.schemas import BulkForecastArtifactRowSchema, BulkForecastSummaryArtifactRowSchema
 
 
+def _load_pyarrow():
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        return pa, pq
+    except Exception as exc:
+        raise RuntimeError("pyarrow is required for Parquet summary artifacts") from exc
+
+
 class ForecastArtifactStore:
-    def __init__(self, artifact_dir: str) -> None:
+    def __init__(self, artifact_dir: str, summary_format: str = "parquet") -> None:
         self.base_dir = Path(artifact_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.summary_format = summary_format.lower()
 
     def artifact_path(self, provider: str, run_id: str) -> Path:
         safe_provider = provider.replace("/", "_")
         safe_run = run_id.replace("/", "_")
         return self.base_dir / provider / f"{safe_provider}_{safe_run}.jsonl"
 
-
-    def summary_artifact_path(self, provider: str, run_id: str) -> Path:
+    def summary_artifact_dir(self, provider: str, run_id: str) -> Path:
         safe_provider = provider.replace("/", "_")
         safe_run = run_id.replace("/", "_")
-        return self.base_dir / provider / f"{safe_provider}_{safe_run}_summaries.jsonl"
+        return self.base_dir / safe_provider / f"run_id={safe_run}"
+
+    def summary_artifact_path(self, provider: str, run_id: str) -> Path:
+        base = self.summary_artifact_dir(provider, run_id)
+        if self.summary_format == "jsonl":
+            return base / "part-000.jsonl"
+        return base / "part-000.parquet"
 
     def write_rows(self, provider: str, run_id: str, rows: Iterable[BulkForecastArtifactRowSchema]) -> tuple[Path, int]:
         path = self.artifact_path(provider, run_id)
@@ -58,19 +74,62 @@ class ForecastArtifactStore:
                         f"Invalid bulk artifact row at line {line_number} in {path}: {exc}"
                     ) from exc
 
-
+    def _summary_schema(self):
+        pa, _ = _load_pyarrow()
+        return pa.schema(
+            [
+                ("provider", pa.string()),
+                ("run_id", pa.string()),
+                ("provider_reach_id", pa.string()),
+                ("peak_time_utc", pa.timestamp("us", tz="UTC")),
+                ("peak_mean_cms", pa.float64()),
+                ("peak_median_cms", pa.float64()),
+                ("peak_max_cms", pa.float64()),
+                ("return_period_band", pa.string()),
+                ("severity_score", pa.int64()),
+                ("is_flagged", pa.bool_()),
+            ]
+        )
 
     def write_summary_rows(
-        self, provider: str, run_id: str, rows: Iterable[BulkForecastSummaryArtifactRowSchema]
+        self,
+        provider: str,
+        run_id: str,
+        rows: Iterable[BulkForecastSummaryArtifactRowSchema],
+        batch_size: int = 5000,
     ) -> tuple[Path, int]:
         path = self.summary_artifact_path(provider, run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            path.unlink()
+        if self.summary_format == "jsonl":
+            count = 0
+            with path.open("w", encoding="utf-8") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row.model_dump(mode="json"), separators=(",", ":")))
+                    handle.write("\n")
+                    count += 1
+            return path, count
+
+        pa, pq = _load_pyarrow()
+        schema = self._summary_schema()
+        writer = pq.ParquetWriter(path, schema=schema, compression="zstd")
+        buffer: list[dict] = []
         count = 0
-        with path.open("w", encoding="utf-8") as handle:
+        try:
             for row in rows:
-                handle.write(json.dumps(row.model_dump(mode="json"), separators=(",", ":")))
-                handle.write("\n")
-                count += 1
+                payload = row.model_dump(mode="python")
+                payload.pop("raw_payload_json", None)
+                buffer.append(payload)
+                if len(buffer) >= batch_size:
+                    writer.write_table(pa.Table.from_pylist(buffer, schema=schema))
+                    count += len(buffer)
+                    buffer = []
+            if buffer:
+                writer.write_table(pa.Table.from_pylist(buffer, schema=schema))
+                count += len(buffer)
+        finally:
+            writer.close()
         return path, count
 
     def iter_summary_rows(self, provider: str, run_id: str) -> Iterator[BulkForecastSummaryArtifactRowSchema]:
@@ -78,38 +137,47 @@ class ForecastArtifactStore:
         if not path.exists():
             raise FileNotFoundError(f"summary bulk artifact does not exist for provider={provider}, run_id={run_id}: {path}")
 
-        with path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                text = line.strip()
-                if not text:
-                    continue
-                try:
-                    payload = json.loads(text)
-                except json.JSONDecodeError as exc:
-                    raise ForecastValidationError(
-                        f"Invalid summary bulk artifact JSON at line {line_number} in {path}: {exc}"
-                    ) from exc
-                try:
+        if path.suffix == ".jsonl":
+            with path.open("r", encoding="utf-8") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    text = line.strip()
+                    if not text:
+                        continue
+                    try:
+                        payload = json.loads(text)
+                    except json.JSONDecodeError as exc:
+                        raise ForecastValidationError(
+                            f"Invalid summary bulk artifact JSON at line {line_number} in {path}: {exc}"
+                        ) from exc
                     yield BulkForecastSummaryArtifactRowSchema.model_validate(payload)
-                except Exception as exc:
-                    raise ForecastValidationError(
-                        f"Invalid summary bulk artifact row at line {line_number} in {path}: {exc}"
-                    ) from exc
+            return
+
+        _, pq = _load_pyarrow()
+        table = pq.read_table(path)
+        for payload in table.to_pylist():
+            payload["raw_payload_json"] = None
+            yield BulkForecastSummaryArtifactRowSchema.model_validate(payload)
 
     def count_summary_rows(self, provider: str, run_id: str) -> int:
         path = self.summary_artifact_path(provider, run_id)
         if not path.exists():
             return 0
-
-        count = 0
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    count += 1
-        return count
+        if path.suffix == ".jsonl":
+            count = 0
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        count += 1
+            return count
+        _, pq = _load_pyarrow()
+        return int(pq.read_metadata(path).num_rows)
 
     def summary_exists(self, provider: str, run_id: str) -> bool:
         return self.summary_artifact_path(provider, run_id).exists()
+
+    def summary_artifact_size_bytes(self, provider: str, run_id: str) -> int:
+        path = self.summary_artifact_path(provider, run_id)
+        return path.stat().st_size if path.exists() else 0
 
     def count_rows(self, provider: str, run_id: str) -> int:
         path = self.artifact_path(provider, run_id)

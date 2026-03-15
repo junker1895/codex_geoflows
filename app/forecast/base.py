@@ -55,7 +55,15 @@ class ForecastProviderAdapter(ABC):
         return 0
 
 
-    def iter_bulk_summary_records(self, run_id: str) -> Iterator[dict]:
+    def iter_bulk_summary_records(
+        self,
+        run_id: str,
+        *,
+        max_reaches: int | None = None,
+        max_blocks: int | None = None,
+        max_seconds: int | None = None,
+        full_run: bool = False,
+    ) -> Iterator[dict]:
         raise ProviderBackendUnavailableError(
             f"Provider '{self.get_provider_name()}' does not support iterating bulk summary records."
         )

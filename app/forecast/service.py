@@ -11,6 +11,7 @@ from app.core.config import Settings
 from app.db import models
 from app.db.repositories import ForecastRepository
 from app.forecast.artifacts import ForecastArtifactStore
+from app.forecast.cache import DetailCache, ForecastCacheManager
 from app.forecast.classify import classify_peak_flow
 from app.forecast.base import ForecastProviderAdapter
 from app.forecast.providers.geoglows_return_periods import (
@@ -47,7 +48,16 @@ class ForecastService:
         self.settings = settings
         self.repo = ForecastRepository(db)
         self.providers = providers
-        self.artifacts = ForecastArtifactStore(settings.forecast_bulk_artifact_dir)
+        self.artifacts = ForecastArtifactStore(
+            settings.forecast_bulk_artifact_dir,
+            summary_format=settings.forecast_bulk_artifact_format,
+        )
+        self.cache = ForecastCacheManager(settings.forecast_cache_dir)
+        self.cache.apply_process_env()
+        self.detail_cache = DetailCache(
+            ttl_seconds=settings.forecast_detail_cache_ttl_seconds,
+            max_items=settings.forecast_detail_cache_max_items,
+        )
 
     def list_providers(self) -> list[str]:
         return sorted(self.providers.keys())
@@ -444,6 +454,10 @@ class ForecastService:
         run_id: str,
         filter_to_supported_reaches: bool = True,
         if_present: str = "skip",
+        max_reaches: int | None = None,
+        max_blocks: int | None = None,
+        max_seconds: int | None = None,
+        full_run: bool = False,
     ) -> tuple[str, int]:
         adapter = self._get_provider(provider)
         resolved_run = self.resolve_requested_run_id(provider, run_id)
@@ -475,10 +489,26 @@ class ForecastService:
         if summary_path.exists() and if_present == "error":
             raise ValueError(f"Summary artifact already exists: {summary_path}")
 
+        if not full_run:
+            max_reaches = max_reaches or self.settings.forecast_default_max_reaches
+            max_blocks = max_blocks or self.settings.forecast_default_max_blocks
+            max_seconds = max_seconds or self.settings.forecast_default_max_seconds
+
         if hasattr(adapter, "set_supported_reach_filter"):
             adapter.set_supported_reach_filter(supported_reaches)
         try:
             started_at = perf_counter()
+            run_row = self.repo.get_run(provider, resolved_run.run_id)
+            if run_row is not None:
+                ops = self._run_ops_metadata(run_row)
+                ops["bounded_run"] = not full_run
+                ops["max_reaches"] = max_reaches
+                ops["max_blocks"] = max_blocks
+                ops["max_seconds"] = max_seconds
+                self._touch_ops(ops)
+                self._set_run_ops_metadata(run_row, ops)
+                self.db.commit()
+
             logger.info(
                 "starting bulk summary artifact preparation",
                 extra={
@@ -487,12 +517,22 @@ class ForecastService:
                     "filter_to_supported_reaches": filter_to_supported_reaches,
                     "supported_reach_count": 0 if supported_reaches is None else len(supported_reaches),
                     "if_present": if_present,
+                    "bounded": not full_run,
+                    "max_reaches": max_reaches,
+                    "max_blocks": max_blocks,
+                    "max_seconds": max_seconds,
                 },
             )
             stats = {"raw_records_seen": 0, "normalized_rows_written": 0, "rows_dropped_invalid": 0, "rows_dropped_filtered": 0}
 
             def _summary_rows() -> Iterator[BulkForecastSummaryArtifactRowSchema]:
-                for record in adapter.iter_bulk_summary_records(resolved_run.run_id):
+                for record in adapter.iter_bulk_summary_records(
+                    resolved_run.run_id,
+                    max_reaches=max_reaches,
+                    max_blocks=max_blocks,
+                    max_seconds=max_seconds,
+                    full_run=full_run,
+                ):
                     stats["raw_records_seen"] += 1
                     row = adapter.normalize_bulk_summary_record(resolved_run.run_id, record)
                     if row is None:
@@ -510,7 +550,13 @@ class ForecastService:
                     stats["normalized_rows_written"] += 1
                     yield row
 
-            path, _ = self.artifacts.write_summary_rows(provider, resolved_run.run_id, _summary_rows())
+            path, _ = self.artifacts.write_summary_rows(
+                provider,
+                resolved_run.run_id,
+                _summary_rows(),
+                batch_size=self.settings.forecast_bulk_artifact_write_batch_size,
+            )
+            artifact_size = self.artifacts.summary_artifact_size_bytes(provider, resolved_run.run_id)
             logger.info(
                 "completed bulk summary artifact preparation",
                 extra={
@@ -521,9 +567,13 @@ class ForecastService:
                     "summary_rows_written": stats["normalized_rows_written"],
                     "rows_dropped_filtered": stats["rows_dropped_filtered"],
                     "rows_dropped_invalid": stats["rows_dropped_invalid"],
+                    "artifact_size_bytes": artifact_size,
+                    "bounded": not full_run,
                     "elapsed_seconds": round(perf_counter() - started_at, 3),
                 },
             )
+            if self.settings.forecast_cleanup_cache_after_run:
+                self.cache.cleanup()
             return str(path), stats["normalized_rows_written"]
         finally:
             if hasattr(adapter, "set_supported_reach_filter"):
@@ -876,12 +926,18 @@ class ForecastService:
         self._get_provider(provider)
         run = self.resolve_requested_run_id(provider, run_id or "latest")
         rp_row = self.repo.get_return_period(provider, provider_reach_id)
+        cache_key = f"{provider}:{run.run_id}:{provider_reach_id}:{timeseries_limit}"
         ts_rows = self.repo.get_timeseries(provider, run.run_id, provider_reach_id, limit=timeseries_limit)
         if not ts_rows and provider == "geoglows":
-            adapter = self._get_provider(provider)
-            fetch = getattr(adapter, "fetch_reach_detail_from_public_zarr", None)
-            if callable(fetch):
-                ts_rows = fetch(run.run_id, provider_reach_id, timeseries_limit=timeseries_limit)
+            cached = self.detail_cache.get(cache_key)
+            if cached is not None:
+                ts_rows = cached
+            else:
+                adapter = self._get_provider(provider)
+                fetch = getattr(adapter, "fetch_reach_detail_from_public_zarr", None)
+                if callable(fetch):
+                    ts_rows = fetch(run.run_id, provider_reach_id, timeseries_limit=timeseries_limit)
+                    self.detail_cache.set(cache_key, ts_rows)
         summary = self.repo.get_summary(provider, run.run_id, provider_reach_id)
         return ReachDetailResponse(
             provider=provider,
@@ -1042,9 +1098,11 @@ class ForecastService:
         ops = self._run_ops_metadata(run_row)
         completed_set = set(ops.get("completed_stages", []))
 
-        artifact_exists = self.artifacts.exists(provider, run_row.run_id)
-        artifact_path = str(self.artifacts.artifact_path(provider, run_row.run_id))
-        artifact_row_count = self.artifacts.count_rows(provider, run_row.run_id) if artifact_exists else 0
+        summary_exists = self.artifacts.summary_exists(provider, run_row.run_id)
+        artifact_exists = summary_exists or self.artifacts.exists(provider, run_row.run_id)
+        artifact_path = str(self.artifacts.summary_artifact_path(provider, run_row.run_id)) if summary_exists else str(self.artifacts.artifact_path(provider, run_row.run_id))
+        artifact_row_count = self.artifacts.count_summary_rows(provider, run_row.run_id) if summary_exists else (self.artifacts.count_rows(provider, run_row.run_id) if artifact_exists else 0)
+        artifact_size = self.artifacts.summary_artifact_size_bytes(provider, run_row.run_id) if summary_exists else 0
         timeseries_row_count = self.repo.count_timeseries_rows_for_run(provider, run_row.run_id)
         summary_row_count = self.repo.count_summaries_for_run(provider, run_row.run_id)
         map_row_count = summary_row_count
@@ -1083,6 +1141,7 @@ class ForecastService:
             exists=artifact_exists,
             path=artifact_meta.get("path") or artifact_path,
             row_count=artifact_row_count,
+            size_bytes=artifact_size,
         )
         ingest = IngestStatus(
             completed=timeseries_row_count > 0,
@@ -1110,6 +1169,12 @@ class ForecastService:
         authoritative_latest_upstream_run_id = self._latest_upstream_run_id(self._get_provider(provider))
         source_zarr_path = self._source_zarr_path(self._get_provider(provider), run_row.run_id)
 
+        configured_limits = {
+            "max_reaches": ops.get("max_reaches"),
+            "max_blocks": ops.get("max_blocks"),
+            "max_seconds": ops.get("max_seconds"),
+        }
+
         return RunReadinessStatusResponse(
             provider=provider,
             run_id=run_row.run_id,
@@ -1131,7 +1196,13 @@ class ForecastService:
             acquisition_mode=self._get_provider(provider).bulk_acquisition_mode(),
             source_bucket=getattr(self.settings, "geoglows_forecast_bucket", None) if provider == "geoglows" else None,
             source_zarr_path=source_zarr_path,
+            bounded_run=ops.get("bounded_run"),
+            configured_limits=configured_limits,
         )
+
+
+    def cleanup_forecast_cache(self) -> int:
+        return self.cache.cleanup()
 
     def get_run_status(self, provider: str, run_id: str) -> RunReadinessStatusResponse:
         self._get_provider(provider)
