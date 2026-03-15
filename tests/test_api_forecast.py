@@ -159,3 +159,104 @@ def test_map_reaches_after_bulk_ingest_returns_multiple_rows(client, db_session)
     payload = response.json()
     assert payload["meta"]["count"] == 3
     assert len(payload["data"]) == 3
+
+
+def test_health_refresh_flag_defaults_false(client, monkeypatch):
+    class _Svc:
+        def get_provider_health(self, provider: str, refresh_upstream: bool = False):
+            from app.forecast.schemas import ProviderHealthResponse
+
+            assert provider == "geoglows"
+            assert refresh_upstream is False
+            return ProviderHealthResponse(
+                provider="geoglows",
+                enabled=True,
+                latest_run=None,
+                ingest_status=None,
+                summary_count=0,
+            )
+
+    monkeypatch.setattr("app.api.routes.forecast.get_forecast_service", lambda _db: _Svc())
+    response = client.get("/forecast/health", params={"provider": "geoglows"})
+    assert response.status_code == 200
+
+
+def test_health_refresh_flag_true(client, monkeypatch):
+    class _Svc:
+        def get_provider_health(self, provider: str, refresh_upstream: bool = False):
+            from app.forecast.schemas import ProviderHealthResponse
+
+            assert provider == "geoglows"
+            assert refresh_upstream is True
+            return ProviderHealthResponse(
+                provider="geoglows",
+                enabled=True,
+                latest_run=None,
+                ingest_status=None,
+                summary_count=0,
+            )
+
+    monkeypatch.setattr("app.api.routes.forecast.get_forecast_service", lambda _db: _Svc())
+    response = client.get("/forecast/health", params={"provider": "geoglows", "refresh_upstream": "true"})
+    assert response.status_code == 200
+
+
+def test_map_latest_matches_explicit_run(client, db_session):
+    _seed(db_session)
+    explicit = client.get("/forecast/map/reaches", params={"provider": "geoglows", "run_id": "2024010100", "limit": 5})
+    latest = client.get("/forecast/map/reaches", params={"provider": "geoglows", "run_id": "latest", "limit": 5})
+    assert explicit.status_code == 200
+    assert latest.status_code == 200
+    assert latest.json()["meta"]["run_id"] == "2024010100"
+    assert explicit.json()["data"] == latest.json()["data"]
+
+
+def test_status_latest_matches_explicit_run(client, db_session):
+    _seed(db_session)
+    explicit = client.get("/forecast/runs/geoglows/2024010100/status")
+    latest = client.get("/forecast/runs/geoglows/latest/status")
+    assert explicit.status_code == 200
+    assert latest.status_code == 200
+    assert latest.json()["run_id"] == "2024010100"
+    assert explicit.json()["current_status"] == latest.json()["current_status"]
+    assert explicit.json()["map_ready"] == latest.json()["map_ready"]
+
+
+def test_map_detail_parity_for_known_reach(client, db_session):
+    _seed(db_session)
+    map_resp = client.get("/forecast/map/reaches", params={"provider": "geoglows", "run_id": "latest", "limit": 1})
+    assert map_resp.status_code == 200
+    map_row = map_resp.json()["data"][0]
+
+    detail_resp = client.get(f"/forecast/reaches/geoglows/{map_row['provider_reach_id']}", params={"run_id": "latest", "timeseries_limit": 20})
+    assert detail_resp.status_code == 200
+    detail_summary = detail_resp.json()["summary"]
+    assert detail_summary is not None
+    assert detail_summary["peak_max_cms"] == map_row["peak_max_cms"]
+    assert detail_summary["return_period_band"] == map_row["return_period_band"]
+
+
+def test_api_health_and_status_match_cli_semantics_after_summary_ingest(client, db_session):
+    _seed(db_session)
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    cli_status = service.get_run_status("geoglows", "latest")
+
+    api_status = client.get("/forecast/runs/geoglows/latest/status")
+    api_health = client.get("/forecast/health", params={"provider": "geoglows"})
+
+    assert api_status.status_code == 200
+    assert api_health.status_code == 200
+    status_payload = api_status.json()
+    health_payload = api_health.json()
+
+    assert status_payload["current_status"] == cli_status.current_status
+    assert status_payload["map_ready"] == cli_status.map_ready
+    assert health_payload["latest_run_status"] == cli_status.current_status
+    assert health_payload["latest_run_map_ready"] == cli_status.map_ready
+
+
+def test_map_repeated_requests_do_not_fail(client, db_session):
+    _seed(db_session)
+    for _ in range(20):
+        response = client.get("/forecast/map/reaches", params={"provider": "geoglows", "run_id": "latest", "limit": 5})
+        assert response.status_code == 200
