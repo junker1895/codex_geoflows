@@ -173,7 +173,7 @@ class ProviderHealthResponse(ORMBaseModel):
     source_bucket: str | None = None
     source_zarr_path: str | None = None
     bounded_run: bool | None = None
-    configured_limits: dict[str, int | None] = Field(default_factory=dict)
+    configured_limits: dict[str, Any] = Field(default_factory=dict)
 
 
 class RawAcquisitionStatus(ORMBaseModel):
@@ -223,4 +223,4 @@ class RunReadinessStatusResponse(ORMBaseModel):
     source_bucket: str | None = None
     source_zarr_path: str | None = None
     bounded_run: bool | None = None
-    configured_limits: dict[str, int | None] = Field(default_factory=dict)
+    configured_limits: dict[str, Any] = Field(default_factory=dict)

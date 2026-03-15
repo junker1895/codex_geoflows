@@ -593,7 +593,7 @@ def test_prepare_bulk_summaries_and_ingest_use_one_row_per_reach(db_session, tmp
     artifact_path, count = service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
     ingested = service.ingest_forecast_summaries("geoglows", run.run_id)
 
-    assert artifact_path.endswith("_summaries.jsonl")
+    assert artifact_path.endswith("part-000.parquet")
     assert count == 6
     assert ingested == 6
     assert service.repo.count_summaries_for_run("geoglows", run.run_id) == 6
@@ -658,3 +658,57 @@ def test_run_status_map_ready_depends_on_summary_rows(db_session, tmp_path):
     status = service.get_run_status("geoglows", run.run_id)
     assert status.map_ready is True
     assert status.ingest.timeseries_row_count == 0
+
+
+def test_ingest_forecast_summaries_replace_existing_clears_stale_rows(db_session, tmp_path):
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100", "101", "102", "103", "104", "105"])
+
+    service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+    service.ingest_forecast_summaries("geoglows", run.run_id)
+
+    assert service.repo.count_summaries_for_run("geoglows", run.run_id) == 6
+
+    # contaminate with stale value to verify replacement behavior
+    row = service.repo.get_summary("geoglows", run.run_id, "100")
+    assert row is not None
+    row.severity_score = 999
+    service.db.commit()
+
+    service.ingest_forecast_summaries("geoglows", run.run_id, replace_existing=True)
+    refreshed = service.repo.get_summary("geoglows", run.run_id, "100")
+    assert refreshed is not None
+    assert refreshed.severity_score != 999
+
+
+def test_run_status_not_ready_when_summary_ingest_fails(db_session, tmp_path):
+    class _FailingReadStore:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def __getattr__(self, item):
+            return getattr(self.wrapped, item)
+
+        def iter_summary_rows(self, provider, run_id):
+            raise RuntimeError("broken parquet schema")
+
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100"])
+    service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+
+    service.artifacts = _FailingReadStore(service.artifacts)
+    try:
+        service.ingest_forecast_summaries("geoglows", run.run_id)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected ingest failure")
+
+    status = service.get_run_status("geoglows", run.run_id)
+    assert status.map_ready is False
+    assert status.failure_stage == "ingested"
+    assert "broken parquet schema" in (status.failure_message or "")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 import json
 
@@ -13,6 +14,7 @@ def _load_pyarrow():
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
+
         return pa, pq
     except Exception as exc:
         raise RuntimeError("pyarrow is required for Parquet summary artifacts") from exc
@@ -86,10 +88,48 @@ class ForecastArtifactStore:
                 ("peak_median_cms", pa.float64()),
                 ("peak_max_cms", pa.float64()),
                 ("return_period_band", pa.string()),
-                ("severity_score", pa.int64()),
+                ("severity_score", pa.float64()),
                 ("is_flagged", pa.bool_()),
             ]
         )
+
+    def _normalize_summary_row(self, row: BulkForecastSummaryArtifactRowSchema) -> dict:
+        peak_time_utc = row.peak_time_utc
+        if peak_time_utc is not None:
+            if peak_time_utc.tzinfo is None:
+                peak_time_utc = peak_time_utc.replace(tzinfo=UTC)
+            else:
+                peak_time_utc = peak_time_utc.astimezone(UTC)
+
+        return {
+            "provider": str(row.provider),
+            "run_id": str(row.run_id),
+            "provider_reach_id": str(row.provider_reach_id),
+            "peak_time_utc": peak_time_utc,
+            "peak_mean_cms": None if row.peak_mean_cms is None else float(row.peak_mean_cms),
+            "peak_median_cms": None if row.peak_median_cms is None else float(row.peak_median_cms),
+            "peak_max_cms": None if row.peak_max_cms is None else float(row.peak_max_cms),
+            "return_period_band": None if row.return_period_band is None else str(row.return_period_band),
+            "severity_score": float(row.severity_score),
+            "is_flagged": bool(row.is_flagged),
+        }
+
+    def _table_from_rows(self, rows: list[dict]):
+        pa, _ = _load_pyarrow()
+        schema = self._summary_schema()
+        arrays = [
+            pa.array([r["provider"] for r in rows], type=schema.field("provider").type),
+            pa.array([r["run_id"] for r in rows], type=schema.field("run_id").type),
+            pa.array([r["provider_reach_id"] for r in rows], type=schema.field("provider_reach_id").type),
+            pa.array([r["peak_time_utc"] for r in rows], type=schema.field("peak_time_utc").type),
+            pa.array([r["peak_mean_cms"] for r in rows], type=schema.field("peak_mean_cms").type),
+            pa.array([r["peak_median_cms"] for r in rows], type=schema.field("peak_median_cms").type),
+            pa.array([r["peak_max_cms"] for r in rows], type=schema.field("peak_max_cms").type),
+            pa.array([r["return_period_band"] for r in rows], type=schema.field("return_period_band").type),
+            pa.array([r["severity_score"] for r in rows], type=schema.field("severity_score").type),
+            pa.array([r["is_flagged"] for r in rows], type=schema.field("is_flagged").type),
+        ]
+        return pa.Table.from_arrays(arrays, schema=schema)
 
     def write_summary_rows(
         self,
@@ -111,26 +151,31 @@ class ForecastArtifactStore:
                     count += 1
             return path, count
 
-        pa, pq = _load_pyarrow()
+        _, pq = _load_pyarrow()
         schema = self._summary_schema()
-        writer = pq.ParquetWriter(path, schema=schema, compression="zstd")
+        writer = pq.ParquetWriter(path, schema=schema, compression="zstd", use_dictionary=False)
         buffer: list[dict] = []
         count = 0
         try:
             for row in rows:
-                payload = row.model_dump(mode="python")
-                payload.pop("raw_payload_json", None)
-                buffer.append(payload)
+                buffer.append(self._normalize_summary_row(row))
                 if len(buffer) >= batch_size:
-                    writer.write_table(pa.Table.from_pylist(buffer, schema=schema))
+                    writer.write_table(self._table_from_rows(buffer))
                     count += len(buffer)
                     buffer = []
             if buffer:
-                writer.write_table(pa.Table.from_pylist(buffer, schema=schema))
+                writer.write_table(self._table_from_rows(buffer))
                 count += len(buffer)
         finally:
             writer.close()
         return path, count
+
+    def _read_summary_parquet_table(self, path: Path):
+        _, pq = _load_pyarrow()
+        schema = self._summary_schema()
+        pf = pq.ParquetFile(path)
+        table = pf.read(columns=schema.names)
+        return table.cast(schema)
 
     def iter_summary_rows(self, provider: str, run_id: str) -> Iterator[BulkForecastSummaryArtifactRowSchema]:
         path = self.summary_artifact_path(provider, run_id)
@@ -152,9 +197,14 @@ class ForecastArtifactStore:
                     yield BulkForecastSummaryArtifactRowSchema.model_validate(payload)
             return
 
-        _, pq = _load_pyarrow()
-        table = pq.read_table(path)
+        table = self._read_summary_parquet_table(path)
         for payload in table.to_pylist():
+            payload["provider"] = str(payload["provider"])
+            payload["run_id"] = str(payload["run_id"])
+            payload["provider_reach_id"] = str(payload["provider_reach_id"])
+            payload["return_period_band"] = None if payload["return_period_band"] is None else str(payload["return_period_band"])
+            payload["severity_score"] = 0 if payload["severity_score"] is None else int(payload["severity_score"])
+            payload["is_flagged"] = bool(payload["is_flagged"])
             payload["raw_payload_json"] = None
             yield BulkForecastSummaryArtifactRowSchema.model_validate(payload)
 
@@ -169,8 +219,13 @@ class ForecastArtifactStore:
                     if line.strip():
                         count += 1
             return count
-        _, pq = _load_pyarrow()
-        return int(pq.read_metadata(path).num_rows)
+        return int(self._read_summary_parquet_table(path).num_rows)
+
+    def summary_schema_string(self, provider: str, run_id: str) -> str:
+        path = self.summary_artifact_path(provider, run_id)
+        if not path.exists() or path.suffix == ".jsonl":
+            return "jsonl/no_schema"
+        return str(self._read_summary_parquet_table(path).schema)
 
     def summary_exists(self, provider: str, run_id: str) -> bool:
         return self.summary_artifact_path(provider, run_id).exists()
@@ -194,6 +249,14 @@ class ForecastArtifactStore:
     def preview_rows(self, provider: str, run_id: str, limit: int = 5) -> list[dict]:
         rows: list[dict] = []
         for row in self.iter_rows(provider, run_id):
+            rows.append(row.model_dump(mode="json"))
+            if len(rows) >= limit:
+                break
+        return rows
+
+    def preview_summary_rows(self, provider: str, run_id: str, limit: int = 5) -> list[dict]:
+        rows: list[dict] = []
+        for row in self.iter_summary_rows(provider, run_id):
             rows.append(row.model_dump(mode="json"))
             if len(rows) >= limit:
                 break

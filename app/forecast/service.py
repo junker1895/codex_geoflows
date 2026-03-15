@@ -130,6 +130,15 @@ class ForecastService:
         ops["last_updated_utc"] = datetime.now(UTC).isoformat()
         return ops
 
+    def _summary_artifact_signature(self, provider: str, run_id: str) -> str:
+        path = self.artifacts.summary_artifact_path(provider, run_id)
+        if not path.exists():
+            return ""
+        size = self.artifacts.summary_artifact_size_bytes(provider, run_id)
+        rows = self.artifacts.count_summary_rows(provider, run_id)
+        mtime_ns = path.stat().st_mtime_ns
+        return f"{path}|{size}|{rows}|{mtime_ns}"
+
     def _record_run_failure(self, provider: str, run_id: str, stage: str, message: str) -> None:
         run_row = self.repo.get_run(provider, run_id)
         if run_row is None:
@@ -557,6 +566,26 @@ class ForecastService:
                 batch_size=self.settings.forecast_bulk_artifact_write_batch_size,
             )
             artifact_size = self.artifacts.summary_artifact_size_bytes(provider, resolved_run.run_id)
+            run_row = self.repo.get_run(provider, resolved_run.run_id)
+            if run_row is not None:
+                ops = self._run_ops_metadata(run_row)
+                artifact_meta = dict(ops.get("artifact", {}))
+                artifact_meta["path"] = str(path)
+                artifact_meta["row_count"] = stats["normalized_rows_written"]
+                artifact_meta["size_bytes"] = artifact_size
+                artifact_meta["signature"] = self._summary_artifact_signature(provider, resolved_run.run_id)
+                summary_ingest = dict(ops.get("summary_ingest", {}))
+                summary_ingest["attempted"] = False
+                summary_ingest["succeeded"] = False
+                summary_ingest["rows_written"] = 0
+                summary_ingest["artifact_signature"] = None
+                ops["artifact"] = artifact_meta
+                ops["summary_ingest"] = summary_ingest
+                ops["current_status"] = self.STAGE_ARTIFACT_PREPARED
+                self._touch_ops(ops)
+                self._set_run_ops_metadata(run_row, ops)
+                self.db.commit()
+
             logger.info(
                 "completed bulk summary artifact preparation",
                 extra={
@@ -579,78 +608,127 @@ class ForecastService:
             if hasattr(adapter, "set_supported_reach_filter"):
                 adapter.set_supported_reach_filter(None)
 
-    def ingest_forecast_summaries(self, provider: str, run_id: str) -> int:
+    def ingest_forecast_summaries(self, provider: str, run_id: str, replace_existing: bool = False) -> int:
         resolved_run = self.resolve_requested_run_id(provider, run_id)
         if not self.artifacts.summary_exists(provider, resolved_run.run_id):
             raise ValueError("Summary bulk ingest requested, but no summary artifact exists. Run prepare-bulk-summaries first.")
 
+        run_row = self.repo.get_run(provider, resolved_run.run_id)
+        if run_row is None:
+            raise ValueError(f"Run '{resolved_run.run_id}' not found for provider '{provider}'")
+
+        artifact_signature = self._summary_artifact_signature(provider, resolved_run.run_id)
+        ops = self._run_ops_metadata(run_row)
+        ingest_meta = dict(ops.get("summary_ingest", {}))
+        ingest_meta["attempted"] = True
+        ingest_meta["succeeded"] = False
+        ingest_meta["error"] = None
+        ingest_meta["replace_existing"] = replace_existing
+        ops["summary_ingest"] = ingest_meta
+        self._touch_ops(ops)
+        self._set_run_ops_metadata(run_row, ops)
+        self.db.commit()
+
         logger.info(
             "starting summary ingest",
-            extra={"provider": provider, "run_id": resolved_run.run_id, "source": "summary_artifact"},
-        )
-        total = 0
-        batch: list[ReachSummarySchema] = []
-        chunk_index = 0
-        for item in self.artifacts.iter_summary_rows(provider, resolved_run.run_id):
-            batch.append(
-                ReachSummarySchema(
-                    provider=item.provider,
-                    run_id=item.run_id,
-                    provider_reach_id=item.provider_reach_id,
-                    peak_time_utc=item.peak_time_utc,
-                    peak_mean_cms=item.peak_mean_cms,
-                    peak_median_cms=item.peak_median_cms,
-                    peak_max_cms=item.peak_max_cms,
-                    return_period_band=item.return_period_band,
-                    severity_score=item.severity_score,
-                    is_flagged=item.is_flagged,
-                    metadata_json=item.raw_payload_json,
-                )
-            )
-            if len(batch) >= self.settings.forecast_bulk_ingest_batch_size:
-                chunk_index += 1
-                chunk_rows = self.repo.upsert_summaries(batch)
-                total += chunk_rows
-                self.db.commit()
-                logger.info(
-                    "summary ingest chunk complete",
-                    extra={
-                        "provider": provider,
-                        "run_id": resolved_run.run_id,
-                        "source": "summary_artifact",
-                        "chunk_number": chunk_index,
-                        "chunk_rows_written": chunk_rows,
-                        "total_rows_written": total,
-                    },
-                )
-                batch = []
-        if batch:
-            chunk_index += 1
-            chunk_rows = self.repo.upsert_summaries(batch)
-            total += chunk_rows
-            self.db.commit()
-            logger.info(
-                "summary ingest chunk complete",
-                extra={
-                    "provider": provider,
-                    "run_id": resolved_run.run_id,
-                    "source": "summary_artifact",
-                    "chunk_number": chunk_index,
-                    "chunk_rows_written": chunk_rows,
-                    "total_rows_written": total,
-                },
-            )
-        logger.info(
-            "completed summary ingest",
             extra={
                 "provider": provider,
                 "run_id": resolved_run.run_id,
                 "source": "summary_artifact",
-                "artifact_rows_read": self.artifacts.count_summary_rows(provider, resolved_run.run_id),
-                "rows_written": total,
+                "replace_existing": replace_existing,
             },
         )
-        return total
+
+        total = 0
+        replaced_rows = 0
+        batch: list[ReachSummarySchema] = []
+        chunk_index = 0
+        try:
+            if replace_existing:
+                replaced_rows = self.repo.delete_summaries_for_run(provider, resolved_run.run_id)
+                self.db.commit()
+
+            for item in self.artifacts.iter_summary_rows(provider, resolved_run.run_id):
+                batch.append(
+                    ReachSummarySchema(
+                        provider=str(item.provider),
+                        run_id=str(item.run_id),
+                        provider_reach_id=str(item.provider_reach_id),
+                        peak_time_utc=item.peak_time_utc,
+                        peak_mean_cms=item.peak_mean_cms,
+                        peak_median_cms=item.peak_median_cms,
+                        peak_max_cms=item.peak_max_cms,
+                        return_period_band=item.return_period_band,
+                        severity_score=int(item.severity_score),
+                        is_flagged=bool(item.is_flagged),
+                        metadata_json=item.raw_payload_json,
+                    )
+                )
+                if len(batch) >= self.settings.forecast_bulk_ingest_batch_size:
+                    chunk_index += 1
+                    chunk_rows = self.repo.upsert_summaries(batch)
+                    total += chunk_rows
+                    self.db.commit()
+                    logger.info(
+                        "summary ingest chunk complete",
+                        extra={
+                            "provider": provider,
+                            "run_id": resolved_run.run_id,
+                            "source": "summary_artifact",
+                            "chunk_number": chunk_index,
+                            "chunk_rows_written": chunk_rows,
+                            "total_rows_written": total,
+                        },
+                    )
+                    batch = []
+            if batch:
+                chunk_index += 1
+                chunk_rows = self.repo.upsert_summaries(batch)
+                total += chunk_rows
+                self.db.commit()
+
+            ops = self._run_ops_metadata(run_row)
+            ingest_meta = dict(ops.get("summary_ingest", {}))
+            ingest_meta["attempted"] = True
+            ingest_meta["succeeded"] = True
+            ingest_meta["error"] = None
+            ingest_meta["rows_written"] = total
+            ingest_meta["rows_replaced"] = replaced_rows
+            ingest_meta["artifact_signature"] = artifact_signature
+            ingest_meta["artifact_row_count"] = self.artifacts.count_summary_rows(provider, resolved_run.run_id)
+            ops["summary_ingest"] = ingest_meta
+            ops["failure_stage"] = None
+            ops["failure_message"] = None
+            self._touch_ops(ops)
+            self._set_run_ops_metadata(run_row, ops)
+            self.db.commit()
+
+            logger.info(
+                "completed summary ingest",
+                extra={
+                    "provider": provider,
+                    "run_id": resolved_run.run_id,
+                    "source": "summary_artifact",
+                    "artifact_rows_read": self.artifacts.count_summary_rows(provider, resolved_run.run_id),
+                    "rows_replaced": replaced_rows,
+                    "rows_written": total,
+                },
+            )
+            return total
+        except Exception as exc:
+            ops = self._run_ops_metadata(run_row)
+            ingest_meta = dict(ops.get("summary_ingest", {}))
+            ingest_meta["attempted"] = True
+            ingest_meta["succeeded"] = False
+            ingest_meta["error"] = str(exc)
+            ingest_meta["artifact_signature"] = artifact_signature
+            ops["summary_ingest"] = ingest_meta
+            ops["failure_stage"] = self.STAGE_INGESTED
+            ops["failure_message"] = str(exc)
+            self._touch_ops(ops)
+            self._set_run_ops_metadata(run_row, ops)
+            self.db.commit()
+            raise
 
     def ingest_forecast_run(
         self,
@@ -1112,7 +1190,14 @@ class ForecastService:
         ingest_meta = dict(ops.get("ingest", {}))
         summarize_meta = dict(ops.get("summarize", {}))
 
-        map_ready = bool(summary_row_count > 0 and map_row_count > 0)
+        summary_ingest_meta = dict(ops.get("summary_ingest", {}))
+        artifact_signature = self._summary_artifact_signature(provider, run_row.run_id)
+        ingest_signature = summary_ingest_meta.get("artifact_signature")
+        ingest_attempted = bool(summary_ingest_meta.get("attempted", False))
+        ingest_succeeded = bool(summary_ingest_meta.get("succeeded", False))
+        ingest_current = bool(ingest_signature and ingest_signature == artifact_signature)
+        ingest_gate_ok = (not ingest_attempted) or (ingest_succeeded and ingest_current)
+        map_ready = bool(summary_row_count > 0 and map_row_count > 0 and ingest_gate_ok)
 
         if raw_meta.get("succeeded"):
             completed_set.add(self.STAGE_RAW_ACQUIRED)
@@ -1120,7 +1205,7 @@ class ForecastService:
             completed_set.add(self.STAGE_ARTIFACT_PREPARED)
         if timeseries_row_count > 0:
             completed_set.add(self.STAGE_INGESTED)
-        if summary_row_count > 0:
+        if summary_row_count > 0 and ingest_gate_ok:
             completed_set.add(self.STAGE_SUMMARIZED)
         if map_ready:
             completed_set.add(self.STAGE_MAP_READY)
@@ -1155,7 +1240,7 @@ class ForecastService:
         current_status = ops.get("current_status") or run_row.ingest_status or self.STAGE_DISCOVERED
         if map_ready:
             current_status = self.STAGE_MAP_READY
-        elif summarize.completed:
+        elif summarize.completed and ingest_gate_ok:
             current_status = self.STAGE_SUMMARIZED
         elif ingest.completed:
             current_status = self.STAGE_INGESTED
@@ -1173,6 +1258,9 @@ class ForecastService:
             "max_reaches": ops.get("max_reaches"),
             "max_blocks": ops.get("max_blocks"),
             "max_seconds": ops.get("max_seconds"),
+            "summary_ingest_attempted": ingest_attempted,
+            "summary_ingest_succeeded": ingest_succeeded,
+            "summary_ingest_current": ingest_current,
         }
 
         return RunReadinessStatusResponse(

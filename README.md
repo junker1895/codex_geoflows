@@ -406,7 +406,8 @@ Production note: full-network per-timestep materialization is intentionally not 
 python -m alembic upgrade head
 python -m app.cli discover-latest-run --provider geoglows
 python -m app.cli prepare-bulk-summaries --provider geoglows --run-id latest --filter-supported --max-blocks 20
-python -m app.cli ingest-forecast-summaries --provider geoglows --run-id latest
+python -m app.cli inspect-summary-artifact-schema --provider geoglows --run-id latest
+python -m app.cli ingest-forecast-summaries --provider geoglows --run-id latest --replace-existing
 python -m app.cli run-status --provider geoglows --run-id latest
 python -m app.cli cleanup-forecast-cache
 ```
@@ -417,7 +418,8 @@ python -m app.cli cleanup-forecast-cache
 python -m alembic upgrade head
 python -m app.cli discover-latest-run --provider geoglows
 python -m app.cli prepare-bulk-summaries --provider geoglows --run-id latest --filter-supported --full-run
-python -m app.cli ingest-forecast-summaries --provider geoglows --run-id latest
+python -m app.cli inspect-summary-artifact-schema --provider geoglows --run-id latest
+python -m app.cli ingest-forecast-summaries --provider geoglows --run-id latest --replace-existing
 python -m app.cli run-status --provider geoglows --run-id latest
 ```
 

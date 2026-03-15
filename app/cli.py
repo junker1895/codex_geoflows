@@ -211,11 +211,31 @@ def cli_prepare_bulk_summaries(
 def cli_ingest_forecast_summaries(
     provider: str = typer.Option("geoglows", "--provider"),
     run_id: str = typer.Option("latest", "--run-id"),
+    replace_existing: bool = typer.Option(False, "--replace-existing"),
 ) -> None:
     def _inner() -> None:
         service = _build_service()
-        count = service.ingest_forecast_summaries(provider=provider, run_id=run_id)
+        count = service.ingest_forecast_summaries(provider=provider, run_id=run_id, replace_existing=replace_existing)
         typer.echo(f"upserted summary rows: {count}")
+
+    _safe_run(_inner)
+
+
+@cli.command("inspect-summary-artifact-schema")
+def cli_inspect_summary_artifact_schema(
+    provider: str = typer.Option("geoglows", "--provider"),
+    run_id: str = typer.Option("latest", "--run-id"),
+    preview_limit: int = typer.Option(3, "--preview-limit", min=0, max=10),
+) -> None:
+    def _inner() -> None:
+        service = _build_service()
+        resolved = service.resolve_requested_run_id(provider, run_id)
+        path = service.artifacts.summary_artifact_path(provider, resolved.run_id)
+        typer.echo(f"summary_artifact_path: {path}")
+        typer.echo(f"summary_schema: {service.artifacts.summary_schema_string(provider, resolved.run_id)}")
+        if preview_limit > 0:
+            preview = service.artifacts.preview_summary_rows(provider, resolved.run_id, limit=preview_limit)
+            typer.echo(json.dumps(preview, indent=2, default=str))
 
     _safe_run(_inner)
 
