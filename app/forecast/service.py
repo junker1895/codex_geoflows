@@ -1027,7 +1027,7 @@ class ForecastService:
         started = perf_counter()
         t0 = perf_counter()
         run = self.resolve_requested_run_id_local(provider, run_id or "latest")
-        latest_resolution_seconds = perf_counter() - t0
+        latest_run_resolution_seconds = perf_counter() - t0
 
         t1 = perf_counter()
         run_id_concrete = self._require_concrete_run_id(run.run_id)
@@ -1057,7 +1057,7 @@ class ForecastService:
                 "provider": provider,
                 "run_id": run.run_id,
                 "provider_reach_id": provider_reach_id,
-                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
                 "timeseries_query_seconds": round(timeseries_query_seconds, 6),
                 "return_period_query_seconds": round(return_period_query_seconds, 6),
                 "summary_query_seconds": round(summary_query_seconds, 6),
@@ -1145,7 +1145,7 @@ class ForecastService:
             extra={
                 "provider": provider,
                 "run_id": run.run_id,
-                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
                 "summary_query_seconds": round(summary_query_seconds, 6),
                 "total_seconds": round(perf_counter() - started, 6),
             },
@@ -1170,7 +1170,7 @@ class ForecastService:
 
         t0 = perf_counter()
         latest = self.get_latest_run(provider)
-        latest_resolution_seconds = perf_counter() - t0
+        latest_run_resolution_seconds = perf_counter() - t0
 
         summary_count = 0
         status = None
@@ -1209,7 +1209,7 @@ class ForecastService:
             extra={
                 "provider": provider,
                 "refresh_upstream": refresh_upstream,
-                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
                 "health_assembly_seconds": round(perf_counter() - started, 6),
             },
         )
@@ -1390,7 +1390,7 @@ class ForecastService:
         self._get_provider(provider)
         t0 = perf_counter()
         resolved = self.resolve_requested_run_id_local(provider, run_id, require_existing=False)
-        latest_resolution_seconds = perf_counter() - t0
+        latest_run_resolution_seconds = perf_counter() - t0
         if not resolved:
             raise ValueError(f"Run '{run_id}' not found for provider '{provider}'")
         resolved_run_id = self._require_concrete_run_id(resolved.run_id)
@@ -1405,7 +1405,7 @@ class ForecastService:
                 "provider": provider,
                 "run_id": response.run_id,
                 "refresh_upstream": refresh_upstream,
-                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
                 "status_assembly_seconds": round(perf_counter() - t1, 6),
                 "total_seconds": round(perf_counter() - started, 6),
             },
