@@ -1,3 +1,6 @@
+import logging
+from time import perf_counter
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -18,6 +21,7 @@ from app.forecast.schemas import (
 )
 
 router = APIRouter(prefix="/forecast", tags=["forecast"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/providers", response_model=list[str])
@@ -45,9 +49,12 @@ def reach_detail(
     timeseries_limit: int | None = Query(default=500, ge=1, le=5000),
     db: Session = Depends(get_db_session),
 ) -> ReachDetailResponse:
+    started = perf_counter()
     service = get_forecast_service(db)
     try:
-        return service.get_reach_detail(provider, provider_reach_id, run_id=run_id, timeseries_limit=timeseries_limit)
+        response = service.get_reach_detail(provider, provider_reach_id, run_id=run_id, timeseries_limit=timeseries_limit)
+        logger.info("forecast reach_detail route completed", extra={"provider": provider, "run_id": run_id or "latest", "elapsed_seconds": round(perf_counter()-started,6)})
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -63,18 +70,28 @@ def map_reaches(
     min_severity_score: float | None = Query(default=None),
     db: Session = Depends(get_db_session),
 ) -> ForecastMapReachesResponse:
+    started = perf_counter()
     service = get_forecast_service(db)
+    resolved_run_id = None
     try:
-        return service.list_forecast_map_reaches(
+        resolved = service.resolve_requested_run_id_local(provider, run_id or "latest", require_existing=False)
+        resolved_run_id = None if resolved is None else resolved.run_id
+        response = service.list_forecast_map_reaches(
             provider=provider,
-            run_id=run_id,
+            run_id=resolved_run_id,
             bbox=bbox,
             limit=limit,
             flagged_only=flagged_only,
             min_severity_score=min_severity_score,
         )
+        logger.info("forecast map_reaches route completed", extra={"provider": provider, "requested_run_id": run_id or "latest", "resolved_run_id": resolved_run_id, "elapsed_seconds": round(perf_counter()-started,6)})
+        return response
     except ValueError as exc:
+        logger.exception("forecast map_reaches route failed", extra={"provider": provider, "requested_run_id": run_id or "latest", "resolved_run_id": resolved_run_id})
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("forecast map_reaches route failed", extra={"provider": provider, "requested_run_id": run_id or "latest", "resolved_run_id": resolved_run_id})
+        raise HTTPException(status_code=500, detail="internal server error") from exc
 
 
 @router.get("/summary", response_model=list[ReachSummarySchema])
@@ -93,10 +110,17 @@ def summary(
 
 
 @router.get("/health", response_model=ProviderHealthResponse)
-def forecast_health(provider: str, db: Session = Depends(get_db_session)) -> ProviderHealthResponse:
+def forecast_health(
+    provider: str,
+    refresh_upstream: bool = Query(default=False),
+    db: Session = Depends(get_db_session),
+) -> ProviderHealthResponse:
+    started = perf_counter()
     service = get_forecast_service(db)
     try:
-        return service.get_provider_health(provider)
+        response = service.get_provider_health(provider, refresh_upstream=refresh_upstream)
+        logger.info("forecast health route completed", extra={"provider": provider, "refresh_upstream": refresh_upstream, "elapsed_seconds": round(perf_counter()-started,6)})
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -104,12 +128,29 @@ def forecast_health(provider: str, db: Session = Depends(get_db_session)) -> Pro
 
 
 @router.get("/runs/{provider}/{run_id}/status", response_model=RunReadinessStatusResponse)
-def run_status(provider: str, run_id: str, db: Session = Depends(get_db_session)) -> RunReadinessStatusResponse:
+def run_status(
+    provider: str,
+    run_id: str,
+    refresh_upstream: bool = Query(default=False),
+    db: Session = Depends(get_db_session),
+) -> RunReadinessStatusResponse:
+    started = perf_counter()
     service = get_forecast_service(db)
+    resolved_run_id = None
     try:
-        return service.get_run_status(provider, run_id)
+        resolved = service.resolve_requested_run_id_local(provider, run_id, require_existing=False)
+        resolved_run_id = None if resolved is None else resolved.run_id
+        if resolved_run_id is None:
+            raise ValueError(f"Run '{run_id}' not found for provider '{provider}'")
+        response = service.get_run_status(provider, resolved_run_id, refresh_upstream=refresh_upstream)
+        logger.info("forecast run_status route completed", extra={"provider": provider, "requested_run_id": run_id, "resolved_run_id": resolved_run_id, "refresh_upstream": refresh_upstream, "elapsed_seconds": round(perf_counter()-started,6)})
+        return response
     except ValueError as exc:
+        logger.exception("forecast run_status route failed", extra={"provider": provider, "requested_run_id": run_id, "resolved_run_id": resolved_run_id})
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("forecast run_status route failed", extra={"provider": provider, "requested_run_id": run_id, "resolved_run_id": resolved_run_id})
+        raise HTTPException(status_code=500, detail="internal server error") from exc
 
 @router.get("/smoke/geoglows")
 def geoglows_smoke(
