@@ -124,6 +124,19 @@ class ForecastRepository:
         return count
 
 
+    def delete_summaries_for_run(self, provider: str, run_id: str) -> int:
+        stmt = select(models.ForecastProviderReachSummary).where(
+            and_(
+                models.ForecastProviderReachSummary.provider == provider,
+                models.ForecastProviderReachSummary.run_id == run_id,
+            )
+        )
+        rows = list(self.db.execute(stmt).scalars().all())
+        for row in rows:
+            self.db.delete(row)
+        self.db.flush()
+        return len(rows)
+
     def count_timeseries_rows_for_run(self, provider: str, run_id: str) -> int:
         stmt = select(func.count(models.ForecastProviderReachTimeseries.id)).where(
             and_(
