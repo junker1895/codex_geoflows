@@ -159,3 +159,43 @@ def test_map_reaches_after_bulk_ingest_returns_multiple_rows(client, db_session)
     payload = response.json()
     assert payload["meta"]["count"] == 3
     assert len(payload["data"]) == 3
+
+
+def test_health_refresh_flag_defaults_false(client, monkeypatch):
+    class _Svc:
+        def get_provider_health(self, provider: str, refresh_upstream: bool = False):
+            from app.forecast.schemas import ProviderHealthResponse
+
+            assert provider == "geoglows"
+            assert refresh_upstream is False
+            return ProviderHealthResponse(
+                provider="geoglows",
+                enabled=True,
+                latest_run=None,
+                ingest_status=None,
+                summary_count=0,
+            )
+
+    monkeypatch.setattr("app.api.routes.forecast.get_forecast_service", lambda _db: _Svc())
+    response = client.get("/forecast/health", params={"provider": "geoglows"})
+    assert response.status_code == 200
+
+
+def test_health_refresh_flag_true(client, monkeypatch):
+    class _Svc:
+        def get_provider_health(self, provider: str, refresh_upstream: bool = False):
+            from app.forecast.schemas import ProviderHealthResponse
+
+            assert provider == "geoglows"
+            assert refresh_upstream is True
+            return ProviderHealthResponse(
+                provider="geoglows",
+                enabled=True,
+                latest_run=None,
+                ingest_status=None,
+                summary_count=0,
+            )
+
+    monkeypatch.setattr("app.api.routes.forecast.get_forecast_service", lambda _db: _Svc())
+    response = client.get("/forecast/health", params={"provider": "geoglows", "refresh_upstream": "true"})
+    assert response.status_code == 200

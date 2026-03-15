@@ -480,8 +480,8 @@ def test_health_and_status_report_upstream_bulk_context(db_session):
     service = ForecastService(db_session, settings, {"geoglows": _UpstreamAwareFakeProvider()})
     run = service.discover_latest_run("geoglows")
 
-    health = service.get_provider_health("geoglows")
-    status = service.get_run_status("geoglows", run.run_id)
+    health = service.get_provider_health("geoglows", refresh_upstream=True)
+    status = service.get_run_status("geoglows", run.run_id, refresh_upstream=True)
 
     assert health.authoritative_latest_upstream_run_id == "2026031400"
     assert health.source_bucket == "geoglows-v2-forecasts"
@@ -712,3 +712,45 @@ def test_run_status_not_ready_when_summary_ingest_fails(db_session, tmp_path):
     assert status.map_ready is False
     assert status.failure_stage == "ingested"
     assert "broken parquet schema" in (status.failure_message or "")
+
+
+def test_local_latest_resolution_avoids_upstream_calls_in_api_paths(db_session):
+    class _NoUpstreamProvider(FakeProvider):
+        def get_latest_upstream_run_id(self):
+            raise AssertionError("upstream should not be called")
+
+        def upstream_run_exists(self, run_id: str):
+            raise AssertionError("upstream should not be called")
+
+    service = ForecastService(db_session, Settings(), {"geoglows": _NoUpstreamProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100"])
+    service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+    service.ingest_forecast_summaries("geoglows", run.run_id)
+
+    health = service.get_provider_health("geoglows")
+    status = service.get_run_status("geoglows", "latest")
+    detail = service.get_reach_detail("geoglows", "100", run_id=None, timeseries_limit=1)
+    m = service.list_forecast_map_reaches("geoglows", run_id="latest", limit=1)
+
+    assert health.latest_run is not None
+    assert health.latest_run.run_id == run.run_id
+    assert status.run_id == run.run_id
+    assert detail.run.run_id == run.run_id
+    assert m.meta.run_id == run.run_id
+
+
+def test_cli_and_api_status_semantics_agree_after_summary_ingest(db_session, tmp_path):
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100"])
+    service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+    service.ingest_forecast_summaries("geoglows", run.run_id)
+
+    cli_like = service.get_run_status("geoglows", run.run_id)
+    api_like = service.get_run_status("geoglows", "latest")
+
+    assert cli_like.current_status == api_like.current_status
+    assert cli_like.map_ready == api_like.map_ready
+    assert cli_like.completed_stages == api_like.completed_stages

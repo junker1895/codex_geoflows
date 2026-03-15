@@ -996,16 +996,25 @@ class ForecastService:
             raise
 
     def get_latest_run(self, provider: str) -> ForecastRunSchema | None:
-        return self.resolve_requested_run_id(provider, "latest", require_existing=False)
+        return self.resolve_requested_run_id_local(provider, "latest", require_existing=False)
 
     def get_reach_detail(
         self, provider: str, provider_reach_id: str, run_id: str | None = None, timeseries_limit: int | None = None
     ) -> ReachDetailResponse:
         self._get_provider(provider)
-        run = self.resolve_requested_run_id(provider, run_id or "latest")
+        started = perf_counter()
+        t0 = perf_counter()
+        run = self.resolve_requested_run_id_local(provider, run_id or "latest")
+        latest_resolution_seconds = perf_counter() - t0
+
+        t1 = perf_counter()
         rp_row = self.repo.get_return_period(provider, provider_reach_id)
+        return_period_query_seconds = perf_counter() - t1
+
         cache_key = f"{provider}:{run.run_id}:{provider_reach_id}:{timeseries_limit}"
+        t2 = perf_counter()
         ts_rows = self.repo.get_timeseries(provider, run.run_id, provider_reach_id, limit=timeseries_limit)
+        timeseries_query_seconds = perf_counter() - t2
         if not ts_rows and provider == "geoglows":
             cached = self.detail_cache.get(cache_key)
             if cached is not None:
@@ -1016,7 +1025,22 @@ class ForecastService:
                 if callable(fetch):
                     ts_rows = fetch(run.run_id, provider_reach_id, timeseries_limit=timeseries_limit)
                     self.detail_cache.set(cache_key, ts_rows)
+        t3 = perf_counter()
         summary = self.repo.get_summary(provider, run.run_id, provider_reach_id)
+        summary_query_seconds = perf_counter() - t3
+        logger.info(
+            "forecast reach detail assembled",
+            extra={
+                "provider": provider,
+                "run_id": run.run_id,
+                "provider_reach_id": provider_reach_id,
+                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "timeseries_query_seconds": round(timeseries_query_seconds, 6),
+                "return_period_query_seconds": round(return_period_query_seconds, 6),
+                "summary_query_seconds": round(summary_query_seconds, 6),
+                "total_seconds": round(perf_counter() - started, 6),
+            },
+        )
         return ReachDetailResponse(
             provider=provider,
             run=run,
@@ -1029,7 +1053,7 @@ class ForecastService:
         self, provider: str, run_id: str | None = None, severity_min: int | None = None, limit: int | None = None
     ) -> list[ReachSummarySchema]:
         self._get_provider(provider)
-        run = self.resolve_requested_run_id(provider, run_id or "latest", require_existing=False)
+        run = self.resolve_requested_run_id_local(provider, run_id or "latest", require_existing=False)
         if not run:
             return []
         rows = self.repo.get_summaries(
@@ -1061,7 +1085,7 @@ class ForecastService:
         no reach geometry/bounds table, so bbox filtering is not applied yet.
         """
         self._get_provider(provider)
-        run = self.resolve_requested_run_id(provider, run_id or "latest", require_existing=False)
+        run = self.resolve_requested_run_id_local(provider, run_id or "latest", require_existing=False)
         if not run:
             return ForecastMapReachesResponse(
                 data=[],
@@ -1077,6 +1101,7 @@ class ForecastService:
                 ),
             )
 
+        t1 = perf_counter()
         rows = self.repo.get_map_summaries(
             provider=provider,
             run_id=run.run_id,
@@ -1085,6 +1110,17 @@ class ForecastService:
             limit=limit or self.settings.forecast_summary_default_limit,
         )
         data = [to_map_summary_schema(x) for x in rows]
+        summary_query_seconds = perf_counter() - t1
+        logger.info(
+            "forecast map reaches assembled",
+            extra={
+                "provider": provider,
+                "run_id": run.run_id,
+                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "summary_query_seconds": round(summary_query_seconds, 6),
+                "total_seconds": round(perf_counter() - started, 6),
+            },
+        )
         return ForecastMapReachesResponse(
             data=data,
             meta=ForecastMapMeta(
@@ -1099,9 +1135,14 @@ class ForecastService:
             ),
         )
 
-    def get_provider_health(self, provider: str) -> ProviderHealthResponse:
+    def get_provider_health(self, provider: str, refresh_upstream: bool = False) -> ProviderHealthResponse:
+        started = perf_counter()
         adapter = self._get_provider(provider)
+
+        t0 = perf_counter()
         latest = self.get_latest_run(provider)
+        latest_resolution_seconds = perf_counter() - t0
+
         summary_count = 0
         status = None
         latest_run_timeseries_row_count = 0
@@ -1112,25 +1153,36 @@ class ForecastService:
             summary_count = self.repo.count_summaries_for_run(provider, latest.run_id)
             latest_run_timeseries_row_count = self.repo.count_timeseries_rows_for_run(provider, latest.run_id)
             latest_run_reach_count = self.repo.count_timeseries_reaches_for_run(provider, latest.run_id)
-            latest_status = self.get_run_status(provider, latest.run_id)
+            latest_status = self.get_run_status(provider, latest.run_id, refresh_upstream=refresh_upstream)
 
         capabilities = getattr(adapter, "capabilities", None)
-        supports_forecast_stats_rest = bool(
-            getattr(capabilities, "supports_forecast_stats_rest", False)
-        )
+        supports_forecast_stats_rest = bool(getattr(capabilities, "supports_forecast_stats_rest", False))
         supports_bulk_forecast_ingest = bool(adapter.supports_bulk_acquisition())
         bulk_acquisition_mode = adapter.bulk_acquisition_mode()
         bulk_raw_source_reachable = adapter.is_bulk_source_reachable()
         source = self.settings.geoglows_data_source.lower() if provider == "geoglows" else "unknown"
-        supports_return_periods_current_backend = bool(
-            getattr(capabilities, f"supports_return_periods_{source}", False)
-        )
+        supports_return_periods_current_backend = bool(getattr(capabilities, f"supports_return_periods_{source}", False))
         local_return_periods_available = self.repo.has_return_periods(provider)
         latest_run_artifact_exists = bool(latest_status and latest_status.artifact.exists)
         latest_run_map_ready = bool(latest_status and latest_status.map_ready)
-        upstream_latest_run_id = self._latest_upstream_run_id(adapter)
-        latest_upstream_run_exists = self._upstream_run_exists(adapter, upstream_latest_run_id) if upstream_latest_run_id else None
+
+        upstream_latest_run_id = None
+        latest_upstream_run_exists = None
+        if refresh_upstream:
+            upstream_latest_run_id = self._latest_upstream_run_id(adapter)
+            latest_upstream_run_exists = self._upstream_run_exists(adapter, upstream_latest_run_id) if upstream_latest_run_id else None
+
         latest_source_zarr_path = self._source_zarr_path(adapter, latest.run_id) if latest else None
+
+        logger.info(
+            "forecast health assembled",
+            extra={
+                "provider": provider,
+                "refresh_upstream": refresh_upstream,
+                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "health_assembly_seconds": round(perf_counter() - started, 6),
+            },
+        )
 
         return ProviderHealthResponse(
             provider=provider,
@@ -1172,7 +1224,9 @@ class ForecastService:
         except ValueError:
             return None
 
-    def _run_status_from_row(self, provider: str, run_row: models.ForecastRun) -> RunReadinessStatusResponse:
+    def _run_status_from_row(
+        self, provider: str, run_row: models.ForecastRun, refresh_upstream: bool = False
+    ) -> RunReadinessStatusResponse:
         ops = self._run_ops_metadata(run_row)
         completed_set = set(ops.get("completed_stages", []))
 
@@ -1251,8 +1305,18 @@ class ForecastService:
         else:
             current_status = self.STAGE_DISCOVERED
 
-        authoritative_latest_upstream_run_id = self._latest_upstream_run_id(self._get_provider(provider))
-        source_zarr_path = self._source_zarr_path(self._get_provider(provider), run_row.run_id)
+        adapter = self._get_provider(provider)
+        authoritative_latest_upstream_run_id = self._latest_upstream_run_id(adapter) if refresh_upstream else None
+        source_zarr_path = self._source_zarr_path(adapter, run_row.run_id)
+
+        configured_limits = {
+            "max_reaches": ops.get("max_reaches"),
+            "max_blocks": ops.get("max_blocks"),
+            "max_seconds": ops.get("max_seconds"),
+            "summary_ingest_attempted": ingest_attempted,
+            "summary_ingest_succeeded": ingest_succeeded,
+            "summary_ingest_current": ingest_current,
+        }
 
         configured_limits = {
             "max_reaches": ops.get("max_reaches"),
@@ -1280,8 +1344,8 @@ class ForecastService:
             failure_message=ops.get("failure_message"),
             last_updated_utc=self._parse_last_updated(ops.get("last_updated_utc")) or run_row.updated_at,
             authoritative_latest_upstream_run_id=authoritative_latest_upstream_run_id,
-            upstream_run_exists=self._upstream_run_exists(self._get_provider(provider), run_row.run_id),
-            acquisition_mode=self._get_provider(provider).bulk_acquisition_mode(),
+            upstream_run_exists=self._upstream_run_exists(adapter, run_row.run_id) if refresh_upstream else None,
+            acquisition_mode=adapter.bulk_acquisition_mode(),
             source_bucket=getattr(self.settings, "geoglows_forecast_bucket", None) if provider == "geoglows" else None,
             source_zarr_path=source_zarr_path,
             bounded_run=ops.get("bounded_run"),
@@ -1292,20 +1356,59 @@ class ForecastService:
     def cleanup_forecast_cache(self) -> int:
         return self.cache.cleanup()
 
-    def get_run_status(self, provider: str, run_id: str) -> RunReadinessStatusResponse:
+    def get_run_status(self, provider: str, run_id: str, refresh_upstream: bool = False) -> RunReadinessStatusResponse:
+        started = perf_counter()
         self._get_provider(provider)
-        resolved = self.resolve_requested_run_id(provider, run_id, require_existing=False)
+        t0 = perf_counter()
+        resolved = self.resolve_requested_run_id_local(provider, run_id, require_existing=False)
+        latest_resolution_seconds = perf_counter() - t0
         if not resolved:
             raise ValueError(f"Run '{run_id}' not found for provider '{provider}'")
         run_row = self.repo.get_run(provider, resolved.run_id)
         if run_row is None:
             raise ValueError(f"Run '{resolved.run_id}' not found for provider '{provider}'")
-        return self._run_status_from_row(provider, run_row)
+        t1 = perf_counter()
+        response = self._run_status_from_row(provider, run_row, refresh_upstream=refresh_upstream)
+        logger.info(
+            "forecast run status assembled",
+            extra={
+                "provider": provider,
+                "run_id": response.run_id,
+                "refresh_upstream": refresh_upstream,
+                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "status_assembly_seconds": round(perf_counter() - t1, 6),
+                "total_seconds": round(perf_counter() - started, 6),
+            },
+        )
+        return response
+
+    def resolve_requested_run_id_local(
+        self, provider: str, requested_run_id: str, require_existing: bool = True
+    ) -> ForecastRunSchema | None:
+        return self._resolve_run_local(provider, requested_run_id, require_existing=require_existing)
 
     def resolve_requested_run_id(
         self, provider: str, requested_run_id: str, require_existing: bool = True
     ) -> ForecastRunSchema | None:
         return self._resolve_run(provider, requested_run_id, require_existing=require_existing)
+
+    def _resolve_run_local(
+        self, provider: str, run_id: str, require_existing: bool = True
+    ) -> ForecastRunSchema | None:
+        if run_id == "latest":
+            latest = self.repo.get_latest_run(provider)
+            if latest is None:
+                if require_existing:
+                    raise ValueError(f"Run 'latest' not found for provider '{provider}'")
+                return None
+            return to_run_schema(latest)
+
+        run = self.repo.get_run(provider, run_id)
+        if run:
+            return to_run_schema(run)
+        if require_existing:
+            raise ValueError(f"Run '{run_id}' not found for provider '{provider}'")
+        return None
 
     def _resolve_run(
         self, provider: str, run_id: str, require_existing: bool = True
