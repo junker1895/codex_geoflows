@@ -1318,6 +1318,15 @@ class ForecastService:
             "summary_ingest_current": ingest_current,
         }
 
+        configured_limits = {
+            "max_reaches": ops.get("max_reaches"),
+            "max_blocks": ops.get("max_blocks"),
+            "max_seconds": ops.get("max_seconds"),
+            "summary_ingest_attempted": ingest_attempted,
+            "summary_ingest_succeeded": ingest_succeeded,
+            "summary_ingest_current": ingest_current,
+        }
+
         return RunReadinessStatusResponse(
             provider=provider,
             run_id=run_row.run_id,
