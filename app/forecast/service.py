@@ -1145,7 +1145,7 @@ class ForecastService:
             extra={
                 "provider": provider,
                 "run_id": run.run_id,
-                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "latest_run_resolution_seconds": round(latest_run_resolution_seconds, 6),
                 "summary_query_seconds": round(summary_query_seconds, 6),
                 "total_seconds": round(perf_counter() - started, 6),
             },
