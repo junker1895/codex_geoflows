@@ -172,6 +172,8 @@ class ProviderHealthResponse(ORMBaseModel):
     latest_upstream_run_exists: bool | None = None
     source_bucket: str | None = None
     source_zarr_path: str | None = None
+    bounded_run: bool | None = None
+    configured_limits: dict[str, Any] = Field(default_factory=dict)
 
 
 class RawAcquisitionStatus(ORMBaseModel):
@@ -186,6 +188,7 @@ class ArtifactStatus(ORMBaseModel):
     exists: bool = False
     path: str | None = None
     row_count: int = 0
+    size_bytes: int = 0
 
 
 class IngestStatus(ORMBaseModel):
@@ -219,3 +222,5 @@ class RunReadinessStatusResponse(ORMBaseModel):
     acquisition_mode: str | None = None
     source_bucket: str | None = None
     source_zarr_path: str | None = None
+    bounded_run: bool | None = None
+    configured_limits: dict[str, Any] = Field(default_factory=dict)
