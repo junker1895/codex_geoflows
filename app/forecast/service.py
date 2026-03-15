@@ -139,6 +139,11 @@ class ForecastService:
         mtime_ns = path.stat().st_mtime_ns
         return f"{path}|{size}|{rows}|{mtime_ns}"
 
+    def _require_concrete_run_id(self, run_id: str) -> str:
+        if run_id == "latest":
+            raise ValueError("internal bug: repository query received unresolved run_id='latest'")
+        return run_id
+
     def _record_run_failure(self, provider: str, run_id: str, stage: str, message: str) -> None:
         run_row = self.repo.get_run(provider, run_id)
         if run_row is None:
@@ -1008,12 +1013,13 @@ class ForecastService:
         latest_resolution_seconds = perf_counter() - t0
 
         t1 = perf_counter()
+        run_id_concrete = self._require_concrete_run_id(run.run_id)
         rp_row = self.repo.get_return_period(provider, provider_reach_id)
         return_period_query_seconds = perf_counter() - t1
 
         cache_key = f"{provider}:{run.run_id}:{provider_reach_id}:{timeseries_limit}"
         t2 = perf_counter()
-        ts_rows = self.repo.get_timeseries(provider, run.run_id, provider_reach_id, limit=timeseries_limit)
+        ts_rows = self.repo.get_timeseries(provider, run_id_concrete, provider_reach_id, limit=timeseries_limit)
         timeseries_query_seconds = perf_counter() - t2
         if not ts_rows and provider == "geoglows":
             cached = self.detail_cache.get(cache_key)
@@ -1023,10 +1029,10 @@ class ForecastService:
                 adapter = self._get_provider(provider)
                 fetch = getattr(adapter, "fetch_reach_detail_from_public_zarr", None)
                 if callable(fetch):
-                    ts_rows = fetch(run.run_id, provider_reach_id, timeseries_limit=timeseries_limit)
+                    ts_rows = fetch(run_id_concrete, provider_reach_id, timeseries_limit=timeseries_limit)
                     self.detail_cache.set(cache_key, ts_rows)
         t3 = perf_counter()
-        summary = self.repo.get_summary(provider, run.run_id, provider_reach_id)
+        summary = self.repo.get_summary(provider, run_id_concrete, provider_reach_id)
         summary_query_seconds = perf_counter() - t3
         logger.info(
             "forecast reach detail assembled",
@@ -1043,7 +1049,7 @@ class ForecastService:
         )
         return ReachDetailResponse(
             provider=provider,
-            run=run,
+            run=run.model_copy(update={"run_id": run_id_concrete}),
             return_periods=None if rp_row is None else to_return_period_schema(rp_row),
             timeseries=[to_timeseries_schema(x) for x in ts_rows],
             summary=None if summary is None else to_summary_schema(summary),
@@ -1053,12 +1059,15 @@ class ForecastService:
         self, provider: str, run_id: str | None = None, severity_min: int | None = None, limit: int | None = None
     ) -> list[ReachSummarySchema]:
         self._get_provider(provider)
+        started = perf_counter()
+        t0 = perf_counter()
         run = self.resolve_requested_run_id_local(provider, run_id or "latest", require_existing=False)
+        latest_run_resolution_seconds = perf_counter() - t0
         if not run:
             return []
         rows = self.repo.get_summaries(
             provider,
-            run.run_id,
+            self._require_concrete_run_id(run.run_id),
             severity_min=severity_min,
             limit=limit or self.settings.forecast_summary_default_limit,
         )
@@ -1085,7 +1094,10 @@ class ForecastService:
         no reach geometry/bounds table, so bbox filtering is not applied yet.
         """
         self._get_provider(provider)
+        started = perf_counter()
+        t0 = perf_counter()
         run = self.resolve_requested_run_id_local(provider, run_id or "latest", require_existing=False)
+        latest_run_resolution_seconds = perf_counter() - t0
         if not run:
             return ForecastMapReachesResponse(
                 data=[],
@@ -1104,7 +1116,7 @@ class ForecastService:
         t1 = perf_counter()
         rows = self.repo.get_map_summaries(
             provider=provider,
-            run_id=run.run_id,
+            run_id=self._require_concrete_run_id(run.run_id),
             flagged_only=flagged_only,
             min_severity_score=min_severity_score,
             limit=limit or self.settings.forecast_summary_default_limit,
@@ -1125,7 +1137,7 @@ class ForecastService:
             data=data,
             meta=ForecastMapMeta(
                 provider=provider,
-                run_id=run.run_id,
+                run_id=self._require_concrete_run_id(run.run_id),
                 count=len(data),
                 filters=ForecastMapFilters(
                     bbox=bbox,
@@ -1150,10 +1162,11 @@ class ForecastService:
         latest_status: RunReadinessStatusResponse | None = None
         if latest:
             status = latest.ingest_status
-            summary_count = self.repo.count_summaries_for_run(provider, latest.run_id)
-            latest_run_timeseries_row_count = self.repo.count_timeseries_rows_for_run(provider, latest.run_id)
-            latest_run_reach_count = self.repo.count_timeseries_reaches_for_run(provider, latest.run_id)
-            latest_status = self.get_run_status(provider, latest.run_id, refresh_upstream=refresh_upstream)
+            latest_run_id = self._require_concrete_run_id(latest.run_id)
+            summary_count = self.repo.count_summaries_for_run(provider, latest_run_id)
+            latest_run_timeseries_row_count = self.repo.count_timeseries_rows_for_run(provider, latest_run_id)
+            latest_run_reach_count = self.repo.count_timeseries_reaches_for_run(provider, latest_run_id)
+            latest_status = self.get_run_status(provider, latest_run_id, refresh_upstream=refresh_upstream)
 
         capabilities = getattr(adapter, "capabilities", None)
         supports_forecast_stats_rest = bool(getattr(capabilities, "supports_forecast_stats_rest", False))
@@ -1172,7 +1185,17 @@ class ForecastService:
             upstream_latest_run_id = self._latest_upstream_run_id(adapter)
             latest_upstream_run_exists = self._upstream_run_exists(adapter, upstream_latest_run_id) if upstream_latest_run_id else None
 
-        latest_source_zarr_path = self._source_zarr_path(adapter, latest.run_id) if latest else None
+        latest_source_zarr_path = self._source_zarr_path(adapter, self._require_concrete_run_id(latest.run_id)) if latest else None
+
+        logger.info(
+            "forecast health assembled",
+            extra={
+                "provider": provider,
+                "refresh_upstream": refresh_upstream,
+                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "health_assembly_seconds": round(perf_counter() - started, 6),
+            },
+        )
 
         logger.info(
             "forecast health assembled",
@@ -1318,15 +1341,6 @@ class ForecastService:
             "summary_ingest_current": ingest_current,
         }
 
-        configured_limits = {
-            "max_reaches": ops.get("max_reaches"),
-            "max_blocks": ops.get("max_blocks"),
-            "max_seconds": ops.get("max_seconds"),
-            "summary_ingest_attempted": ingest_attempted,
-            "summary_ingest_succeeded": ingest_succeeded,
-            "summary_ingest_current": ingest_current,
-        }
-
         return RunReadinessStatusResponse(
             provider=provider,
             run_id=run_row.run_id,
@@ -1364,9 +1378,10 @@ class ForecastService:
         latest_resolution_seconds = perf_counter() - t0
         if not resolved:
             raise ValueError(f"Run '{run_id}' not found for provider '{provider}'")
-        run_row = self.repo.get_run(provider, resolved.run_id)
+        resolved_run_id = self._require_concrete_run_id(resolved.run_id)
+        run_row = self.repo.get_run(provider, resolved_run_id)
         if run_row is None:
-            raise ValueError(f"Run '{resolved.run_id}' not found for provider '{provider}'")
+            raise ValueError(f"Run '{resolved_run_id}' not found for provider '{provider}'")
         t1 = perf_counter()
         response = self._run_status_from_row(provider, run_row, refresh_upstream=refresh_upstream)
         logger.info(

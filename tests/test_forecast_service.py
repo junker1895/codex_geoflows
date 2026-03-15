@@ -754,3 +754,29 @@ def test_cli_and_api_status_semantics_agree_after_summary_ingest(db_session, tmp
     assert cli_like.current_status == api_like.current_status
     assert cli_like.map_ready == api_like.map_ready
     assert cli_like.completed_stages == api_like.completed_stages
+
+
+def test_no_repo_query_receives_latest_after_resolution(db_session):
+    service = ForecastService(db_session, Settings(), {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100"])
+    service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+    service.ingest_forecast_summaries("geoglows", run.run_id)
+
+    original_get_map = service.repo.get_map_summaries
+    original_get_run = service.repo.get_run
+
+    def _guard_map(*args, **kwargs):
+        rid = kwargs.get("run_id") if "run_id" in kwargs else args[1]
+        assert rid != "latest"
+        return original_get_map(*args, **kwargs)
+
+    def _guard_run(provider, run_id):
+        assert run_id != "latest"
+        return original_get_run(provider, run_id)
+
+    service.repo.get_map_summaries = _guard_map
+    service.repo.get_run = _guard_run
+
+    service.list_forecast_map_reaches("geoglows", run_id="latest", limit=1)
+    service.get_run_status("geoglows", "latest")

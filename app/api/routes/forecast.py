@@ -72,19 +72,26 @@ def map_reaches(
 ) -> ForecastMapReachesResponse:
     started = perf_counter()
     service = get_forecast_service(db)
+    resolved_run_id = None
     try:
+        resolved = service.resolve_requested_run_id_local(provider, run_id or "latest", require_existing=False)
+        resolved_run_id = None if resolved is None else resolved.run_id
         response = service.list_forecast_map_reaches(
             provider=provider,
-            run_id=run_id,
+            run_id=resolved_run_id,
             bbox=bbox,
             limit=limit,
             flagged_only=flagged_only,
             min_severity_score=min_severity_score,
         )
-        logger.info("forecast map_reaches route completed", extra={"provider": provider, "run_id": run_id or "latest", "elapsed_seconds": round(perf_counter()-started,6)})
+        logger.info("forecast map_reaches route completed", extra={"provider": provider, "requested_run_id": run_id or "latest", "resolved_run_id": resolved_run_id, "elapsed_seconds": round(perf_counter()-started,6)})
         return response
     except ValueError as exc:
+        logger.exception("forecast map_reaches route failed", extra={"provider": provider, "requested_run_id": run_id or "latest", "resolved_run_id": resolved_run_id})
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("forecast map_reaches route failed", extra={"provider": provider, "requested_run_id": run_id or "latest", "resolved_run_id": resolved_run_id})
+        raise HTTPException(status_code=500, detail="internal server error") from exc
 
 
 @router.get("/summary", response_model=list[ReachSummarySchema])
@@ -129,12 +136,21 @@ def run_status(
 ) -> RunReadinessStatusResponse:
     started = perf_counter()
     service = get_forecast_service(db)
+    resolved_run_id = None
     try:
-        response = service.get_run_status(provider, run_id, refresh_upstream=refresh_upstream)
-        logger.info("forecast run_status route completed", extra={"provider": provider, "run_id": run_id, "refresh_upstream": refresh_upstream, "elapsed_seconds": round(perf_counter()-started,6)})
+        resolved = service.resolve_requested_run_id_local(provider, run_id, require_existing=False)
+        resolved_run_id = None if resolved is None else resolved.run_id
+        if resolved_run_id is None:
+            raise ValueError(f"Run '{run_id}' not found for provider '{provider}'")
+        response = service.get_run_status(provider, resolved_run_id, refresh_upstream=refresh_upstream)
+        logger.info("forecast run_status route completed", extra={"provider": provider, "requested_run_id": run_id, "resolved_run_id": resolved_run_id, "refresh_upstream": refresh_upstream, "elapsed_seconds": round(perf_counter()-started,6)})
         return response
     except ValueError as exc:
+        logger.exception("forecast run_status route failed", extra={"provider": provider, "requested_run_id": run_id, "resolved_run_id": resolved_run_id})
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("forecast run_status route failed", extra={"provider": provider, "requested_run_id": run_id, "resolved_run_id": resolved_run_id})
+        raise HTTPException(status_code=500, detail="internal server error") from exc
 
 @router.get("/smoke/geoglows")
 def geoglows_smoke(

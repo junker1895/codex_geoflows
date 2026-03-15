@@ -199,3 +199,24 @@ def test_health_refresh_flag_true(client, monkeypatch):
     monkeypatch.setattr("app.api.routes.forecast.get_forecast_service", lambda _db: _Svc())
     response = client.get("/forecast/health", params={"provider": "geoglows", "refresh_upstream": "true"})
     assert response.status_code == 200
+
+
+def test_map_latest_matches_explicit_run(client, db_session):
+    _seed(db_session)
+    explicit = client.get("/forecast/map/reaches", params={"provider": "geoglows", "run_id": "2024010100", "limit": 5})
+    latest = client.get("/forecast/map/reaches", params={"provider": "geoglows", "run_id": "latest", "limit": 5})
+    assert explicit.status_code == 200
+    assert latest.status_code == 200
+    assert latest.json()["meta"]["run_id"] == "2024010100"
+    assert explicit.json()["data"] == latest.json()["data"]
+
+
+def test_status_latest_matches_explicit_run(client, db_session):
+    _seed(db_session)
+    explicit = client.get("/forecast/runs/geoglows/2024010100/status")
+    latest = client.get("/forecast/runs/geoglows/latest/status")
+    assert explicit.status_code == 200
+    assert latest.status_code == 200
+    assert latest.json()["run_id"] == "2024010100"
+    assert explicit.json()["current_status"] == latest.json()["current_status"]
+    assert explicit.json()["map_ready"] == latest.json()["map_ready"]
