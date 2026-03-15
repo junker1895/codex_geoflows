@@ -1197,6 +1197,16 @@ class ForecastService:
             },
         )
 
+        logger.info(
+            "forecast health assembled",
+            extra={
+                "provider": provider,
+                "refresh_upstream": refresh_upstream,
+                "latest_run_resolution_seconds": round(latest_resolution_seconds, 6),
+                "health_assembly_seconds": round(perf_counter() - started, 6),
+            },
+        )
+
         return ProviderHealthResponse(
             provider=provider,
             enabled=provider in self.providers,
