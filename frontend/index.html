@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GeoFlows – Flood Forecast Map</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="map"></div>
+  <div id="legend">
+    <h3>Flood Risk</h3>
+    <div class="legend-item"><span class="swatch" style="background:#1a9850"></span> Normal</div>
+    <div class="legend-item"><span class="swatch" style="background:#fee08b"></span> RP 2-yr</div>
+    <div class="legend-item"><span class="swatch" style="background:#fdae61"></span> RP 5-yr</div>
+    <div class="legend-item"><span class="swatch" style="background:#f46d43"></span> RP 10-yr</div>
+    <div class="legend-item"><span class="swatch" style="background:#d73027"></span> RP 25-yr</div>
+    <div class="legend-item"><span class="swatch" style="background:#a50026"></span> RP 50-yr</div>
+    <div class="legend-item"><span class="swatch" style="background:#67001f"></span> RP 100-yr</div>
+  </div>
+  <div id="info-panel" class="hidden">
+    <button id="info-close">&times;</button>
+    <div id="info-content"></div>
+  </div>
+  <div id="status-bar">Loading…</div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
