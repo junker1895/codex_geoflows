@@ -92,6 +92,8 @@ class ForecastProviderReachSummary(Base):
     peak_mean_cms: Mapped[float | None] = mapped_column(Float, nullable=True)
     peak_median_cms: Mapped[float | None] = mapped_column(Float, nullable=True)
     peak_max_cms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    now_mean_cms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    now_max_cms: Mapped[float | None] = mapped_column(Float, nullable=True)
     return_period_band: Mapped[str | None] = mapped_column(String(16), nullable=True)
     severity_score: Mapped[int] = mapped_column(Integer, default=0)
     is_flagged: Mapped[bool] = mapped_column(Boolean, default=False)

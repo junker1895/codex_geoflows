@@ -52,6 +52,8 @@ class ReachSummarySchema(ORMBaseModel):
     peak_mean_cms: float | None = None
     peak_median_cms: float | None = None
     peak_max_cms: float | None = None
+    now_mean_cms: float | None = None
+    now_max_cms: float | None = None
     return_period_band: str | None = None
     severity_score: int = 0
     is_flagged: bool = False
@@ -66,6 +68,8 @@ class MapReachSummarySchema(ORMBaseModel):
     peak_mean_cms: float | None = None
     peak_median_cms: float | None = None
     peak_max_cms: float | None = None
+    now_mean_cms: float | None = None
+    now_max_cms: float | None = None
     return_period_band: str | None = None
     severity_score: int = 0
     is_flagged: bool = False
@@ -117,6 +121,8 @@ class BulkForecastSummaryArtifactRowSchema(ORMBaseModel):
     peak_mean_cms: float | None = None
     peak_median_cms: float | None = None
     peak_max_cms: float | None = None
+    now_mean_cms: float | None = None
+    now_max_cms: float | None = None
     return_period_band: str | None = None
     severity_score: int = 0
     is_flagged: bool = False

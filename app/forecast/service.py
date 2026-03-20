@@ -539,6 +539,13 @@ class ForecastService:
             )
             stats = {"raw_records_seen": 0, "normalized_rows_written": 0, "rows_dropped_invalid": 0, "rows_dropped_filtered": 0}
 
+            # Batch-load all return periods upfront instead of N+1 queries
+            rp_lookup = self.repo.get_all_return_periods(provider)
+            logger.info(
+                "loaded return periods for classification",
+                extra={"provider": provider, "return_period_count": len(rp_lookup)},
+            )
+
             def _summary_rows() -> Iterator[BulkForecastSummaryArtifactRowSchema]:
                 for record in adapter.iter_bulk_summary_records(
                     resolved_run.run_id,
@@ -555,7 +562,7 @@ class ForecastService:
                     if supported_reaches is not None and row.provider_reach_id not in supported_reaches:
                         stats["rows_dropped_filtered"] += 1
                         continue
-                    rp_model = self.repo.get_return_period(provider, row.provider_reach_id)
+                    rp_model = rp_lookup.get(row.provider_reach_id)
                     rp_schema = None if rp_model is None else to_return_period_schema(rp_model)
                     cls = classify_peak_flow(row.peak_max_cms, rp_schema)
                     row.return_period_band = cls.return_period_band
@@ -663,6 +670,8 @@ class ForecastService:
                         peak_mean_cms=item.peak_mean_cms,
                         peak_median_cms=item.peak_median_cms,
                         peak_max_cms=item.peak_max_cms,
+                        now_mean_cms=item.now_mean_cms,
+                        now_max_cms=item.now_max_cms,
                         return_period_band=item.return_period_band,
                         severity_score=int(item.severity_score),
                         is_flagged=bool(item.is_flagged),
@@ -1487,6 +1496,8 @@ def to_map_summary_schema(row: models.ForecastProviderReachSummary) -> MapReachS
         peak_mean_cms=row.peak_mean_cms,
         peak_median_cms=row.peak_median_cms,
         peak_max_cms=row.peak_max_cms,
+        now_mean_cms=row.now_mean_cms,
+        now_max_cms=row.now_max_cms,
         return_period_band=row.return_period_band,
         severity_score=row.severity_score,
         is_flagged=row.is_flagged,

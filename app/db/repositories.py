@@ -115,6 +115,8 @@ class ForecastRepository:
             row.peak_mean_cms = payload.peak_mean_cms
             row.peak_median_cms = payload.peak_median_cms
             row.peak_max_cms = payload.peak_max_cms
+            row.now_mean_cms = payload.now_mean_cms
+            row.now_max_cms = payload.now_max_cms
             row.return_period_band = payload.return_period_band
             row.severity_score = payload.severity_score
             row.is_flagged = payload.is_flagged
@@ -228,6 +230,14 @@ class ForecastRepository:
                 )
             )
         ).scalar_one_or_none()
+
+    def get_all_return_periods(self, provider: str) -> dict[str, models.ForecastProviderReturnPeriod]:
+        """Load all return periods for a provider into a dict keyed by reach_id."""
+        stmt = select(models.ForecastProviderReturnPeriod).where(
+            models.ForecastProviderReturnPeriod.provider == provider
+        )
+        rows = self.db.execute(stmt).scalars().all()
+        return {str(row.provider_reach_id): row for row in rows}
 
     def get_timeseries(
         self, provider: str, run_id: str, reach_id: str, limit: int | None = None

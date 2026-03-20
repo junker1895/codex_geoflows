@@ -87,6 +87,8 @@ class ForecastArtifactStore:
                 ("peak_mean_cms", pa.float64()),
                 ("peak_median_cms", pa.float64()),
                 ("peak_max_cms", pa.float64()),
+                ("now_mean_cms", pa.float64()),
+                ("now_max_cms", pa.float64()),
                 ("return_period_band", pa.string()),
                 ("severity_score", pa.float64()),
                 ("is_flagged", pa.bool_()),
@@ -109,6 +111,8 @@ class ForecastArtifactStore:
             "peak_mean_cms": None if row.peak_mean_cms is None else float(row.peak_mean_cms),
             "peak_median_cms": None if row.peak_median_cms is None else float(row.peak_median_cms),
             "peak_max_cms": None if row.peak_max_cms is None else float(row.peak_max_cms),
+            "now_mean_cms": None if row.now_mean_cms is None else float(row.now_mean_cms),
+            "now_max_cms": None if row.now_max_cms is None else float(row.now_max_cms),
             "return_period_band": None if row.return_period_band is None else str(row.return_period_band),
             "severity_score": float(row.severity_score),
             "is_flagged": bool(row.is_flagged),
@@ -117,18 +121,7 @@ class ForecastArtifactStore:
     def _table_from_rows(self, rows: list[dict]):
         pa, _ = _load_pyarrow()
         schema = self._summary_schema()
-        arrays = [
-            pa.array([r["provider"] for r in rows], type=schema.field("provider").type),
-            pa.array([r["run_id"] for r in rows], type=schema.field("run_id").type),
-            pa.array([r["provider_reach_id"] for r in rows], type=schema.field("provider_reach_id").type),
-            pa.array([r["peak_time_utc"] for r in rows], type=schema.field("peak_time_utc").type),
-            pa.array([r["peak_mean_cms"] for r in rows], type=schema.field("peak_mean_cms").type),
-            pa.array([r["peak_median_cms"] for r in rows], type=schema.field("peak_median_cms").type),
-            pa.array([r["peak_max_cms"] for r in rows], type=schema.field("peak_max_cms").type),
-            pa.array([r["return_period_band"] for r in rows], type=schema.field("return_period_band").type),
-            pa.array([r["severity_score"] for r in rows], type=schema.field("severity_score").type),
-            pa.array([r["is_flagged"] for r in rows], type=schema.field("is_flagged").type),
-        ]
+        arrays = [pa.array([r[field.name] for r in rows], type=field.type) for field in schema]
         return pa.Table.from_arrays(arrays, schema=schema)
 
     def write_summary_rows(
@@ -205,6 +198,8 @@ class ForecastArtifactStore:
             payload["return_period_band"] = None if payload["return_period_band"] is None else str(payload["return_period_band"])
             payload["severity_score"] = 0 if payload["severity_score"] is None else int(payload["severity_score"])
             payload["is_flagged"] = bool(payload["is_flagged"])
+            payload.setdefault("now_mean_cms", None)
+            payload.setdefault("now_max_cms", None)
             payload["raw_payload_json"] = None
             yield BulkForecastSummaryArtifactRowSchema.model_validate(payload)
 

@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -555,6 +556,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         emitted_reaches = 0
         supported_reaches = self._supported_reach_filter
         partial_reason = None
+        prefetch_workers = min(4, len(reach_windows))
 
         logger.info(
             "GEOGLOWS public Zarr summary preparation started",
@@ -572,89 +574,102 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                 "max_reaches": max_reaches,
                 "max_blocks": max_blocks,
                 "max_seconds": max_seconds,
+                "prefetch_workers": prefetch_workers,
             },
         )
 
-        for block_idx, (reach_start, reach_end) in enumerate(reach_windows, start=1):
-            elapsed = (datetime.now(UTC) - start).total_seconds()
-            if max_blocks is not None and block_idx > max_blocks:
-                partial_reason = "max_blocks"
-                break
-            if max_seconds is not None and elapsed >= max_seconds:
-                partial_reason = "max_seconds"
-                break
-
+        def _fetch_block(reach_start: int, reach_end: int) -> np.ndarray:
             block = qout_view.isel({structure["reach_dim"]: slice(reach_start, reach_end)})
-            values = np.asarray(block.values, dtype=np.float32)
-            if ensemble_dims:
-                ensemble_axes = tuple(range(len(ensemble_dims)))
-                mean_values = np.nanmean(values, axis=ensemble_axes)
-                median_values = np.nanmedian(values, axis=ensemble_axes)
-                max_values = np.nanmax(values, axis=ensemble_axes)
-            else:
-                mean_values = median_values = max_values = values
+            return np.asarray(block.values, dtype=np.float32)
 
-            block_reach_ids = np.asarray(reach_values[reach_start:reach_end]).astype(str)
-            reach_mask = np.ones(block_reach_ids.shape[0], dtype=bool)
-            if supported_reaches is not None:
-                reach_mask = np.fromiter((rid in supported_reaches for rid in block_reach_ids), dtype=bool)
-            selected_idx = np.flatnonzero(reach_mask)
-            if selected_idx.size == 0:
-                continue
+        with ThreadPoolExecutor(max_workers=prefetch_workers) as executor:
+            # Submit all block fetches upfront so S3 reads overlap
+            pending_futures: list[tuple[int, int, int, Future]] = []
+            for idx, (rs, re_) in enumerate(reach_windows):
+                pending_futures.append((idx + 1, rs, re_, executor.submit(_fetch_block, rs, re_)))
 
-            if max_reaches is not None:
-                remaining = max_reaches - emitted_reaches
-                if remaining <= 0:
-                    partial_reason = "max_reaches"
+            for block_idx, reach_start, reach_end, future in pending_futures:
+                elapsed = (datetime.now(UTC) - start).total_seconds()
+                if max_blocks is not None and block_idx > max_blocks:
+                    partial_reason = "max_blocks"
                     break
-                if selected_idx.size > remaining:
-                    selected_idx = selected_idx[:remaining]
-                    partial_reason = "max_reaches"
+                if max_seconds is not None and elapsed >= max_seconds:
+                    partial_reason = "max_seconds"
+                    break
 
-            selected_reaches = block_reach_ids[selected_idx]
-            block_mean = mean_values[:, selected_idx]
-            block_median = median_values[:, selected_idx]
-            block_max = max_values[:, selected_idx]
+                values = future.result()
+                if ensemble_dims:
+                    ensemble_axes = tuple(range(len(ensemble_dims)))
+                    mean_values = np.nanmean(values, axis=ensemble_axes)
+                    median_values = np.nanmedian(values, axis=ensemble_axes)
+                    max_values = np.nanmax(values, axis=ensemble_axes)
+                else:
+                    mean_values = median_values = max_values = values
 
-            for rid_pos, reach_id in enumerate(selected_reaches):
-                mean_series = block_mean[:, rid_pos]
-                median_series = block_median[:, rid_pos]
-                max_series = block_max[:, rid_pos]
-                peak_idx = int(np.nanargmax(max_series)) if np.isfinite(max_series).any() else None
-                rows_written += 1
-                emitted_reaches += 1
-                yield {
-                    "provider_reach_id": str(reach_id),
-                    "peak_time_utc": None if peak_idx is None else to_utc_datetime(time_values[peak_idx]).isoformat(),
-                    "peak_mean_cms": None if not np.isfinite(mean_series).any() else _safe_float(np.nanmax(mean_series)),
-                    "peak_median_cms": None if not np.isfinite(median_series).any() else _safe_float(np.nanmax(median_series)),
-                    "peak_max_cms": None if not np.isfinite(max_series).any() else _safe_float(np.nanmax(max_series)),
-                    "raw_payload_json": {
-                        "source": "geoglows_public_forecast_zarr",
-                        "zarr_path": source_zarr_path,
+                block_reach_ids = np.asarray(reach_values[reach_start:reach_end]).astype(str)
+                reach_mask = np.ones(block_reach_ids.shape[0], dtype=bool)
+                if supported_reaches is not None:
+                    reach_mask = np.fromiter((rid in supported_reaches for rid in block_reach_ids), dtype=bool)
+                selected_idx = np.flatnonzero(reach_mask)
+                if selected_idx.size == 0:
+                    continue
+
+                if max_reaches is not None:
+                    remaining = max_reaches - emitted_reaches
+                    if remaining <= 0:
+                        partial_reason = "max_reaches"
+                        break
+                    if selected_idx.size > remaining:
+                        selected_idx = selected_idx[:remaining]
+                        partial_reason = "max_reaches"
+
+                selected_reaches = block_reach_ids[selected_idx]
+                block_mean = mean_values[:, selected_idx]
+                block_median = median_values[:, selected_idx]
+                block_max = max_values[:, selected_idx]
+
+                for rid_pos, reach_id in enumerate(selected_reaches):
+                    mean_series = block_mean[:, rid_pos]
+                    median_series = block_median[:, rid_pos]
+                    max_series = block_max[:, rid_pos]
+                    has_finite_max = np.isfinite(max_series).any()
+                    peak_idx = int(np.nanargmax(max_series)) if has_finite_max else None
+                    rows_written += 1
+                    emitted_reaches += 1
+                    yield {
+                        "provider_reach_id": str(reach_id),
+                        "peak_time_utc": None if peak_idx is None else to_utc_datetime(time_values[peak_idx]).isoformat(),
+                        "peak_mean_cms": None if not np.isfinite(mean_series).any() else _safe_float(np.nanmax(mean_series)),
+                        "peak_median_cms": None if not np.isfinite(median_series).any() else _safe_float(np.nanmax(median_series)),
+                        "peak_max_cms": None if not has_finite_max else _safe_float(np.nanmax(max_series)),
+                        "now_mean_cms": _safe_float(mean_series[0]),
+                        "now_max_cms": _safe_float(max_series[0]),
+                        "raw_payload_json": {
+                            "source": "geoglows_public_forecast_zarr",
+                            "zarr_path": source_zarr_path,
+                            "block_index": block_idx,
+                            "block_start": reach_start,
+                            "block_end": reach_end,
+                        },
+                    }
+
+                elapsed = (datetime.now(UTC) - start).total_seconds()
+                logger.info(
+                    "GEOGLOWS public Zarr summary preparation progress",
+                    extra={
+                        "provider": self.get_provider_name(),
+                        "run_id": run_id,
                         "block_index": block_idx,
-                        "block_start": reach_start,
-                        "block_end": reach_end,
+                        "total_blocks": len(reach_windows),
+                        "reach_start": reach_start,
+                        "reach_end": reach_end,
+                        "reaches_in_block": int(reach_end - reach_start),
+                        "total_summary_rows_written": rows_written,
+                        "matched_supported_reaches_total": emitted_reaches,
+                        "elapsed_seconds": round(elapsed, 2),
+                        "rows_per_second": round(rows_written / elapsed, 2) if elapsed > 0 else None,
                     },
-                }
-
-            elapsed = (datetime.now(UTC) - start).total_seconds()
-            logger.info(
-                "GEOGLOWS public Zarr summary preparation progress",
-                extra={
-                    "provider": self.get_provider_name(),
-                    "run_id": run_id,
-                    "block_index": block_idx,
-                    "total_blocks": len(reach_windows),
-                    "reach_start": reach_start,
-                    "reach_end": reach_end,
-                    "reaches_in_block": int(reach_end - reach_start),
-                    "total_summary_rows_written": rows_written,
-                    "matched_supported_reaches_total": emitted_reaches,
-                    "elapsed_seconds": round(elapsed, 2),
-                    "rows_per_second": round(rows_written / elapsed, 2) if elapsed > 0 else None,
-                },
-            )
+                )
 
         logger.info(
             "GEOGLOWS public Zarr summary preparation completed",
@@ -688,6 +703,8 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             peak_mean_cms=_safe_float(record.get("peak_mean_cms")),
             peak_median_cms=_safe_float(record.get("peak_median_cms")),
             peak_max_cms=_safe_float(record.get("peak_max_cms")),
+            now_mean_cms=_safe_float(record.get("now_mean_cms")),
+            now_max_cms=_safe_float(record.get("now_max_cms")),
             raw_payload_json=payload,
         )
 
