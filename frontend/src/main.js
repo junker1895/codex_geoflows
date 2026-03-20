@@ -161,6 +161,21 @@ async function initMap() {
     // Add river layers
     addRiverLayers();
 
+    // Debug: log what layers and properties exist in the PMTiles
+    map.on('click', (e) => {
+      // Query ALL rendered features at click point from the rivers source
+      const allFeatures = map.queryRenderedFeatures(e.point);
+      console.log('All features at click:', allFeatures.length);
+      for (const f of allFeatures.slice(0, 3)) {
+        console.log('Feature:', {
+          source: f.source,
+          sourceLayer: f.sourceLayer,
+          id: f.id,
+          properties: f.properties,
+        });
+      }
+    });
+
     // Click handler
     map.on('click', 'rivers-highlighted', onRiverClick);
     map.on('click', 'rivers-base', onRiverClick);
