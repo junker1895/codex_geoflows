@@ -161,21 +161,6 @@ async function initMap() {
     // Add river layers
     addRiverLayers();
 
-    // Debug: log what layers and properties exist in the PMTiles
-    map.on('click', (e) => {
-      // Query ALL rendered features at click point from the rivers source
-      const allFeatures = map.queryRenderedFeatures(e.point);
-      console.log('All features at click:', allFeatures.length);
-      for (const f of allFeatures.slice(0, 3)) {
-        console.log('Feature:', {
-          source: f.source,
-          sourceLayer: f.sourceLayer,
-          id: f.id,
-          properties: f.properties,
-        });
-      }
-    });
-
     // Click handler
     map.on('click', 'rivers-highlighted', onRiverClick);
     map.on('click', 'rivers-base', onRiverClick);
@@ -222,7 +207,7 @@ function addRiverLayers() {
   });
 
   // Highlighted layer for flagged reaches only
-  // Build filter: match LINKNO (the feature ID field in HydroRIVERS / rivers PMTiles)
+  // Use feature id (not a property) to match against forecast reach IDs
   const flaggedIds = Object.keys(forecastIndex).filter(
     (id) => (forecastIndex[id].severity_score || 0) > 0
   );
@@ -236,15 +221,15 @@ function addRiverLayers() {
     return;
   }
 
-  // Convert reach IDs to numbers if they look numeric (PMTiles features often use numeric IDs)
+  // Convert reach IDs to numbers (PMTiles feature IDs are numeric)
   const numericIds = flaggedIds.map((id) => {
     const n = Number(id);
     return isNaN(n) ? id : n;
   });
 
-  // Build color and width match expressions
-  const colorExpr = ['match', ['get', 'LINKNO']];
-  const widthExpr = ['match', ['get', 'LINKNO']];
+  // Build color and width match expressions using feature id
+  const colorExpr = ['match', ['id']];
+  const widthExpr = ['match', ['id']];
 
   for (const id of numericIds) {
     const strId = String(id);
@@ -262,7 +247,7 @@ function addRiverLayers() {
     type: 'line',
     source: 'rivers',
     'source-layer': 'rivers',
-    filter: ['in', ['get', 'LINKNO'], ['literal', numericIds]],
+    filter: ['in', ['id'], ['literal', numericIds]],
     paint: {
       'line-color': colorExpr,
       'line-width': widthExpr,
@@ -278,7 +263,7 @@ async function onRiverClick(e) {
   if (!e.features || e.features.length === 0) return;
 
   const feature = e.features[0];
-  const reachId = String(feature.properties.LINKNO || feature.id || '');
+  const reachId = String(feature.id || '');
   const info = forecastIndex[reachId];
 
   let html = `<h4>Reach ${reachId}</h4><table>`;
