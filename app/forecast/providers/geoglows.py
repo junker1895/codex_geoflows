@@ -556,7 +556,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         emitted_reaches = 0
         supported_reaches = self._supported_reach_filter
         partial_reason = None
-        prefetch_workers = min(4, len(reach_windows))
+        prefetch_workers = min(2, len(reach_windows))
 
         logger.info(
             "GEOGLOWS public Zarr summary preparation started",
@@ -597,7 +597,14 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                     partial_reason = "max_seconds"
                     break
 
-                values = future.result()
+                try:
+                    values = future.result(timeout=120)
+                except TimeoutError:
+                    logger.warning(
+                        "GEOGLOWS block fetch timed out after 120s, skipping block",
+                        extra={"block_index": block_idx, "reach_start": reach_start, "reach_end": reach_end},
+                    )
+                    continue
                 if ensemble_dims:
                     ensemble_axes = tuple(range(len(ensemble_dims)))
                     mean_values = np.nanmean(values, axis=ensemble_axes)

@@ -146,9 +146,11 @@ class ForecastArtifactStore:
 
         _, pq = _load_pyarrow()
         schema = self._summary_schema()
-        writer = pq.ParquetWriter(path, schema=schema, compression="zstd", use_dictionary=False)
+        tmp_path = path.with_suffix(".parquet.tmp")
+        writer = pq.ParquetWriter(tmp_path, schema=schema, compression="zstd", use_dictionary=False)
         buffer: list[dict] = []
         count = 0
+        success = False
         try:
             for row in rows:
                 buffer.append(self._normalize_summary_row(row))
@@ -159,8 +161,13 @@ class ForecastArtifactStore:
             if buffer:
                 writer.write_table(self._table_from_rows(buffer))
                 count += len(buffer)
+            success = True
         finally:
             writer.close()
+            if success:
+                tmp_path.rename(path)
+            elif tmp_path.exists():
+                tmp_path.unlink()
         return path, count
 
     def _read_summary_parquet_table(self, path: Path):
