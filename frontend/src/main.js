@@ -78,7 +78,7 @@ async function loadForecastSummaries() {
 
     // Then fetch map reaches (flagged rivers only for performance)
     const resp = await fetchJSON(
-      `${API_BASE}/map/reaches?provider=${PROVIDER}&run_id=${currentRunId}`
+      `${API_BASE}/map/reaches?provider=${PROVIDER}&run_id=${currentRunId}&flagged_only=true`
     );
     const reaches = resp.data || [];
 
