@@ -270,7 +270,6 @@ function addHighlightLayer() {
     type: 'line',
     source: 'rivers',
     'source-layer': 'rivers',
-    filter: ['>', ['feature-state', 'severity'], 0],
     paint: {
       'line-color': [
         'match',
@@ -281,7 +280,7 @@ function addHighlightLayer() {
         4, SEVERITY_COLORS[4],
         5, SEVERITY_COLORS[5],
         6, SEVERITY_COLORS[6],
-        SEVERITY_COLORS[0],
+        'transparent',
       ],
       'line-width': [
         'match',
@@ -292,7 +291,7 @@ function addHighlightLayer() {
         4, SEVERITY_WIDTHS[4],
         5, SEVERITY_WIDTHS[5],
         6, SEVERITY_WIDTHS[6],
-        1,
+        0,
       ],
       'line-opacity': 1,
     },
