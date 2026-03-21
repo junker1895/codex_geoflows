@@ -583,26 +583,42 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
             return np.asarray(block.values, dtype=np.float32)
 
         with ThreadPoolExecutor(max_workers=prefetch_workers) as executor:
-            # Submit all block fetches upfront so S3 reads overlap
-            pending_futures: list[tuple[int, int, int, Future]] = []
-            for idx, (rs, re_) in enumerate(reach_windows):
-                pending_futures.append((idx + 1, rs, re_, executor.submit(_fetch_block, rs, re_)))
+            # Sliding window: only keep a small number of futures ahead
+            prefetch_ahead = prefetch_workers + 1
+            pending: dict[int, tuple[int, int, Future]] = {}
 
-            for block_idx, reach_start, reach_end, future in pending_futures:
+            def _submit_block(idx: int) -> None:
+                rs, re_ = reach_windows[idx]
+                pending[idx] = (rs, re_, executor.submit(_fetch_block, rs, re_))
+
+            # Seed initial prefetch window
+            for i in range(min(prefetch_ahead, len(reach_windows))):
+                _submit_block(i)
+
+            next_submit = min(prefetch_ahead, len(reach_windows))
+
+            for block_idx in range(len(reach_windows)):
                 elapsed = (datetime.now(UTC) - start).total_seconds()
-                if max_blocks is not None and block_idx > max_blocks:
+                if max_blocks is not None and (block_idx + 1) > max_blocks:
                     partial_reason = "max_blocks"
                     break
                 if max_seconds is not None and elapsed >= max_seconds:
                     partial_reason = "max_seconds"
                     break
 
+                reach_start, reach_end, future = pending.pop(block_idx)
+
+                # Submit next block to keep the window filled
+                if next_submit < len(reach_windows):
+                    _submit_block(next_submit)
+                    next_submit += 1
+
                 try:
                     values = future.result(timeout=120)
                 except TimeoutError:
                     logger.warning(
                         "GEOGLOWS block fetch timed out after 120s, skipping block",
-                        extra={"block_index": block_idx, "reach_start": reach_start, "reach_end": reach_end},
+                        extra={"block_index": block_idx + 1, "reach_start": reach_start, "reach_end": reach_end},
                     )
                     continue
                 if ensemble_dims:
@@ -677,6 +693,10 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
                         "rows_per_second": round(rows_written / elapsed, 2) if elapsed > 0 else None,
                     },
                 )
+
+            # Cancel any remaining prefetched futures on early exit
+            for _, (_, _, f) in pending.items():
+                f.cancel()
 
         logger.info(
             "GEOGLOWS public Zarr summary preparation completed",
