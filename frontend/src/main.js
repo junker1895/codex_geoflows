@@ -44,14 +44,15 @@ const BAND_LABELS = {
 };
 
 // Zoom → minimum severity threshold and per-request limit
-// At global zoom only show the most extreme; as user zooms in, reveal more
+// At global zoom only show the most extreme; as user zooms in, reveal more.
+// No hard limits — severity threshold alone controls volume.
 const ZOOM_SEVERITY_TIERS = [
-  { maxZoom: 3, minSeverity: 6, limit: 10000 },
-  { maxZoom: 5, minSeverity: 5, limit: 15000 },
-  { maxZoom: 7, minSeverity: 4, limit: 20000 },
-  { maxZoom: 9, minSeverity: 3, limit: 30000 },
-  { maxZoom: 11, minSeverity: 2, limit: 40000 },
-  { maxZoom: Infinity, minSeverity: 1, limit: 50000 },
+  { maxZoom: 3, minSeverity: 6 },
+  { maxZoom: 5, minSeverity: 5 },
+  { maxZoom: 7, minSeverity: 4 },
+  { maxZoom: 9, minSeverity: 3 },
+  { maxZoom: 11, minSeverity: 2 },
+  { maxZoom: Infinity, minSeverity: 1 },
 ];
 
 function getTierForZoom(zoom) {
@@ -94,9 +95,9 @@ async function loadRunId() {
   currentRunId = run.run_id;
 }
 
-async function loadForecastSummaries(minSeverity, limit, signal) {
+async function loadForecastSummaries(minSeverity, signal) {
   const resp = await fetchJSON(
-    `${API_BASE}/map/reaches?provider=${PROVIDER}&run_id=${currentRunId}&flagged_only=true&min_severity_score=${minSeverity}&limit=${limit}`,
+    `${API_BASE}/map/reaches?provider=${PROVIDER}&run_id=${currentRunId}&flagged_only=true&min_severity_score=${minSeverity}`,
     signal
   );
   return resp.data || [];
@@ -120,7 +121,6 @@ async function loadDataForZoom(zoom) {
   try {
     const reaches = await loadForecastSummaries(
       tier.minSeverity,
-      tier.limit,
       loadingAbort.signal
     );
 
