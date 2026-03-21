@@ -31,6 +31,6 @@ def classify_peak_flow(peak_flow: float | None, thresholds: ReturnPeriodSchema |
 
 
 def _valid_threshold(value: float | None) -> float | None:
-    if isinstance(value, (float, int)) and value >= 0:
+    if isinstance(value, (float, int)) and value > 0:
         return float(value)
     return None

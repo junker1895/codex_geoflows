@@ -660,7 +660,19 @@ class ForecastService:
                 replaced_rows = self.repo.delete_summaries_for_run(provider, resolved_run.run_id)
                 self.db.commit()
 
+            # Re-classify with current return periods instead of trusting
+            # artifact severity scores, which may be stale if return periods
+            # were updated after the artifact was prepared.
+            rp_lookup = self.repo.get_all_return_periods(provider)
+            logger.info(
+                "loaded return periods for ingest re-classification",
+                extra={"provider": provider, "return_period_count": len(rp_lookup)},
+            )
+
             for item in self.artifacts.iter_summary_rows(provider, resolved_run.run_id):
+                rp_model = rp_lookup.get(str(item.provider_reach_id))
+                rp_schema = None if rp_model is None else to_return_period_schema(rp_model)
+                cls = classify_peak_flow(item.peak_mean_cms, rp_schema)
                 batch.append(
                     ReachSummarySchema(
                         provider=str(item.provider),
@@ -672,9 +684,9 @@ class ForecastService:
                         peak_max_cms=item.peak_max_cms,
                         now_mean_cms=item.now_mean_cms,
                         now_max_cms=item.now_max_cms,
-                        return_period_band=item.return_period_band,
-                        severity_score=int(item.severity_score),
-                        is_flagged=bool(item.is_flagged),
+                        return_period_band=cls.return_period_band,
+                        severity_score=cls.severity_score,
+                        is_flagged=cls.is_flagged,
                         metadata_json=item.raw_payload_json,
                     )
                 )
