@@ -238,6 +238,14 @@ async function initMap() {
       zoomTimer = setTimeout(() => loadDataForZoom(map.getZoom()), 300);
     });
 
+    // Debug: log feature properties on click to identify matching field
+    map.on('click', 'rivers-base', (e) => {
+      if (e.features && e.features.length > 0) {
+        const f = e.features[0];
+        console.log('Feature ID:', f.id, 'Properties:', JSON.stringify(f.properties));
+      }
+    });
+
     // Click handlers
     map.on('click', 'rivers-highlighted', onRiverClick);
     map.on('click', 'rivers-base', onRiverClick);
