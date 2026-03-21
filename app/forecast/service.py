@@ -1095,7 +1095,7 @@ class ForecastService:
             provider,
             self._require_concrete_run_id(run.run_id),
             severity_min=severity_min,
-            limit=limit or self.settings.forecast_summary_default_limit,
+            limit=limit,
         )
         return [to_summary_schema(x) for x in rows]
 
@@ -1145,7 +1145,7 @@ class ForecastService:
             run_id=self._require_concrete_run_id(run.run_id),
             flagged_only=flagged_only,
             min_severity_score=min_severity_score,
-            limit=limit or self.settings.forecast_summary_default_limit,
+            limit=limit,
         )
         data = [to_map_summary_schema(x) for x in rows]
         summary_query_seconds = perf_counter() - t1
