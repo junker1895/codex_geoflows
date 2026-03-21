@@ -47,11 +47,8 @@ const BAND_LABELS = {
 // At global zoom only show the most extreme; as user zooms in, reveal more.
 // No hard limits — severity threshold alone controls volume.
 const ZOOM_SEVERITY_TIERS = [
-  { maxZoom: 3, minSeverity: 6 },
-  { maxZoom: 5, minSeverity: 5 },
-  { maxZoom: 7, minSeverity: 4 },
-  { maxZoom: 9, minSeverity: 3 },
-  { maxZoom: 11, minSeverity: 2 },
+  { maxZoom: 3, minSeverity: 4 },
+  { maxZoom: 5, minSeverity: 2 },
   { maxZoom: Infinity, minSeverity: 1 },
 ];
 
