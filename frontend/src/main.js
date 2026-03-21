@@ -238,14 +238,6 @@ async function initMap() {
       zoomTimer = setTimeout(() => loadDataForZoom(map.getZoom()), 300);
     });
 
-    // Debug: log feature properties on click to identify matching field
-    map.on('click', 'rivers-base', (e) => {
-      if (e.features && e.features.length > 0) {
-        const f = e.features[0];
-        console.log('Feature ID:', f.id, 'Properties:', JSON.stringify(f.properties));
-      }
-    });
-
     // Click handlers
     map.on('click', 'rivers-highlighted', onRiverClick);
     map.on('click', 'rivers-base', onRiverClick);
@@ -265,53 +257,65 @@ async function initMap() {
 }
 
 // ---------------------------------------------------------------------------
-// River highlight layer – rebuilt when data changes
+// River highlight layer – uses feature-state for scalable styling
 // ---------------------------------------------------------------------------
-function updateHighlightedLayer() {
-  // Remove existing highlighted layer if present
-  if (map.getLayer('rivers-highlighted')) {
-    map.removeLayer('rivers-highlighted');
-  }
+let highlightLayerAdded = false;
 
-  const flaggedIds = Object.keys(forecastIndex).filter(
-    (id) => (forecastIndex[id].severity_score || 0) > 0
-  );
+function addHighlightLayer() {
+  if (highlightLayerAdded) return;
 
-  if (flaggedIds.length === 0) return;
-
-  // Convert reach IDs to numbers (PMTiles feature IDs are numeric)
-  const numericIds = flaggedIds.map((id) => {
-    const n = Number(id);
-    return isNaN(n) ? id : n;
-  });
-
-  // Build color and width match expressions using feature id
-  const colorExpr = ['match', ['id']];
-  const widthExpr = ['match', ['id']];
-
-  for (const id of numericIds) {
-    const strId = String(id);
-    const info = forecastIndex[strId];
-    const sev = info.severity_score || 0;
-    colorExpr.push(id, SEVERITY_COLORS[sev] || SEVERITY_COLORS[0]);
-    widthExpr.push(id, SEVERITY_WIDTHS[sev] || 1);
-  }
-  // Fallback
-  colorExpr.push(SEVERITY_COLORS[0]);
-  widthExpr.push(1);
-
+  // Use feature-state driven styling – works with any number of features
   map.addLayer({
     id: 'rivers-highlighted',
     type: 'line',
     source: 'rivers',
     'source-layer': 'rivers',
-    filter: ['in', ['id'], ['literal', numericIds]],
+    filter: ['>', ['feature-state', 'severity'], 0],
     paint: {
-      'line-color': colorExpr,
-      'line-width': widthExpr,
+      'line-color': [
+        'match',
+        ['feature-state', 'severity'],
+        1, SEVERITY_COLORS[1],
+        2, SEVERITY_COLORS[2],
+        3, SEVERITY_COLORS[3],
+        4, SEVERITY_COLORS[4],
+        5, SEVERITY_COLORS[5],
+        6, SEVERITY_COLORS[6],
+        SEVERITY_COLORS[0],
+      ],
+      'line-width': [
+        'match',
+        ['feature-state', 'severity'],
+        1, SEVERITY_WIDTHS[1],
+        2, SEVERITY_WIDTHS[2],
+        3, SEVERITY_WIDTHS[3],
+        4, SEVERITY_WIDTHS[4],
+        5, SEVERITY_WIDTHS[5],
+        6, SEVERITY_WIDTHS[6],
+        1,
+      ],
       'line-opacity': 1,
     },
   });
+  highlightLayerAdded = true;
+}
+
+const appliedFeatureStates = new Set();
+
+function updateHighlightedLayer() {
+  addHighlightLayer();
+
+  // Set feature state for each reach in the forecast index
+  for (const [reachId, info] of Object.entries(forecastIndex)) {
+    if (appliedFeatureStates.has(reachId)) continue;
+    const numId = Number(reachId);
+    if (isNaN(numId)) continue;
+    map.setFeatureState(
+      { source: 'rivers', sourceLayer: 'rivers', id: numId },
+      { severity: info.severity_score || 0 }
+    );
+    appliedFeatureStates.add(reachId);
+  }
 }
 
 // ---------------------------------------------------------------------------
