@@ -695,6 +695,7 @@ class ForecastService:
                     chunk_rows = self.repo.upsert_summaries(batch)
                     total += chunk_rows
                     self.db.commit()
+                    self.db.expire_all()
                     logger.info(
                         "summary ingest chunk complete",
                         extra={
@@ -712,6 +713,7 @@ class ForecastService:
                 chunk_rows = self.repo.upsert_summaries(batch)
                 total += chunk_rows
                 self.db.commit()
+                self.db.expire_all()
 
             ops = self._run_ops_metadata(run_row)
             ingest_meta = dict(ops.get("summary_ingest", {}))

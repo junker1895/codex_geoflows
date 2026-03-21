@@ -197,18 +197,23 @@ class ForecastArtifactStore:
                     yield BulkForecastSummaryArtifactRowSchema.model_validate(payload)
             return
 
-        table = self._read_summary_parquet_table(path)
-        for payload in table.to_pylist():
-            payload["provider"] = str(payload["provider"])
-            payload["run_id"] = str(payload["run_id"])
-            payload["provider_reach_id"] = str(payload["provider_reach_id"])
-            payload["return_period_band"] = None if payload["return_period_band"] is None else str(payload["return_period_band"])
-            payload["severity_score"] = 0 if payload["severity_score"] is None else int(payload["severity_score"])
-            payload["is_flagged"] = bool(payload["is_flagged"])
-            payload.setdefault("now_mean_cms", None)
-            payload.setdefault("now_max_cms", None)
-            payload["raw_payload_json"] = None
-            yield BulkForecastSummaryArtifactRowSchema.model_validate(payload)
+        _, pq = _load_pyarrow()
+        schema = self._summary_schema()
+        pf = pq.ParquetFile(path)
+        for row_group_idx in range(pf.metadata.num_row_groups):
+            table = pf.read_row_group(row_group_idx, columns=schema.names).cast(schema)
+            for payload in table.to_pylist():
+                payload["provider"] = str(payload["provider"])
+                payload["run_id"] = str(payload["run_id"])
+                payload["provider_reach_id"] = str(payload["provider_reach_id"])
+                payload["return_period_band"] = None if payload["return_period_band"] is None else str(payload["return_period_band"])
+                payload["severity_score"] = 0 if payload["severity_score"] is None else int(payload["severity_score"])
+                payload["is_flagged"] = bool(payload["is_flagged"])
+                payload.setdefault("now_mean_cms", None)
+                payload.setdefault("now_max_cms", None)
+                payload["raw_payload_json"] = None
+                yield BulkForecastSummaryArtifactRowSchema.model_validate(payload)
+            del table
 
     def count_summary_rows(self, provider: str, run_id: str) -> int:
         path = self.summary_artifact_path(provider, run_id)
