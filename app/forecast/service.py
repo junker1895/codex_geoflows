@@ -564,7 +564,7 @@ class ForecastService:
                         continue
                     rp_model = rp_lookup.get(row.provider_reach_id)
                     rp_schema = None if rp_model is None else to_return_period_schema(rp_model)
-                    cls = classify_peak_flow(row.peak_max_cms, rp_schema)
+                    cls = classify_peak_flow(row.peak_mean_cms, rp_schema)
                     row.return_period_band = cls.return_period_band
                     row.severity_score = cls.severity_score
                     row.is_flagged = cls.is_flagged

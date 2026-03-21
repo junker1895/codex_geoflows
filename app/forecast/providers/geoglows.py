@@ -899,7 +899,7 @@ class GeoglowsForecastProvider(ForecastProviderAdapter):
         peak_median = max((r.flow_median_cms for r in timeseries_rows if r.flow_median_cms is not None), default=None)
         peak_max = max((r.flow_max_cms for r in timeseries_rows if r.flow_max_cms is not None), default=None)
 
-        peak_flow = _first_not_none(peak_max, peak_mean, peak_median)
+        peak_flow = _first_not_none(peak_mean, peak_median, peak_max)
         classification = classify_peak_flow(peak_flow, return_period_row)
 
         first_exceedance = None
