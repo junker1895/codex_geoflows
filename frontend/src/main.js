@@ -273,7 +273,7 @@ function addHighlightLayer() {
     paint: {
       'line-color': [
         'match',
-        ['feature-state', 'severity'],
+        ['coalesce', ['feature-state', 'severity'], 0],
         1, SEVERITY_COLORS[1],
         2, SEVERITY_COLORS[2],
         3, SEVERITY_COLORS[3],
@@ -284,7 +284,7 @@ function addHighlightLayer() {
       ],
       'line-width': [
         'match',
-        ['feature-state', 'severity'],
+        ['coalesce', ['feature-state', 'severity'], 0],
         1, SEVERITY_WIDTHS[1],
         2, SEVERITY_WIDTHS[2],
         3, SEVERITY_WIDTHS[3],
@@ -304,6 +304,7 @@ const appliedFeatureStates = new Set();
 function updateHighlightedLayer() {
   addHighlightLayer();
 
+  let count = 0;
   // Set feature state for each reach in the forecast index
   for (const [reachId, info] of Object.entries(forecastIndex)) {
     if (appliedFeatureStates.has(reachId)) continue;
@@ -314,6 +315,15 @@ function updateHighlightedLayer() {
       { severity: info.severity_score || 0 }
     );
     appliedFeatureStates.add(reachId);
+    count++;
+  }
+  console.log(`setFeatureState applied to ${count} new features (total: ${appliedFeatureStates.size})`);
+
+  // Debug: check one feature's state
+  const sampleId = Object.keys(forecastIndex)[0];
+  if (sampleId) {
+    const state = map.getFeatureState({ source: 'rivers', sourceLayer: 'rivers', id: Number(sampleId) });
+    console.log(`Sample feature ${sampleId} state:`, state, 'expected severity:', forecastIndex[sampleId].severity_score);
   }
 }
 
