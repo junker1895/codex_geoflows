@@ -43,12 +43,32 @@ const BAND_LABELS = {
   '100': '100-year',
 };
 
+// Zoom → minimum severity threshold and per-request limit
+// At global zoom only show the most extreme; as user zooms in, reveal more
+const ZOOM_SEVERITY_TIERS = [
+  { maxZoom: 3, minSeverity: 6, limit: 10000 },
+  { maxZoom: 5, minSeverity: 5, limit: 15000 },
+  { maxZoom: 7, minSeverity: 4, limit: 20000 },
+  { maxZoom: 9, minSeverity: 3, limit: 30000 },
+  { maxZoom: 11, minSeverity: 2, limit: 40000 },
+  { maxZoom: Infinity, minSeverity: 1, limit: 50000 },
+];
+
+function getTierForZoom(zoom) {
+  for (const tier of ZOOM_SEVERITY_TIERS) {
+    if (zoom <= tier.maxZoom) return tier;
+  }
+  return ZOOM_SEVERITY_TIERS[ZOOM_SEVERITY_TIERS.length - 1];
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 let forecastIndex = {}; // provider_reach_id → { severity_score, return_period_band, ... }
 let currentRunId = null;
+let currentTier = null; // track which tier is loaded to avoid redundant fetches
 let map;
+let loadingAbort = null; // AbortController for in-flight requests
 
 const statusBar = document.getElementById('status-bar');
 const infoPanel = document.getElementById('info-panel');
@@ -61,41 +81,65 @@ function setStatus(msg) {
 // ---------------------------------------------------------------------------
 // Forecast API helpers
 // ---------------------------------------------------------------------------
-async function fetchJSON(url) {
-  const res = await fetch(url);
+async function fetchJSON(url, signal) {
+  const res = await fetch(url, signal ? { signal } : undefined);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
 
-async function loadForecastSummaries() {
-  setStatus('Fetching flood forecast summaries…');
+async function loadRunId() {
+  const run = await fetchJSON(
+    `${API_BASE}/runs/latest?provider=${PROVIDER}`
+  );
+  currentRunId = run.run_id;
+}
+
+async function loadForecastSummaries(minSeverity, limit, signal) {
+  const resp = await fetchJSON(
+    `${API_BASE}/map/reaches?provider=${PROVIDER}&run_id=${currentRunId}&flagged_only=true&min_severity_score=${minSeverity}&limit=${limit}`,
+    signal
+  );
+  return resp.data || [];
+}
+
+// ---------------------------------------------------------------------------
+// Load data for current zoom level
+// ---------------------------------------------------------------------------
+async function loadDataForZoom(zoom) {
+  const tier = getTierForZoom(zoom);
+
+  // Skip if we already have this tier (or a more detailed one) loaded
+  if (currentTier && tier.minSeverity >= currentTier.minSeverity) return;
+
+  // Cancel any in-flight request
+  if (loadingAbort) loadingAbort.abort();
+  loadingAbort = new AbortController();
+
+  setStatus(`Loading severity ≥ ${tier.minSeverity} reaches…`);
+
   try {
-    // First get the latest run
-    const run = await fetchJSON(
-      `${API_BASE}/runs/latest?provider=${PROVIDER}`
+    const reaches = await loadForecastSummaries(
+      tier.minSeverity,
+      tier.limit,
+      loadingAbort.signal
     );
-    currentRunId = run.run_id;
 
-    // Then fetch map reaches (flagged rivers only for performance)
-    const resp = await fetchJSON(
-      `${API_BASE}/map/reaches?provider=${PROVIDER}&run_id=${currentRunId}&flagged_only=true&min_severity_score=4&limit=10000`
-    );
-    const reaches = resp.data || [];
-
-    // Build index keyed by provider_reach_id
-    forecastIndex = {};
+    // Merge new reaches into existing index (don't lose higher-severity data)
     for (const r of reaches) {
       forecastIndex[String(r.provider_reach_id)] = r;
     }
 
+    currentTier = tier;
     setStatus(
-      `Run ${currentRunId} – ${reaches.length} reaches with flood risk loaded`
+      `Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded (severity ≥ ${tier.minSeverity})`
     );
-    return reaches.length;
+
+    // Rebuild the highlighted layer
+    updateHighlightedLayer();
   } catch (err) {
+    if (err.name === 'AbortError') return; // superseded by a newer request
     console.warn('Could not load forecast summaries:', err);
-    setStatus('Forecast data unavailable – showing rivers only');
-    return 0;
+    setStatus('Error loading forecast data');
   }
 }
 
@@ -155,13 +199,46 @@ async function initMap() {
       maxzoom: riversMaxZoom,
     });
 
-    // Load forecast data
-    await loadForecastSummaries();
+    // Base river layer (all rivers, muted colour)
+    map.addLayer({
+      id: 'rivers-base',
+      type: 'line',
+      source: 'rivers',
+      'source-layer': 'rivers',
+      paint: {
+        'line-color': '#4a90d9',
+        'line-width': [
+          'interpolate',
+          ['linear'],
+          ['zoom'],
+          2, 0.3,
+          8, 1,
+          14, 1.5,
+        ],
+        'line-opacity': 0.5,
+      },
+    });
 
-    // Add river layers
-    addRiverLayers();
+    // Get the run ID first
+    try {
+      await loadRunId();
+    } catch (err) {
+      console.warn('Could not fetch run ID:', err);
+      setStatus('Forecast data unavailable – showing rivers only');
+      return;
+    }
 
-    // Click handler
+    // Initial data load for current zoom
+    await loadDataForZoom(map.getZoom());
+
+    // Reload on zoom changes (debounced)
+    let zoomTimer = null;
+    map.on('zoomend', () => {
+      clearTimeout(zoomTimer);
+      zoomTimer = setTimeout(() => loadDataForZoom(map.getZoom()), 300);
+    });
+
+    // Click handlers
     map.on('click', 'rivers-highlighted', onRiverClick);
     map.on('click', 'rivers-base', onRiverClick);
     map.on('mouseenter', 'rivers-highlighted', () => {
@@ -180,46 +257,19 @@ async function initMap() {
 }
 
 // ---------------------------------------------------------------------------
-// River layers – data-driven styling based on forecast severity
+// River highlight layer – rebuilt when data changes
 // ---------------------------------------------------------------------------
-function addRiverLayers() {
-  // Build a list of reach IDs per severity for match expressions
-  const reachBySeverity = {};
-  for (const [reachId, info] of Object.entries(forecastIndex)) {
-    const sev = info.severity_score || 0;
-    if (sev > 0) {
-      if (!reachBySeverity[sev]) reachBySeverity[sev] = [];
-      reachBySeverity[sev].push(reachId);
-    }
+function updateHighlightedLayer() {
+  // Remove existing highlighted layer if present
+  if (map.getLayer('rivers-highlighted')) {
+    map.removeLayer('rivers-highlighted');
   }
 
-  // Base river layer (all rivers, muted colour)
-  map.addLayer({
-    id: 'rivers-base',
-    type: 'line',
-    source: 'rivers',
-    'source-layer': 'rivers',
-    paint: {
-      'line-color': '#4a90d9',
-      'line-width': ['interpolate', ['linear'], ['zoom'], 2, 0.3, 8, 1, 14, 1.5],
-      'line-opacity': 0.5,
-    },
-  });
-
-  // Highlighted layer for flagged reaches only
-  // Use feature id (not a property) to match against forecast reach IDs
   const flaggedIds = Object.keys(forecastIndex).filter(
     (id) => (forecastIndex[id].severity_score || 0) > 0
   );
 
-  if (flaggedIds.length === 0) {
-    setStatus(
-      currentRunId
-        ? `Run ${currentRunId} – no reaches with elevated flood risk`
-        : 'No forecast data available'
-    );
-    return;
-  }
+  if (flaggedIds.length === 0) return;
 
   // Convert reach IDs to numbers (PMTiles feature IDs are numeric)
   const numericIds = flaggedIds.map((id) => {
