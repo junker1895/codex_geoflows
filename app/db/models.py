@@ -81,6 +81,7 @@ class ForecastProviderReachSummary(Base):
     __tablename__ = "forecast_provider_reach_summaries"
     __table_args__ = (
         UniqueConstraint("provider", "run_id", "provider_reach_id", name="uq_summary_provider_run_reach"),
+        Index("ix_summary_provider_run_severity", "provider", "run_id", "severity_score"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
