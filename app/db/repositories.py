@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 
-from sqlalchemy import Select, and_, delete, desc, func, select
+from sqlalchemy import Select, and_, delete, desc, exists, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -166,13 +166,21 @@ class ForecastRepository:
         )
         return int(self.db.execute(stmt).scalar_one())
 
-    def get_latest_run(self, provider: str, *, require_complete: bool = False) -> models.ForecastRun | None:
+    def get_latest_run(self, provider: str, *, require_has_data: bool = False) -> models.ForecastRun | None:
         stmt = (
             select(models.ForecastRun)
             .where(models.ForecastRun.provider == provider)
         )
-        if require_complete:
-            stmt = stmt.where(models.ForecastRun.ingest_status != "pending")
+        if require_has_data:
+            # Only return runs that have at least one summary row
+            S = models.ForecastProviderReachSummary
+            stmt = stmt.where(
+                exists(
+                    select(S.id).where(
+                        and_(S.provider == models.ForecastRun.provider, S.run_id == models.ForecastRun.run_id)
+                    )
+                )
+            )
         return self.db.execute(
             stmt.order_by(desc(models.ForecastRun.run_date_utc)).limit(1)
         ).scalar_one_or_none()
