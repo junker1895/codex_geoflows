@@ -1041,7 +1041,7 @@ class ForecastService:
             raise
 
     def get_latest_run(self, provider: str) -> ForecastRunSchema | None:
-        return self.resolve_requested_run_id_local(provider, "latest", require_existing=False)
+        return self.resolve_requested_run_id_local(provider, "latest", require_existing=False, require_complete=True)
 
     def get_reach_detail(
         self, provider: str, provider_reach_id: str, run_id: str | None = None, timeseries_limit: int | None = None
@@ -1196,7 +1196,7 @@ class ForecastService:
     ) -> tuple[str, dict[str, int]]:
         """Return (resolved_run_id, {reach_id: severity}) – ultra-compact payload for map colouring."""
         self._get_provider(provider)
-        run = self.resolve_requested_run_id_local(provider, run_id or "latest", require_existing=False)
+        run = self.resolve_requested_run_id_local(provider, run_id or "latest", require_existing=False, require_complete=True)
         if not run:
             return ("", {})
         concrete = self._require_concrete_run_id(run.run_id)
@@ -1452,9 +1452,9 @@ class ForecastService:
         return response
 
     def resolve_requested_run_id_local(
-        self, provider: str, requested_run_id: str, require_existing: bool = True
+        self, provider: str, requested_run_id: str, require_existing: bool = True, require_complete: bool = False
     ) -> ForecastRunSchema | None:
-        return self._resolve_run_local(provider, requested_run_id, require_existing=require_existing)
+        return self._resolve_run_local(provider, requested_run_id, require_existing=require_existing, require_complete=require_complete)
 
     def resolve_requested_run_id(
         self, provider: str, requested_run_id: str, require_existing: bool = True
@@ -1462,10 +1462,10 @@ class ForecastService:
         return self._resolve_run(provider, requested_run_id, require_existing=require_existing)
 
     def _resolve_run_local(
-        self, provider: str, run_id: str, require_existing: bool = True
+        self, provider: str, run_id: str, require_existing: bool = True, require_complete: bool = False
     ) -> ForecastRunSchema | None:
         if run_id == "latest":
-            latest = self.repo.get_latest_run(provider)
+            latest = self.repo.get_latest_run(provider, require_complete=require_complete)
             if latest is None:
                 if require_existing:
                     raise ValueError(f"Run 'latest' not found for provider '{provider}'")

@@ -166,12 +166,15 @@ class ForecastRepository:
         )
         return int(self.db.execute(stmt).scalar_one())
 
-    def get_latest_run(self, provider: str) -> models.ForecastRun | None:
-        return self.db.execute(
+    def get_latest_run(self, provider: str, *, require_complete: bool = False) -> models.ForecastRun | None:
+        stmt = (
             select(models.ForecastRun)
             .where(models.ForecastRun.provider == provider)
-            .order_by(desc(models.ForecastRun.run_date_utc))
-            .limit(1)
+        )
+        if require_complete:
+            stmt = stmt.where(models.ForecastRun.ingest_status == "complete")
+        return self.db.execute(
+            stmt.order_by(desc(models.ForecastRun.run_date_utc)).limit(1)
         ).scalar_one_or_none()
 
     def get_run(self, provider: str, run_id: str) -> models.ForecastRun | None:
