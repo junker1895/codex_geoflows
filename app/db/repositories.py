@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 
-from sqlalchemy import Select, and_, desc, func, select
+from sqlalchemy import Select, and_, delete, desc, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.db import models
@@ -92,52 +93,51 @@ class ForecastRepository:
         return count
 
     def upsert_summaries(self, rows: Iterable[ReachSummarySchema]) -> int:
-        count = 0
-        for payload in rows:
-            row = self.db.execute(
-                select(models.ForecastProviderReachSummary).where(
-                    and_(
-                        models.ForecastProviderReachSummary.provider == payload.provider,
-                        models.ForecastProviderReachSummary.run_id == payload.run_id,
-                        models.ForecastProviderReachSummary.provider_reach_id == payload.provider_reach_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if not row:
-                row = models.ForecastProviderReachSummary(
-                    provider=payload.provider,
-                    run_id=payload.run_id,
-                    provider_reach_id=payload.provider_reach_id,
-                )
-                self.db.add(row)
-            row.peak_time_utc = payload.peak_time_utc
-            row.first_exceedance_time_utc = payload.first_exceedance_time_utc
-            row.peak_mean_cms = payload.peak_mean_cms
-            row.peak_median_cms = payload.peak_median_cms
-            row.peak_max_cms = payload.peak_max_cms
-            row.now_mean_cms = payload.now_mean_cms
-            row.now_max_cms = payload.now_max_cms
-            row.return_period_band = payload.return_period_band
-            row.severity_score = payload.severity_score
-            row.is_flagged = payload.is_flagged
-            row.metadata_json = payload.metadata_json
-            count += 1
-        self.db.flush()
-        return count
+        values = [
+            {
+                "provider": payload.provider,
+                "run_id": payload.run_id,
+                "provider_reach_id": payload.provider_reach_id,
+                "peak_time_utc": payload.peak_time_utc,
+                "first_exceedance_time_utc": payload.first_exceedance_time_utc,
+                "peak_mean_cms": payload.peak_mean_cms,
+                "peak_median_cms": payload.peak_median_cms,
+                "peak_max_cms": payload.peak_max_cms,
+                "now_mean_cms": payload.now_mean_cms,
+                "now_max_cms": payload.now_max_cms,
+                "return_period_band": payload.return_period_band,
+                "severity_score": payload.severity_score,
+                "is_flagged": payload.is_flagged,
+                "metadata_json": payload.metadata_json,
+            }
+            for payload in rows
+        ]
+        if not values:
+            return 0
+        update_cols = {
+            "peak_time_utc", "first_exceedance_time_utc",
+            "peak_mean_cms", "peak_median_cms", "peak_max_cms",
+            "now_mean_cms", "now_max_cms",
+            "return_period_band", "severity_score", "is_flagged", "metadata_json",
+        }
+        stmt = pg_insert(models.ForecastProviderReachSummary).values(values)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_summary_provider_run_reach",
+            set_={col: stmt.excluded[col] for col in update_cols},
+        )
+        self.db.execute(stmt)
+        return len(values)
 
 
     def delete_summaries_for_run(self, provider: str, run_id: str) -> int:
-        stmt = select(models.ForecastProviderReachSummary).where(
+        stmt = delete(models.ForecastProviderReachSummary).where(
             and_(
                 models.ForecastProviderReachSummary.provider == provider,
                 models.ForecastProviderReachSummary.run_id == run_id,
             )
         )
-        rows = list(self.db.execute(stmt).scalars().all())
-        for row in rows:
-            self.db.delete(row)
-        self.db.flush()
-        return len(rows)
+        result = self.db.execute(stmt)
+        return result.rowcount
 
     def count_timeseries_rows_for_run(self, provider: str, run_id: str) -> int:
         stmt = select(func.count(models.ForecastProviderReachTimeseries.id)).where(
