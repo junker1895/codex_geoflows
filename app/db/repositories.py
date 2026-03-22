@@ -172,7 +172,7 @@ class ForecastRepository:
             .where(models.ForecastRun.provider == provider)
         )
         if require_complete:
-            stmt = stmt.where(models.ForecastRun.ingest_status == "complete")
+            stmt = stmt.where(models.ForecastRun.ingest_status != "pending")
         return self.db.execute(
             stmt.order_by(desc(models.ForecastRun.run_date_utc)).limit(1)
         ).scalar_one_or_none()
