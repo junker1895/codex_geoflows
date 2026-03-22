@@ -386,6 +386,30 @@ def cli_smoke_geoglows(
     _safe_run(_inner)
 
 
+@cli.command("import-glofas-return-periods")
+def cli_import_glofas_return_periods(
+    threshold_path: str | None = typer.Option(None, "--threshold-path", help="Pre-computed threshold file (parquet/CSV) with lat, lon, rp_2, rp_5, rp_20"),
+    reanalysis_path: str | None = typer.Option(None, "--reanalysis-path", help="GloFAS reanalysis GRIB to extract thresholds from"),
+    batch_size: int = typer.Option(5000, "--batch-size"),
+) -> None:
+    """Import GloFAS return period thresholds into the database.
+
+    Provide either --threshold-path (pre-computed file) or --reanalysis-path (GRIB).
+    Thresholds are mapped to GeoGloWS reach IDs via the crosswalk table.
+    """
+
+    def _inner() -> None:
+        service = _build_service()
+        count = service.import_glofas_return_periods(
+            threshold_path=threshold_path,
+            reanalysis_path=reanalysis_path,
+            batch_size=batch_size,
+        )
+        typer.echo(f"upserted GloFAS return periods: {count}")
+
+    _safe_run(_inner)
+
+
 @cli.command("build-crosswalk")
 def cli_build_crosswalk(
     provider: str = typer.Option("glofas", "--provider"),

@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
+from app.forecast.exceptions import ForecastValidationError
 from app.db import models
 from app.db.repositories import ForecastRepository
 from app.forecast.artifacts import ForecastArtifactStore
@@ -263,6 +264,80 @@ class ForecastService:
                 "total_reaches_processed": total_processed,
                 "total_upserted": total_upserted,
                 "classification_available": self.repo.has_return_periods("geoglows"),
+            },
+        )
+        return total_upserted
+
+    def import_glofas_return_periods(
+        self,
+        threshold_path: str | None = None,
+        reanalysis_path: str | None = None,
+        batch_size: int = 5000,
+    ) -> int:
+        """Import GloFAS return period thresholds into the database.
+
+        Supports two modes:
+        - threshold_path: a pre-computed parquet/CSV with lat, lon, rp_2, rp_5, rp_20
+        - reanalysis_path: a GloFAS reanalysis GRIB to extract thresholds from
+
+        Exactly one must be provided.
+        """
+        from app.forecast.providers.glofas_return_periods import (
+            iter_glofas_return_periods_from_crosswalk,
+            iter_glofas_return_periods_from_threshold_file,
+        )
+
+        if threshold_path and reanalysis_path:
+            raise ForecastValidationError(
+                "Provide either --threshold-path or --reanalysis-path, not both."
+            )
+        if not threshold_path and not reanalysis_path:
+            raise ForecastValidationError(
+                "Provide either --threshold-path or --reanalysis-path."
+            )
+
+        if threshold_path:
+            iterator = iter_glofas_return_periods_from_threshold_file(
+                threshold_path=threshold_path,
+                batch_size=batch_size,
+            )
+            source = threshold_path
+        else:
+            iterator = iter_glofas_return_periods_from_crosswalk(
+                reanalysis_path=reanalysis_path,
+                batch_size=batch_size,
+            )
+            source = reanalysis_path
+
+        logger.info(
+            "starting GloFAS return-period import",
+            extra={"source": source, "batch_size": batch_size},
+        )
+
+        total_upserted = 0
+        total_processed = 0
+        for rows in iterator:
+            total_processed += len(rows)
+            upserted = self.repo.upsert_return_periods(rows)
+            total_upserted += upserted
+            self.db.commit()
+            logger.info(
+                "upserted GloFAS return-period batch",
+                extra={
+                    "batch_rows": len(rows),
+                    "batch_upserted": upserted,
+                    "total_processed": total_processed,
+                    "total_upserted": total_upserted,
+                },
+            )
+
+        logger.info(
+            "completed GloFAS return-period import",
+            extra={
+                "source": source,
+                "total_processed": total_processed,
+                "total_upserted": total_upserted,
+                "classification_available": self.repo.has_return_periods("glofas"),
             },
         )
         return total_upserted
