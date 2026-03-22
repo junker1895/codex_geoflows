@@ -388,19 +388,25 @@ def cli_smoke_geoglows(
 
 @cli.command("import-glofas-return-periods")
 def cli_import_glofas_return_periods(
+    netcdf_dir: str | None = typer.Option(None, "--netcdf-dir", help="Directory with official GloFAS v4 threshold NetCDF files (flood_threshold_glofas_v4_rl_*.nc)"),
     threshold_path: str | None = typer.Option(None, "--threshold-path", help="Pre-computed threshold file (parquet/CSV) with lat, lon, rp_2, rp_5, rp_20"),
     reanalysis_path: str | None = typer.Option(None, "--reanalysis-path", help="GloFAS reanalysis GRIB to extract thresholds from"),
     batch_size: int = typer.Option(5000, "--batch-size"),
 ) -> None:
     """Import GloFAS return period thresholds into the database.
 
-    Provide either --threshold-path (pre-computed file) or --reanalysis-path (GRIB).
+    Provide exactly one of:
+      --netcdf-dir     (preferred) directory with official GloFAS v4 NetCDF files
+      --threshold-path pre-computed parquet/CSV file
+      --reanalysis-path GloFAS reanalysis GRIB
+
     Thresholds are mapped to GeoGloWS reach IDs via the crosswalk table.
     """
 
     def _inner() -> None:
         service = _build_service()
         count = service.import_glofas_return_periods(
+            netcdf_dir=netcdf_dir,
             threshold_path=threshold_path,
             reanalysis_path=reanalysis_path,
             batch_size=batch_size,

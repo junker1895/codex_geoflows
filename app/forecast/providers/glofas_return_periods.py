@@ -4,11 +4,18 @@ Downloads pre-computed GloFAS flood return period thresholds from the
 Copernicus CDS API and maps them to GeoGloWS reach IDs via the
 reach-grid crosswalk table.
 
-GloFAS provides 2-, 5-, and 20-year return period thresholds computed from
-ERA5 reanalysis annual maxima (Gumbel distribution). These map to our schema:
-    rp_2  = GloFAS 2-year
-    rp_5  = GloFAS 5-year
-    rp_25 = GloFAS 20-year  (closest match; rp_10/rp_50/rp_100 left NULL)
+Preferred path: use the official GloFAS v4 threshold NetCDF files from
+https://confluence.ecmwf.int/display/CEMS/GloFAS+Flood+Thresholds
+via ``iter_glofas_return_periods_from_netcdf()``.  These provide thresholds
+for return periods 1.5–500 years. We map them to our schema:
+    rp_2   = GloFAS 2-year
+    rp_5   = GloFAS 5-year
+    rp_10  = GloFAS 10-year
+    rp_25  = GloFAS 20-year  (closest match)
+    rp_50  = GloFAS 50-year
+    rp_100 = GloFAS 100-year
+
+Legacy paths (from reanalysis GRIB or parquet/CSV) only populate rp_2/rp_5/rp_25.
 """
 
 from __future__ import annotations
@@ -406,6 +413,158 @@ def iter_glofas_return_periods_from_crosswalk(
         yield batch
 
     ds.close()
+
+
+# Mapping from GloFAS v4 NetCDF return-period filenames to our schema fields.
+# GloFAS provides rl_1.5, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0.
+# We map the closest available to our schema slots (rp_2..rp_100).
+_NETCDF_RP_MAP: dict[str, str] = {
+    "2.0": "rp_2",
+    "5.0": "rp_5",
+    "10.0": "rp_10",
+    "20.0": "rp_25",   # GloFAS 20-yr → our rp_25 slot (closest match)
+    "50.0": "rp_50",
+    "100.0": "rp_100",
+}
+
+
+def iter_glofas_return_periods_from_netcdf(
+    *,
+    netcdf_dir: str,
+    batch_size: int = 5000,
+) -> Iterator[list[ReturnPeriodSchema]]:
+    """Import pre-computed GloFAS v4 flood thresholds from official NetCDF files.
+
+    Reads ``flood_threshold_glofas_v4_rl_<rp>.nc`` files from *netcdf_dir*,
+    combines them into a single threshold grid, and maps grid cells to
+    GeoGloWS reach IDs via the crosswalk table.
+
+    These are the official files published on the ECMWF/Copernicus Confluence:
+    https://confluence.ecmwf.int/display/CEMS/GloFAS+Flood+Thresholds
+
+    Each file contains one variable on a 0.05° global grid with the discharge
+    threshold for the corresponding return period.
+    """
+    import numpy as np
+    import xarray as xr
+
+    nc_dir = Path(netcdf_dir)
+    if not nc_dir.is_dir():
+        raise ForecastValidationError(f"NetCDF directory not found: {netcdf_dir}")
+
+    # Discover and load threshold files for the return periods we care about
+    loaded_rps: dict[str, xr.DataArray] = {}
+    for rp_label, schema_field in _NETCDF_RP_MAP.items():
+        pattern = f"flood_threshold_glofas_v4_rl_{rp_label}.nc"
+        matches = list(nc_dir.glob(pattern))
+        if not matches:
+            logger.info("No file found for RP %s (%s), skipping", rp_label, pattern)
+            continue
+        nc_path = matches[0]
+        ds = xr.open_dataset(str(nc_path))
+        # The threshold variable name varies; pick the first non-coord variable
+        data_vars = [v for v in ds.data_vars if v not in {"lat", "lon", "latitude", "longitude"}]
+        if not data_vars:
+            logger.warning("No data variable found in %s", nc_path)
+            ds.close()
+            continue
+        var_name = data_vars[0]
+        da = ds[var_name]
+        # Squeeze out any singleton dimensions (e.g. time or step)
+        da = da.squeeze(drop=True)
+        loaded_rps[schema_field] = da
+        logger.info(
+            "Loaded GloFAS threshold file: %s → %s (var=%s, shape=%s)",
+            nc_path.name, schema_field, var_name, da.shape,
+        )
+        # Don't close ds yet — we need the DataArray alive
+
+    if not loaded_rps:
+        raise ForecastValidationError(
+            f"No GloFAS v4 threshold NetCDF files found in {netcdf_dir}. "
+            "Expected files like flood_threshold_glofas_v4_rl_2.0.nc"
+        )
+
+    # Use the first loaded DataArray to get lat/lon coordinates
+    ref_da = next(iter(loaded_rps.values()))
+    lat_coord = "latitude" if "latitude" in ref_da.dims else "lat"
+    lon_coord = "longitude" if "longitude" in ref_da.dims else "lon"
+
+    # Load crosswalk
+    crosswalk = _load_full_crosswalk()
+    if not crosswalk:
+        raise ProviderOperationalError(
+            "No crosswalk entries found. Run 'build-crosswalk' first."
+        )
+
+    logger.info(
+        "Matching %d crosswalk entries to GloFAS threshold grid (%d RPs loaded)",
+        len(crosswalk),
+        len(loaded_rps),
+    )
+
+    batch: list[ReturnPeriodSchema] = []
+    matched = 0
+    unmatched = 0
+
+    for reach_id, (grid_lat, grid_lon) in crosswalk.items():
+        thresholds: dict[str, float | None] = {
+            "rp_2": None, "rp_5": None, "rp_10": None,
+            "rp_25": None, "rp_50": None, "rp_100": None,
+        }
+        any_valid = False
+
+        for schema_field, da in loaded_rps.items():
+            try:
+                val = float(
+                    da.sel(
+                        **{lat_coord: grid_lat, lon_coord: grid_lon},
+                        method="nearest",
+                    ).values
+                )
+                if not np.isnan(val) and val > 0:
+                    thresholds[schema_field] = val
+                    any_valid = True
+            except Exception:
+                continue
+
+        if not any_valid:
+            unmatched += 1
+            continue
+
+        matched += 1
+        batch.append(
+            ReturnPeriodSchema(
+                provider="glofas",
+                provider_reach_id=reach_id,
+                rp_2=thresholds["rp_2"],
+                rp_5=thresholds["rp_5"],
+                rp_10=thresholds["rp_10"],
+                rp_25=thresholds["rp_25"],
+                rp_50=thresholds["rp_50"],
+                rp_100=thresholds["rp_100"],
+                metadata_json={
+                    "source": "glofas_v4_threshold_netcdf",
+                    "dir": str(netcdf_dir),
+                    "grid_lat": grid_lat,
+                    "grid_lon": grid_lon,
+                    "rps_loaded": list(loaded_rps.keys()),
+                },
+            )
+        )
+
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+
+    if batch:
+        yield batch
+
+    logger.info(
+        "GloFAS NetCDF threshold import complete: matched=%d, unmatched=%d",
+        matched,
+        unmatched,
+    )
 
 
 # ---------------------------------------------------------------------------

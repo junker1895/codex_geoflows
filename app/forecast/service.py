@@ -272,11 +272,14 @@ class ForecastService:
         self,
         threshold_path: str | None = None,
         reanalysis_path: str | None = None,
+        netcdf_dir: str | None = None,
         batch_size: int = 5000,
     ) -> int:
         """Import GloFAS return period thresholds into the database.
 
-        Supports two modes:
+        Supports three modes:
+        - netcdf_dir: directory with official GloFAS v4 threshold NetCDF files
+          (flood_threshold_glofas_v4_rl_*.nc) — preferred, gives all 6 RPs
         - threshold_path: a pre-computed parquet/CSV with lat, lon, rp_2, rp_5, rp_20
         - reanalysis_path: a GloFAS reanalysis GRIB to extract thresholds from
 
@@ -284,19 +287,23 @@ class ForecastService:
         """
         from app.forecast.providers.glofas_return_periods import (
             iter_glofas_return_periods_from_crosswalk,
+            iter_glofas_return_periods_from_netcdf,
             iter_glofas_return_periods_from_threshold_file,
         )
 
-        if threshold_path and reanalysis_path:
+        sources_given = sum(bool(x) for x in [threshold_path, reanalysis_path, netcdf_dir])
+        if sources_given != 1:
             raise ForecastValidationError(
-                "Provide either --threshold-path or --reanalysis-path, not both."
-            )
-        if not threshold_path and not reanalysis_path:
-            raise ForecastValidationError(
-                "Provide either --threshold-path or --reanalysis-path."
+                "Provide exactly one of --netcdf-dir, --threshold-path, or --reanalysis-path."
             )
 
-        if threshold_path:
+        if netcdf_dir:
+            iterator = iter_glofas_return_periods_from_netcdf(
+                netcdf_dir=netcdf_dir,
+                batch_size=batch_size,
+            )
+            source = netcdf_dir
+        elif threshold_path:
             iterator = iter_glofas_return_periods_from_threshold_file(
                 threshold_path=threshold_path,
                 batch_size=batch_size,
