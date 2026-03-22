@@ -21,6 +21,10 @@ dependencies = [
   "s3fs>=2024.6.0",
   "pyarrow>=17.0.0",
   "orjson>=3.10.0",
+  "cdsapi>=0.7.0",
+  "cfgrib>=0.9.12",
+  "eccodes>=2.36.0",
+  "scipy>=1.11.0",
 ]
 
 
