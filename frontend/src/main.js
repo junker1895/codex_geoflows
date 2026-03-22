@@ -531,6 +531,11 @@ document.getElementById('info-close').addEventListener('click', () => {
   }
 });
 
+// Resize chart when panel is resized
+new ResizeObserver(() => {
+  if (forecastChart) forecastChart.resize();
+}).observe(infoPanel);
+
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
