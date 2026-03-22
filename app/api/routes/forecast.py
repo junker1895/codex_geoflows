@@ -94,6 +94,29 @@ def map_reaches(
         raise HTTPException(status_code=500, detail="internal server error") from exc
 
 
+@router.get("/map/severity")
+def map_severity(
+    provider: str = Query(...),
+    run_id: str | None = Query(default=None),
+    min_severity_score: int = Query(default=1, ge=1, le=6),
+    db: Session = Depends(get_db_session),
+) -> dict:
+    """Ultra-compact severity payload for map colouring: ``{run_id, severity: {reach_id: score}}``."""
+    started = perf_counter()
+    service = get_forecast_service(db)
+    resolved_run_id, severity = service.get_severity_map(provider, run_id, min_severity_score)
+    logger.info(
+        "forecast map_severity route completed",
+        extra={
+            "provider": provider,
+            "run_id": resolved_run_id,
+            "count": len(severity),
+            "elapsed_seconds": round(perf_counter() - started, 6),
+        },
+    )
+    return {"run_id": resolved_run_id, "severity": severity}
+
+
 @router.get("/summary", response_model=list[ReachSummarySchema])
 def summary(
     provider: str,

@@ -292,6 +292,30 @@ class ForecastRepository:
             stmt = stmt.limit(limit)
         return list(self.db.execute(stmt).scalars().all())
 
+    def get_severity_map(
+        self,
+        provider: str,
+        run_id: str,
+        min_severity_score: int = 1,
+    ) -> dict[str, int]:
+        """Return {provider_reach_id: severity_score} for flagged reaches.
+
+        Only selects two columns – no ORM hydration, minimal serialisation cost.
+        """
+        S = models.ForecastProviderReachSummary
+        stmt = (
+            select(S.provider_reach_id, S.severity_score)
+            .where(
+                and_(
+                    S.provider == provider,
+                    S.run_id == run_id,
+                    S.severity_score >= min_severity_score,
+                )
+            )
+        )
+        rows = self.db.execute(stmt).all()
+        return {str(r[0]): int(r[1]) for r in rows}
+
     def get_summaries(
         self,
         provider: str,

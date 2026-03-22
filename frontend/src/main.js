@@ -92,12 +92,12 @@ async function loadRunId() {
   currentRunId = run.run_id;
 }
 
-async function loadForecastSummaries(minSeverity, signal) {
+async function loadSeverityMap(minSeverity, signal) {
   const resp = await fetchJSON(
-    `${API_BASE}/map/reaches?provider=${PROVIDER}&run_id=${currentRunId}&flagged_only=true&min_severity_score=${minSeverity}`,
+    `${API_BASE}/map/severity?provider=${PROVIDER}&run_id=${currentRunId}&min_severity_score=${minSeverity}`,
     signal
   );
-  return resp.data || [];
+  return resp.severity || {};
 }
 
 // ---------------------------------------------------------------------------
@@ -116,14 +116,14 @@ async function loadDataForZoom(zoom) {
   setStatus(`Loading severity ≥ ${tier.minSeverity} reaches…`);
 
   try {
-    const reaches = await loadForecastSummaries(
+    const severityMap = await loadSeverityMap(
       tier.minSeverity,
       loadingAbort.signal
     );
 
     // Merge new reaches into existing index (don't lose higher-severity data)
-    for (const r of reaches) {
-      forecastIndex[String(r.provider_reach_id)] = r;
+    for (const [reachId, score] of Object.entries(severityMap)) {
+      forecastIndex[reachId] = { severity_score: score };
     }
 
     currentTier = tier;
@@ -328,20 +328,23 @@ async function onRiverClick(e) {
 
   if (info) {
     html += row('Severity', `${info.severity_score} / 6`);
-    html += row('Return Period', BAND_LABELS[info.return_period_band] || info.return_period_band);
-    if (info.peak_mean_cms != null) html += row('Peak Mean', `${info.peak_mean_cms.toFixed(1)} m³/s`);
-    if (info.peak_max_cms != null) html += row('Peak Max', `${info.peak_max_cms.toFixed(1)} m³/s`);
-    if (info.peak_time_utc) html += row('Peak Time', new Date(info.peak_time_utc).toUTCString());
   } else {
     html += row('Status', 'No elevated flood risk');
   }
 
-  // Try to fetch detailed timeseries info from API
+  // Fetch full detail on click (peak flow, return periods, etc.)
   if (currentRunId) {
     try {
       const detail = await fetchJSON(
         `${API_BASE}/reaches/${PROVIDER}/${reachId}?run_id=${currentRunId}&timeseries_limit=10`
       );
+      if (detail.summary) {
+        const s = detail.summary;
+        if (s.return_period_band) html += row('Return Period', BAND_LABELS[s.return_period_band] || s.return_period_band);
+        if (s.peak_mean_cms != null) html += row('Peak Mean', `${s.peak_mean_cms.toFixed(1)} m³/s`);
+        if (s.peak_max_cms != null) html += row('Peak Max', `${s.peak_max_cms.toFixed(1)} m³/s`);
+        if (s.peak_time_utc) html += row('Peak Time', new Date(s.peak_time_utc).toUTCString());
+      }
       if (detail.return_periods) {
         const rp = detail.return_periods;
         html += row('RP-2', rp.rp_2 != null ? `${rp.rp_2.toFixed(1)} m³/s` : '—');
