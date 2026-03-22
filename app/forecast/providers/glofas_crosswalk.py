@@ -22,7 +22,7 @@ def build_glofas_crosswalk(
     metadata_parquet_path: str | None = None,
     glofas_grid_resolution: float = 0.05,
     max_snap_distance_km: float = 10.0,
-    batch_size: int = 50000,
+    batch_size: int = 5000,
     db_session=None,
 ) -> int:
     """Build the crosswalk table mapping GeoGloWS reaches to GloFAS grid cells.

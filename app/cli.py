@@ -392,7 +392,7 @@ def cli_build_crosswalk(
     metadata_path: str | None = typer.Option(None, "--metadata-path", help="Local path to GeoGloWS metadata parquet (~250 MB)"),
     max_snap_km: float = typer.Option(10.0, "--max-snap-km"),
     grid_resolution: float = typer.Option(0.05, "--grid-resolution"),
-    batch_size: int = typer.Option(50000, "--batch-size"),
+    batch_size: int = typer.Option(5000, "--batch-size"),
 ) -> None:
     """Build reach-to-grid crosswalk table for a grid-based provider (e.g. GloFAS)."""
 
