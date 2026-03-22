@@ -12,7 +12,7 @@ Chart.register(...registerables);
 const PMTILES_URL =
   'https://pub-6f1e54035ac14471852f4b7a25bf8354.r2.dev/rivers.pmtiles';
 const API_BASE = '/forecast'; // proxied to backend via Vite
-const PROVIDER = 'geoglows';
+let PROVIDER = 'geoglows';
 
 // Severity → colour mapping (matches legend)
 const SEVERITY_COLORS = {
@@ -481,7 +481,7 @@ async function onRiverClick(e) {
   }
 
   // Show panel immediately with what we have
-  document.getElementById('info-title').textContent = `Reach ${reachId}`;
+  document.getElementById('info-title').textContent = `Reach ${reachId} — ${PROVIDER.toUpperCase()}`;
   infoContent.innerHTML = html + '</table>';
   // Reset position to default top-right on new click
   infoPanel.style.top = '12px';
@@ -571,6 +571,55 @@ new ResizeObserver(() => {
     dragging = false;
   });
 })();
+
+// ---------------------------------------------------------------------------
+// Provider toggle
+// ---------------------------------------------------------------------------
+function switchProvider(newProvider) {
+  if (newProvider === PROVIDER) return;
+  PROVIDER = newProvider;
+
+  // Update toggle buttons
+  document.querySelectorAll('.provider-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.provider === newProvider);
+  });
+
+  // Clear existing forecast data
+  forecastIndex = {};
+  currentTier = null;
+  appliedFeatureStates.clear();
+
+  // Clear feature states on the map
+  if (map && map.getSource('rivers')) {
+    // Remove and re-add the highlight layer to clear all feature states
+    if (highlightLayerAdded) {
+      map.removeLayer('rivers-highlighted');
+      highlightLayerAdded = false;
+    }
+  }
+
+  // Close info panel
+  infoPanel.classList.add('hidden');
+  if (forecastChart) {
+    forecastChart.destroy();
+    forecastChart = null;
+  }
+
+  // Reload for new provider
+  (async () => {
+    try {
+      await loadRunId();
+      await loadDataForZoom(map.getZoom());
+    } catch (err) {
+      console.warn(`Could not load ${newProvider} data:`, err);
+      setStatus(`${newProvider.toUpperCase()} forecast data unavailable`);
+    }
+  })();
+}
+
+document.querySelectorAll('.provider-btn').forEach((btn) => {
+  btn.addEventListener('click', () => switchProvider(btn.dataset.provider));
+});
 
 // ---------------------------------------------------------------------------
 // Boot
