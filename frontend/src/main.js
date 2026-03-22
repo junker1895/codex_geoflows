@@ -481,7 +481,12 @@ async function onRiverClick(e) {
   }
 
   // Show panel immediately with what we have
+  document.getElementById('info-title').textContent = `Reach ${reachId}`;
   infoContent.innerHTML = html + '</table>';
+  // Reset position to default top-right on new click
+  infoPanel.style.top = '12px';
+  infoPanel.style.right = '12px';
+  infoPanel.style.left = 'auto';
   infoPanel.classList.remove('hidden');
 
   // Fetch full detail (with full timeseries for chart)
@@ -535,6 +540,37 @@ document.getElementById('info-close').addEventListener('click', () => {
 new ResizeObserver(() => {
   if (forecastChart) forecastChart.resize();
 }).observe(infoPanel);
+
+// Drag to move info panel
+(function initDrag() {
+  const titlebar = document.getElementById('info-titlebar');
+  let dragging = false;
+  let offsetX = 0;
+  let offsetY = 0;
+
+  titlebar.addEventListener('mousedown', (e) => {
+    if (e.target.id === 'info-close') return;
+    dragging = true;
+    const rect = infoPanel.getBoundingClientRect();
+    offsetX = e.clientX - rect.left;
+    offsetY = e.clientY - rect.top;
+    // Switch from right-anchored to left-anchored positioning
+    infoPanel.style.left = rect.left + 'px';
+    infoPanel.style.top = rect.top + 'px';
+    infoPanel.style.right = 'auto';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    infoPanel.style.left = (e.clientX - offsetX) + 'px';
+    infoPanel.style.top = (e.clientY - offsetY) + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    dragging = false;
+  });
+})();
 
 // ---------------------------------------------------------------------------
 // Boot

@@ -45,9 +45,21 @@ body, html { width: 100%; height: 100%; font-family: system-ui, sans-serif; }
   margin-top: 10px;
 }
 #info-panel.hidden { display: none; }
+#info-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: grab;
+  user-select: none;
+  margin: -14px -14px 8px -14px;
+  padding: 8px 10px;
+  background: rgba(0,0,0,0.05);
+  border-radius: 8px 8px 0 0;
+}
+#info-titlebar:active { cursor: grabbing; }
+#info-title { font-weight: 600; font-size: 13px; }
 #info-close {
-  position: absolute; top: 6px; right: 8px;
-  background: none; border: none; font-size: 18px; cursor: pointer;
+  background: none; border: none; font-size: 18px; cursor: pointer; line-height: 1;
 }
 #info-content table { width: 100%; border-collapse: collapse; }
 #info-content td { padding: 3px 4px; border-bottom: 1px solid #eee; }
