@@ -1192,6 +1192,7 @@ class ForecastService:
         provider: str,
         run_id: str | None = None,
         min_severity_score: int = 1,
+        limit: int | None = None,
     ) -> tuple[str, dict[str, int]]:
         """Return (resolved_run_id, {reach_id: severity}) – ultra-compact payload for map colouring."""
         self._get_provider(provider)
@@ -1199,7 +1200,7 @@ class ForecastService:
         if not run:
             return ("", {})
         concrete = self._require_concrete_run_id(run.run_id)
-        data = self.repo.get_severity_map(provider, concrete, min_severity_score=min_severity_score)
+        data = self.repo.get_severity_map(provider, concrete, min_severity_score=min_severity_score, limit=limit)
         return (concrete, data)
 
     def get_provider_health(self, provider: str, refresh_upstream: bool = False) -> ProviderHealthResponse:

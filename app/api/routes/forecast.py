@@ -100,12 +100,13 @@ def map_severity(
     provider: str = Query(...),
     run_id: str | None = Query(default=None),
     min_severity_score: int = Query(default=1, ge=1, le=6),
+    limit: int | None = Query(default=None, ge=1),
     db: Session = Depends(get_db_session),
 ) -> Response:
     """Ultra-compact severity payload for map colouring: ``{run_id, severity: {reach_id: score}}``."""
     started = perf_counter()
     service = get_forecast_service(db)
-    resolved_run_id, severity = service.get_severity_map(provider, run_id, min_severity_score)
+    resolved_run_id, severity = service.get_severity_map(provider, run_id, min_severity_score, limit=limit)
     logger.info(
         "forecast map_severity route completed",
         extra={

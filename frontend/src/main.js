@@ -43,13 +43,13 @@ const BAND_LABELS = {
   '100': '100-year',
 };
 
-// Zoom → minimum severity threshold and per-request limit
+// Zoom → minimum severity threshold + max reaches to load
 // At global zoom only show the most extreme; as user zooms in, reveal more.
-// No hard limits — severity threshold alone controls volume.
 const ZOOM_SEVERITY_TIERS = [
-  { maxZoom: 3, minSeverity: 4 },
-  { maxZoom: 5, minSeverity: 2 },
-  { maxZoom: Infinity, minSeverity: 1 },
+  { maxZoom: 3, minSeverity: 4, limit: 5000 },
+  { maxZoom: 5, minSeverity: 3, limit: 20000 },
+  { maxZoom: 7, minSeverity: 2, limit: 50000 },
+  { maxZoom: Infinity, minSeverity: 1, limit: null },
 ];
 
 function getTierForZoom(zoom) {
@@ -92,11 +92,10 @@ async function loadRunId() {
   currentRunId = run.run_id;
 }
 
-async function loadSeverityMap(minSeverity, signal) {
-  const resp = await fetchJSON(
-    `${API_BASE}/map/severity?provider=${PROVIDER}&run_id=${currentRunId}&min_severity_score=${minSeverity}`,
-    signal
-  );
+async function loadSeverityMap(minSeverity, limit, signal) {
+  let url = `${API_BASE}/map/severity?provider=${PROVIDER}&run_id=${currentRunId}&min_severity_score=${minSeverity}`;
+  if (limit) url += `&limit=${limit}`;
+  const resp = await fetchJSON(url, signal);
   return resp.severity || {};
 }
 
@@ -118,6 +117,7 @@ async function loadDataForZoom(zoom) {
   try {
     const severityMap = await loadSeverityMap(
       tier.minSeverity,
+      tier.limit,
       loadingAbort.signal
     );
 

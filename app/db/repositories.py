@@ -297,10 +297,12 @@ class ForecastRepository:
         provider: str,
         run_id: str,
         min_severity_score: int = 1,
+        limit: int | None = None,
     ) -> dict[str, int]:
         """Return {provider_reach_id: severity_score} for flagged reaches.
 
         Only selects two columns – no ORM hydration, minimal serialisation cost.
+        Results ordered by severity DESC so the limit keeps the most critical reaches.
         """
         S = models.ForecastProviderReachSummary
         stmt = (
@@ -312,7 +314,10 @@ class ForecastRepository:
                     S.severity_score >= min_severity_score,
                 )
             )
+            .order_by(desc(S.severity_score))
         )
+        if limit:
+            stmt = stmt.limit(limit)
         rows = self.db.execute(stmt).all()
         return {str(r[0]): int(r[1]) for r in rows}
 
