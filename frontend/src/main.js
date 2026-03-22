@@ -1,6 +1,10 @@
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import * as pmtiles from 'pmtiles';
+import { Chart, registerables } from 'chart.js';
+import 'chartjs-adapter-date-fns';
+
+Chart.register(...registerables);
 
 // ---------------------------------------------------------------------------
 // Config
@@ -67,6 +71,7 @@ let currentRunId = null;
 let currentTier = null; // track which tier is loaded to avoid redundant fetches
 let map;
 let loadingAbort = null; // AbortController for in-flight requests
+let forecastChart = null; // Chart.js instance
 
 const statusBar = document.getElementById('status-bar');
 const infoPanel = document.getElementById('info-panel');
@@ -315,8 +320,151 @@ function updateHighlightedLayer() {
 }
 
 // ---------------------------------------------------------------------------
-// Click interaction – show reach detail
+// Click interaction – show reach detail + hydrograph
 // ---------------------------------------------------------------------------
+
+// Return period line colours (subtle, dashed)
+const RP_LINE_COLORS = {
+  rp_2:   { color: '#91cf60', label: 'RP 2-yr' },
+  rp_5:   { color: '#fee08b', label: 'RP 5-yr' },
+  rp_10:  { color: '#fdae61', label: 'RP 10-yr' },
+  rp_25:  { color: '#f46d43', label: 'RP 25-yr' },
+  rp_50:  { color: '#d73027', label: 'RP 50-yr' },
+  rp_100: { color: '#67001f', label: 'RP 100-yr' },
+};
+
+function buildHydrograph(timeseries, returnPeriods) {
+  const canvas = document.getElementById('forecast-chart');
+
+  // Destroy previous chart
+  if (forecastChart) {
+    forecastChart.destroy();
+    forecastChart = null;
+  }
+
+  if (!timeseries || timeseries.length === 0) {
+    canvas.style.display = 'none';
+    return;
+  }
+  canvas.style.display = 'block';
+
+  // Sort by time
+  const sorted = [...timeseries].sort(
+    (a, b) => new Date(a.forecast_time_utc) - new Date(b.forecast_time_utc)
+  );
+
+  const labels = sorted.map((p) => new Date(p.forecast_time_utc));
+
+  const datasets = [];
+
+  // P25–P75 shaded band (filled area between)
+  const hasSpread =
+    sorted.some((p) => p.flow_p25_cms != null) &&
+    sorted.some((p) => p.flow_p75_cms != null);
+
+  if (hasSpread) {
+    // Upper bound (p75) – filled down to p25
+    datasets.push({
+      label: 'P75',
+      data: sorted.map((p) => p.flow_p75_cms),
+      borderColor: 'transparent',
+      backgroundColor: 'rgba(66,133,244,0.15)',
+      fill: '+1', // fill to next dataset (p25)
+      pointRadius: 0,
+      order: 3,
+    });
+    // Lower bound (p25)
+    datasets.push({
+      label: 'P25',
+      data: sorted.map((p) => p.flow_p25_cms),
+      borderColor: 'transparent',
+      backgroundColor: 'transparent',
+      fill: false,
+      pointRadius: 0,
+      order: 3,
+    });
+  }
+
+  // Max flow line
+  if (sorted.some((p) => p.flow_max_cms != null)) {
+    datasets.push({
+      label: 'Max',
+      data: sorted.map((p) => p.flow_max_cms),
+      borderColor: 'rgba(213,0,0,0.5)',
+      borderWidth: 1,
+      borderDash: [4, 3],
+      fill: false,
+      pointRadius: 0,
+      order: 2,
+    });
+  }
+
+  // Mean flow line (primary)
+  datasets.push({
+    label: 'Mean',
+    data: sorted.map((p) => p.flow_mean_cms),
+    borderColor: '#1565c0',
+    borderWidth: 2,
+    fill: false,
+    pointRadius: 0,
+    order: 1,
+  });
+
+  // Return period threshold lines
+  if (returnPeriods) {
+    for (const [key, meta] of Object.entries(RP_LINE_COLORS)) {
+      const val = returnPeriods[key];
+      if (val == null) continue;
+      datasets.push({
+        label: meta.label,
+        data: labels.map(() => val),
+        borderColor: meta.color,
+        borderWidth: 1.5,
+        borderDash: [6, 4],
+        fill: false,
+        pointRadius: 0,
+        order: 4,
+      });
+    }
+  }
+
+  forecastChart = new Chart(canvas, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          display: true,
+          position: 'bottom',
+          labels: { boxWidth: 14, font: { size: 10 }, padding: 6 },
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) =>
+              `${ctx.dataset.label}: ${ctx.parsed.y != null ? ctx.parsed.y.toFixed(1) : '—'} m³/s`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          type: 'time',
+          time: { unit: 'day', tooltipFormat: 'MMM d, HH:mm' },
+          title: { display: false },
+          ticks: { font: { size: 10 }, maxRotation: 0 },
+        },
+        y: {
+          title: { display: true, text: 'm³/s', font: { size: 11 } },
+          beginAtZero: true,
+          ticks: { font: { size: 10 } },
+        },
+      },
+    },
+  });
+}
+
 async function onRiverClick(e) {
   if (!e.features || e.features.length === 0) return;
 
@@ -332,33 +480,42 @@ async function onRiverClick(e) {
     html += row('Status', 'No elevated flood risk');
   }
 
-  // Fetch full detail on click (peak flow, return periods, etc.)
+  // Show panel immediately with what we have
+  infoContent.innerHTML = html + '</table>';
+  infoPanel.classList.remove('hidden');
+
+  // Fetch full detail (with full timeseries for chart)
   if (currentRunId) {
     try {
       const detail = await fetchJSON(
-        `${API_BASE}/reaches/${PROVIDER}/${reachId}?run_id=${currentRunId}&timeseries_limit=10`
+        `${API_BASE}/reaches/${PROVIDER}/${reachId}?run_id=${currentRunId}&timeseries_limit=500`
       );
       if (detail.summary) {
         const s = detail.summary;
-        if (s.return_period_band) html += row('Return Period', BAND_LABELS[s.return_period_band] || s.return_period_band);
-        if (s.peak_mean_cms != null) html += row('Peak Mean', `${s.peak_mean_cms.toFixed(1)} m³/s`);
-        if (s.peak_max_cms != null) html += row('Peak Max', `${s.peak_max_cms.toFixed(1)} m³/s`);
-        if (s.peak_time_utc) html += row('Peak Time', new Date(s.peak_time_utc).toUTCString());
+        if (s.return_period_band)
+          html += row('Return Period', BAND_LABELS[s.return_period_band] || s.return_period_band);
+        if (s.peak_mean_cms != null)
+          html += row('Peak Mean', `${s.peak_mean_cms.toFixed(1)} m³/s`);
+        if (s.peak_max_cms != null)
+          html += row('Peak Max', `${s.peak_max_cms.toFixed(1)} m³/s`);
+        if (s.peak_time_utc)
+          html += row('Peak Time', new Date(s.peak_time_utc).toUTCString());
       }
-      if (detail.return_periods) {
-        const rp = detail.return_periods;
-        html += row('RP-2', rp.rp_2 != null ? `${rp.rp_2.toFixed(1)} m³/s` : '—');
-        html += row('RP-10', rp.rp_10 != null ? `${rp.rp_10.toFixed(1)} m³/s` : '—');
-        html += row('RP-100', rp.rp_100 != null ? `${rp.rp_100.toFixed(1)} m³/s` : '—');
-      }
-    } catch {
-      // Detail not available – that's fine
-    }
-  }
+      html += '</table>';
+      infoContent.innerHTML = html;
 
-  html += '</table>';
-  infoContent.innerHTML = html;
-  infoPanel.classList.remove('hidden');
+      // Build hydrograph
+      buildHydrograph(detail.timeseries, detail.return_periods);
+    } catch {
+      html += '</table>';
+      infoContent.innerHTML = html;
+      buildHydrograph(null, null);
+    }
+  } else {
+    html += '</table>';
+    infoContent.innerHTML = html;
+    buildHydrograph(null, null);
+  }
 }
 
 function row(label, value) {
@@ -368,6 +525,10 @@ function row(label, value) {
 // Close info panel
 document.getElementById('info-close').addEventListener('click', () => {
   infoPanel.classList.add('hidden');
+  if (forecastChart) {
+    forecastChart.destroy();
+    forecastChart = null;
+  }
 });
 
 // ---------------------------------------------------------------------------
