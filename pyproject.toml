@@ -25,6 +25,7 @@ dependencies = [
   "cfgrib>=0.9.12",
   "eccodes>=2.36.0",
   "scipy>=1.11.0",
+  "netcdf4>=1.6.0",
 ]
 
 
