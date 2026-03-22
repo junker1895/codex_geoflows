@@ -133,6 +133,8 @@ def test_map_reaches_endpoint_contract_and_filters(client, db_session):
         "peak_mean_cms",
         "peak_median_cms",
         "peak_max_cms",
+        "now_mean_cms",
+        "now_max_cms",
         "return_period_band",
         "severity_score",
         "is_flagged",

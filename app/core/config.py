@@ -20,8 +20,8 @@ class Settings(BaseSettings):
     forecast_enabled_providers: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["geoglows"], alias="FORECAST_ENABLED_PROVIDERS"
     )
-    forecast_summary_default_limit: int = Field(default=200, alias="FORECAST_SUMMARY_DEFAULT_LIMIT")
-    forecast_bulk_ingest_batch_size: int = Field(default=5000, alias="FORECAST_BULK_INGEST_BATCH_SIZE")
+    forecast_summary_default_limit: int = Field(default=15000, alias="FORECAST_SUMMARY_DEFAULT_LIMIT")
+    forecast_bulk_ingest_batch_size: int = Field(default=50000, alias="FORECAST_BULK_INGEST_BATCH_SIZE")
     forecast_bulk_artifact_dir: str = Field(default="./data/forecast_artifacts", alias="FORECAST_BULK_ARTIFACT_DIR")
     forecast_bulk_artifact_write_batch_size: int = Field(default=10000, alias="FORECAST_BULK_ARTIFACT_WRITE_BATCH_SIZE")
     forecast_bulk_artifact_retention_runs: int = Field(default=5, alias="FORECAST_BULK_ARTIFACT_RETENTION_RUNS")

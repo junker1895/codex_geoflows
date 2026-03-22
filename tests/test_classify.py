@@ -52,3 +52,14 @@ def test_each_threshold_band_boundary_values():
     assert hundred.return_period_band == "100"
     assert hundred.severity_score == 6
     assert hundred.is_flagged is True
+
+
+def test_zero_thresholds_treated_as_unknown():
+    """Zero-valued return periods are physically impossible and must not
+    cause positive peak flows to cascade to severity 6."""
+    thresholds = _thresholds(rp_2=0.0, rp_5=0.0, rp_10=0.0, rp_25=0.0, rp_50=0.0, rp_100=0.0)
+    result = classify_peak_flow(5.0, thresholds)
+    # rp_2=0.0 is treated as invalid → falls back to unknown/severity 0
+    assert result.severity_score == 0
+    assert result.return_period_band == "unknown"
+    assert result.is_flagged is False

@@ -101,7 +101,7 @@ class FakeProvider:
         return 0
 
 
-    def iter_bulk_summary_records(self, run_id: str):
+    def iter_bulk_summary_records(self, run_id: str, **kwargs):
         _ = run_id
         for reach_id in ["101", "102", "103", "104", "105", "100"]:
             yield {
@@ -110,6 +110,8 @@ class FakeProvider:
                 "peak_mean_cms": 22.0,
                 "peak_median_cms": 22.0,
                 "peak_max_cms": 22.0,
+                "now_mean_cms": 5.0,
+                "now_max_cms": 5.0,
                 "raw_payload_json": {"source": "fake_summary"},
             }
 
@@ -125,6 +127,8 @@ class FakeProvider:
             peak_mean_cms=float(record.get("peak_mean_cms", 0) or 0),
             peak_median_cms=float(record.get("peak_median_cms", 0) or 0),
             peak_max_cms=float(record.get("peak_max_cms", 0) or 0),
+            now_mean_cms=float(record.get("now_mean_cms") or 0) if record.get("now_mean_cms") is not None else None,
+            now_max_cms=float(record.get("now_max_cms") or 0) if record.get("now_max_cms") is not None else None,
             raw_payload_json=dict(record.get("raw_payload_json") or {}),
         )
 

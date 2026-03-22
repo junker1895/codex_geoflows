@@ -100,8 +100,9 @@ def test_import_local_geoglows_return_periods_upsert_and_classify(db_session, tm
     detail = service.get_reach_detail("geoglows", "760021611", run_id=run.run_id)
 
     assert detail.summary is not None
-    assert detail.summary.return_period_band == "10"
-    assert detail.summary.severity_score == 3
+    # peak_mean=7.2 (from flow_avg), rp_5=6, rp_10=8 → band "5"
+    assert detail.summary.return_period_band == "5"
+    assert detail.summary.severity_score == 2
     assert detail.summary.is_flagged is True
 
 
@@ -154,8 +155,9 @@ def test_import_geoglows_return_periods_zarr_upsert_and_classify(db_session, mon
     detail = service.get_reach_detail("geoglows", "760021611", run_id=run.run_id)
 
     assert detail.summary is not None
-    assert detail.summary.return_period_band == "10"
-    assert detail.summary.severity_score == 3
+    # peak_mean=7.2 (from flow_avg), rp_5=6, rp_10=8 → band "5"
+    assert detail.summary.return_period_band == "5"
+    assert detail.summary.severity_score == 2
     assert detail.summary.is_flagged is True
 
 
@@ -615,6 +617,36 @@ def test_prepare_bulk_summaries_classifies_from_return_periods(db_session, tmp_p
     assert summary.return_period_band == "5"
     assert summary.severity_score == 2
     assert summary.is_flagged is True
+
+
+def test_ingest_forecast_summaries_reclassifies_with_current_return_periods(db_session, tmp_path):
+    """Severity scores must reflect current return periods at ingest time,
+    not stale values baked into the artifact."""
+    from app.forecast.schemas import ReturnPeriodSchema
+
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    # FakeProvider RPs: rp_2=10, rp_5=20, rp_10=30; peak=22.0 → severity 2
+    service.ingest_return_periods("geoglows", ["100"])
+    service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+
+    # Now update return periods so peak=22.0 falls below rp_2
+    updated_rp = ReturnPeriodSchema(
+        provider="geoglows", provider_reach_id="100",
+        rp_2=25, rp_5=50, rp_10=75, rp_25=100, rp_50=150, rp_100=200,
+    )
+    service.repo.upsert_return_periods([updated_rp])
+    db_session.commit()
+
+    # Ingest should re-classify with the updated return periods
+    service.ingest_forecast_summaries("geoglows", run.run_id, replace_existing=True)
+    summary = service.repo.get_summary("geoglows", run.run_id, "100")
+
+    assert summary is not None
+    assert summary.severity_score == 0  # peak 22.0 < rp_2 25.0
+    assert summary.return_period_band == "below_2"
+    assert summary.is_flagged is False
 
 
 def test_reach_detail_falls_back_to_provider_on_demand_when_no_timeseries(db_session):

@@ -1,7 +1,8 @@
 import logging
 from time import perf_counter
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import orjson
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_forecast_service
@@ -92,6 +93,31 @@ def map_reaches(
     except Exception as exc:
         logger.exception("forecast map_reaches route failed", extra={"provider": provider, "requested_run_id": run_id or "latest", "resolved_run_id": resolved_run_id})
         raise HTTPException(status_code=500, detail="internal server error") from exc
+
+
+@router.get("/map/severity")
+def map_severity(
+    provider: str = Query(...),
+    run_id: str | None = Query(default=None),
+    min_severity_score: int = Query(default=1, ge=1, le=6),
+    limit: int | None = Query(default=None, ge=1),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Ultra-compact severity payload for map colouring: ``{run_id, severity: {reach_id: score}}``."""
+    started = perf_counter()
+    service = get_forecast_service(db)
+    resolved_run_id, severity = service.get_severity_map(provider, run_id, min_severity_score, limit=limit)
+    logger.info(
+        "forecast map_severity route completed",
+        extra={
+            "provider": provider,
+            "run_id": resolved_run_id,
+            "count": len(severity),
+            "elapsed_seconds": round(perf_counter() - started, 6),
+        },
+    )
+    payload = orjson.dumps({"run_id": resolved_run_id, "severity": severity})
+    return Response(content=payload, media_type="application/json")
 
 
 @router.get("/summary", response_model=list[ReachSummarySchema])

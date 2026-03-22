@@ -81,6 +81,8 @@ class ForecastProviderReachSummary(Base):
     __tablename__ = "forecast_provider_reach_summaries"
     __table_args__ = (
         UniqueConstraint("provider", "run_id", "provider_reach_id", name="uq_summary_provider_run_reach"),
+        # Covering index created via raw SQL in migration 0003 (includes DESC + INCLUDE clause).
+        # Index("ix_summary_provider_run_severity", ...) is managed by Alembic, not declared here.
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -92,6 +94,8 @@ class ForecastProviderReachSummary(Base):
     peak_mean_cms: Mapped[float | None] = mapped_column(Float, nullable=True)
     peak_median_cms: Mapped[float | None] = mapped_column(Float, nullable=True)
     peak_max_cms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    now_mean_cms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    now_max_cms: Mapped[float | None] = mapped_column(Float, nullable=True)
     return_period_band: Mapped[str | None] = mapped_column(String(16), nullable=True)
     severity_score: Mapped[int] = mapped_column(Integer, default=0)
     is_flagged: Mapped[bool] = mapped_column(Boolean, default=False)

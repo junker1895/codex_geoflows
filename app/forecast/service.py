@@ -539,6 +539,13 @@ class ForecastService:
             )
             stats = {"raw_records_seen": 0, "normalized_rows_written": 0, "rows_dropped_invalid": 0, "rows_dropped_filtered": 0}
 
+            # Batch-load all return periods upfront instead of N+1 queries
+            rp_lookup = self.repo.get_all_return_periods(provider)
+            logger.info(
+                "loaded return periods for classification",
+                extra={"provider": provider, "return_period_count": len(rp_lookup)},
+            )
+
             def _summary_rows() -> Iterator[BulkForecastSummaryArtifactRowSchema]:
                 for record in adapter.iter_bulk_summary_records(
                     resolved_run.run_id,
@@ -555,9 +562,9 @@ class ForecastService:
                     if supported_reaches is not None and row.provider_reach_id not in supported_reaches:
                         stats["rows_dropped_filtered"] += 1
                         continue
-                    rp_model = self.repo.get_return_period(provider, row.provider_reach_id)
+                    rp_model = rp_lookup.get(row.provider_reach_id)
                     rp_schema = None if rp_model is None else to_return_period_schema(rp_model)
-                    cls = classify_peak_flow(row.peak_max_cms, rp_schema)
+                    cls = classify_peak_flow(row.peak_mean_cms, rp_schema)
                     row.return_period_band = cls.return_period_band
                     row.severity_score = cls.severity_score
                     row.is_flagged = cls.is_flagged
@@ -653,7 +660,19 @@ class ForecastService:
                 replaced_rows = self.repo.delete_summaries_for_run(provider, resolved_run.run_id)
                 self.db.commit()
 
+            # Re-classify with current return periods instead of trusting
+            # artifact severity scores, which may be stale if return periods
+            # were updated after the artifact was prepared.
+            rp_lookup = self.repo.get_all_return_periods(provider)
+            logger.info(
+                "loaded return periods for ingest re-classification",
+                extra={"provider": provider, "return_period_count": len(rp_lookup)},
+            )
+
             for item in self.artifacts.iter_summary_rows(provider, resolved_run.run_id):
+                rp_model = rp_lookup.get(str(item.provider_reach_id))
+                rp_schema = None if rp_model is None else to_return_period_schema(rp_model)
+                cls = classify_peak_flow(item.peak_mean_cms, rp_schema)
                 batch.append(
                     ReachSummarySchema(
                         provider=str(item.provider),
@@ -663,9 +682,11 @@ class ForecastService:
                         peak_mean_cms=item.peak_mean_cms,
                         peak_median_cms=item.peak_median_cms,
                         peak_max_cms=item.peak_max_cms,
-                        return_period_band=item.return_period_band,
-                        severity_score=int(item.severity_score),
-                        is_flagged=bool(item.is_flagged),
+                        now_mean_cms=item.now_mean_cms,
+                        now_max_cms=item.now_max_cms,
+                        return_period_band=cls.return_period_band,
+                        severity_score=cls.severity_score,
+                        is_flagged=cls.is_flagged,
                         metadata_json=item.raw_payload_json,
                     )
                 )
@@ -674,6 +695,7 @@ class ForecastService:
                     chunk_rows = self.repo.upsert_summaries(batch)
                     total += chunk_rows
                     self.db.commit()
+                    self.db.expire_all()
                     logger.info(
                         "summary ingest chunk complete",
                         extra={
@@ -691,6 +713,7 @@ class ForecastService:
                 chunk_rows = self.repo.upsert_summaries(batch)
                 total += chunk_rows
                 self.db.commit()
+                self.db.expire_all()
 
             ops = self._run_ops_metadata(run_row)
             ingest_meta = dict(ops.get("summary_ingest", {}))
@@ -1018,7 +1041,7 @@ class ForecastService:
             raise
 
     def get_latest_run(self, provider: str) -> ForecastRunSchema | None:
-        return self.resolve_requested_run_id_local(provider, "latest", require_existing=False)
+        return self.resolve_requested_run_id_local(provider, "latest", require_existing=False, require_has_data=True)
 
     def get_reach_detail(
         self, provider: str, provider_reach_id: str, run_id: str | None = None, timeseries_limit: int | None = None
@@ -1086,7 +1109,7 @@ class ForecastService:
             provider,
             self._require_concrete_run_id(run.run_id),
             severity_min=severity_min,
-            limit=limit or self.settings.forecast_summary_default_limit,
+            limit=limit,
         )
         return [to_summary_schema(x) for x in rows]
 
@@ -1136,7 +1159,7 @@ class ForecastService:
             run_id=self._require_concrete_run_id(run.run_id),
             flagged_only=flagged_only,
             min_severity_score=min_severity_score,
-            limit=limit or self.settings.forecast_summary_default_limit,
+            limit=limit,
         )
         data = [to_map_summary_schema(x) for x in rows]
         summary_query_seconds = perf_counter() - t1
@@ -1163,6 +1186,22 @@ class ForecastService:
                 ),
             ),
         )
+
+    def get_severity_map(
+        self,
+        provider: str,
+        run_id: str | None = None,
+        min_severity_score: int = 1,
+        limit: int | None = None,
+    ) -> tuple[str, dict[str, int]]:
+        """Return (resolved_run_id, {reach_id: severity}) – ultra-compact payload for map colouring."""
+        self._get_provider(provider)
+        run = self.resolve_requested_run_id_local(provider, run_id or "latest", require_existing=False, require_has_data=True)
+        if not run:
+            return ("", {})
+        concrete = self._require_concrete_run_id(run.run_id)
+        data = self.repo.get_severity_map(provider, concrete, min_severity_score=min_severity_score, limit=limit)
+        return (concrete, data)
 
     def get_provider_health(self, provider: str, refresh_upstream: bool = False) -> ProviderHealthResponse:
         started = perf_counter()
@@ -1413,9 +1452,9 @@ class ForecastService:
         return response
 
     def resolve_requested_run_id_local(
-        self, provider: str, requested_run_id: str, require_existing: bool = True
+        self, provider: str, requested_run_id: str, require_existing: bool = True, require_has_data: bool = False
     ) -> ForecastRunSchema | None:
-        return self._resolve_run_local(provider, requested_run_id, require_existing=require_existing)
+        return self._resolve_run_local(provider, requested_run_id, require_existing=require_existing, require_has_data=require_has_data)
 
     def resolve_requested_run_id(
         self, provider: str, requested_run_id: str, require_existing: bool = True
@@ -1423,10 +1462,10 @@ class ForecastService:
         return self._resolve_run(provider, requested_run_id, require_existing=require_existing)
 
     def _resolve_run_local(
-        self, provider: str, run_id: str, require_existing: bool = True
+        self, provider: str, run_id: str, require_existing: bool = True, require_has_data: bool = False
     ) -> ForecastRunSchema | None:
         if run_id == "latest":
-            latest = self.repo.get_latest_run(provider)
+            latest = self.repo.get_latest_run(provider, require_has_data=require_has_data)
             if latest is None:
                 if require_existing:
                     raise ValueError(f"Run 'latest' not found for provider '{provider}'")
@@ -1487,6 +1526,8 @@ def to_map_summary_schema(row: models.ForecastProviderReachSummary) -> MapReachS
         peak_mean_cms=row.peak_mean_cms,
         peak_median_cms=row.peak_median_cms,
         peak_max_cms=row.peak_max_cms,
+        now_mean_cms=row.now_mean_cms,
+        now_max_cms=row.now_max_cms,
         return_period_band=row.return_period_band,
         severity_score=row.severity_score,
         is_flagged=row.is_flagged,
