@@ -20,6 +20,7 @@ dependencies = [
   "zarr>=2.18.2",
   "s3fs>=2024.6.0",
   "pyarrow>=17.0.0",
+  "orjson>=3.10.0",
 ]
 
 

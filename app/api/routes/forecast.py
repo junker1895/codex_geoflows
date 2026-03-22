@@ -1,7 +1,8 @@
 import logging
 from time import perf_counter
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import orjson
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_forecast_service
@@ -100,7 +101,7 @@ def map_severity(
     run_id: str | None = Query(default=None),
     min_severity_score: int = Query(default=1, ge=1, le=6),
     db: Session = Depends(get_db_session),
-) -> dict:
+) -> Response:
     """Ultra-compact severity payload for map colouring: ``{run_id, severity: {reach_id: score}}``."""
     started = perf_counter()
     service = get_forecast_service(db)
@@ -114,7 +115,8 @@ def map_severity(
             "elapsed_seconds": round(perf_counter() - started, 6),
         },
     )
-    return {"run_id": resolved_run_id, "severity": severity}
+    payload = orjson.dumps({"run_id": resolved_run_id, "severity": severity})
+    return Response(content=payload, media_type="application/json")
 
 
 @router.get("/summary", response_model=list[ReachSummarySchema])
