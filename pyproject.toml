@@ -36,6 +36,9 @@ dev = [
   "ruff>=0.5.5",
 ]
 
+[project.scripts]
+geoflows = "app.cli:cli"
+
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
