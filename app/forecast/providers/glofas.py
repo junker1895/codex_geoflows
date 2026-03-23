@@ -8,6 +8,7 @@ GeoGloWS reach IDs (for display on the same PMTiles river network).
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -291,6 +292,96 @@ class GlofasForecastProvider(ForecastProviderAdapter):
         )
         return str(dest)
 
+    def iter_raw_bulk_records(self, run_id: str, staged_raw_path: str) -> Iterator[dict]:
+        """Iterate over all crosswalk reaches and yield per-reach/per-timestep records from the GRIB."""
+        import numpy as np
+
+        grib_path = Path(staged_raw_path)
+        if not grib_path.exists():
+            raise ProviderOperationalError(f"GloFAS GRIB not found: {staged_raw_path}")
+
+        crosswalk = self._load_all_crosswalk()
+        if not crosswalk:
+            logger.warning("No crosswalk entries found for GloFAS — nothing to iterate")
+            return
+
+        datasets = self._open_grib_datasets(str(grib_path))
+
+        for reach_id_str, (lat, lon) in crosswalk.items():
+            for ds in datasets:
+                try:
+                    cell = ds.sel(latitude=lat, longitude=lon, method="nearest")
+                except Exception:
+                    continue
+
+                discharge_var = self._find_discharge_var(ds)
+                if discharge_var is None:
+                    continue
+
+                cell_data = cell[discharge_var]
+
+                time_dim = "time" if "time" in cell_data.dims else "step"
+                if time_dim not in cell_data.dims:
+                    continue
+
+                times = cell_data[time_dim].values
+
+                ensemble_dim = None
+                for dim in cell_data.dims:
+                    if dim not in (time_dim, "latitude", "longitude"):
+                        ensemble_dim = dim
+                        break
+
+                for t_idx, t_val in enumerate(times):
+                    dt = self._to_utc_datetime(t_val, ds)
+
+                    if ensemble_dim and ensemble_dim in cell_data.dims:
+                        members = cell_data.isel(**{time_dim: t_idx}).values
+                        members = members[~np.isnan(members)]
+                        if len(members) == 0:
+                            continue
+                        yield {
+                            "provider_reach_id": reach_id_str,
+                            "forecast_time_utc": dt,
+                            "flow_mean_cms": _safe_float(np.mean(members)),
+                            "flow_median_cms": _safe_float(np.median(members)),
+                            "flow_p25_cms": _safe_float(np.percentile(members, 25)),
+                            "flow_p75_cms": _safe_float(np.percentile(members, 75)),
+                            "flow_max_cms": _safe_float(np.max(members)),
+                        }
+                    else:
+                        val = float(cell_data.isel(**{time_dim: t_idx}).values)
+                        if val != val:  # NaN
+                            continue
+                        yield {
+                            "provider_reach_id": reach_id_str,
+                            "forecast_time_utc": dt,
+                            "flow_mean_cms": _safe_float(val),
+                        }
+
+    def normalize_bulk_record(self, run_id: str, record: dict) -> BulkForecastArtifactRowSchema | None:
+        from app.forecast.schemas import BulkForecastArtifactRowSchema
+
+        reach_id = str(record.get("provider_reach_id", "")).strip()
+        if not reach_id:
+            return None
+        dt = record.get("forecast_time_utc")
+        if dt is None:
+            return None
+
+        return BulkForecastArtifactRowSchema(
+            provider=self.get_provider_name(),
+            run_id=run_id,
+            provider_reach_id=reach_id,
+            forecast_time_utc=dt,
+            flow_mean_cms=record.get("flow_mean_cms"),
+            flow_median_cms=record.get("flow_median_cms"),
+            flow_p25_cms=record.get("flow_p25_cms"),
+            flow_p75_cms=record.get("flow_p75_cms"),
+            flow_max_cms=record.get("flow_max_cms"),
+            raw_payload_json={"source": "glofas_grib_bulk"},
+        )
+
     def cleanup_old_raw_staging(self) -> int:
         keep_latest = self.settings.glofas_bulk_raw_retention_runs
         if keep_latest < 1:
@@ -312,6 +403,29 @@ class GlofasForecastProvider(ForecastProviderAdapter):
 
     def _staged_grib_path(self, run_id: str) -> Path:
         return Path(self.settings.glofas_bulk_staging_dir) / f"{run_id}.grib"
+
+    def _load_all_crosswalk(self) -> dict[str, tuple[float, float]]:
+        """Load all crosswalk entries for GloFAS.
+
+        Returns a dict mapping reach_id (str) -> (grid_lat, grid_lon).
+        """
+        from sqlalchemy import select
+
+        from app.core.database import SessionLocal
+        from app.db.models import ReachGridCrosswalk
+
+        db = SessionLocal()
+        try:
+            rows = db.execute(
+                select(
+                    ReachGridCrosswalk.reach_id,
+                    ReachGridCrosswalk.grid_lat,
+                    ReachGridCrosswalk.grid_lon,
+                ).where(ReachGridCrosswalk.target_provider == "glofas")
+            ).all()
+            return {r.reach_id: (r.grid_lat, r.grid_lon) for r in rows}
+        finally:
+            db.close()
 
     def _load_crosswalk_for_reaches(
         self, reach_ids: list[str | int]
