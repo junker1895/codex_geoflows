@@ -431,7 +431,7 @@ _NETCDF_RP_MAP: dict[str, str] = {
 def iter_glofas_return_periods_from_netcdf(
     *,
     netcdf_dir: str,
-    batch_size: int = 5000,
+    batch_size: int = 50000,
 ) -> Iterator[list[ReturnPeriodSchema]]:
     """Import pre-computed GloFAS v4 flood thresholds from official NetCDF files.
 
@@ -439,11 +439,8 @@ def iter_glofas_return_periods_from_netcdf(
     combines them into a single threshold grid, and maps grid cells to
     GeoGloWS reach IDs via the crosswalk table.
 
-    These are the official files published on the ECMWF/Copernicus Confluence:
-    https://confluence.ecmwf.int/display/CEMS/GloFAS+Flood+Thresholds
-
-    Each file contains one variable on a 0.05° global grid with the discharge
-    threshold for the corresponding return period.
+    Uses fully vectorized numpy lookups (searchsorted) instead of per-row
+    xarray .sel() calls, making the import ~100x faster.
     """
     import numpy as np
     import xarray as xr
@@ -453,7 +450,10 @@ def iter_glofas_return_periods_from_netcdf(
         raise ForecastValidationError(f"NetCDF directory not found: {netcdf_dir}")
 
     # Discover and load threshold files for the return periods we care about
-    loaded_rps: dict[str, xr.DataArray] = {}
+    rp_arrays: dict[str, np.ndarray] = {}  # schema_field -> 2D numpy array
+    grid_lats: np.ndarray | None = None
+    grid_lons: np.ndarray | None = None
+
     for rp_label, schema_field in _NETCDF_RP_MAP.items():
         pattern = f"flood_threshold_glofas_v4_rl_{rp_label}.nc"
         matches = list(nc_dir.glob(pattern))
@@ -462,33 +462,34 @@ def iter_glofas_return_periods_from_netcdf(
             continue
         nc_path = matches[0]
         ds = xr.open_dataset(str(nc_path))
-        # The threshold variable name varies; pick the first non-coord variable
         data_vars = [v for v in ds.data_vars if v not in {"lat", "lon", "latitude", "longitude"}]
         if not data_vars:
             logger.warning("No data variable found in %s", nc_path)
             ds.close()
             continue
         var_name = data_vars[0]
-        da = ds[var_name]
-        # Squeeze out any singleton dimensions (e.g. time or step)
-        da = da.squeeze(drop=True)
-        loaded_rps[schema_field] = da
+        da = ds[var_name].squeeze(drop=True)
+
+        # Load grid coordinates once from the first file
+        if grid_lats is None:
+            lat_coord = "latitude" if "latitude" in da.dims else "lat"
+            lon_coord = "longitude" if "longitude" in da.dims else "lon"
+            grid_lats = da[lat_coord].values.astype(np.float64)
+            grid_lons = da[lon_coord].values.astype(np.float64)
+
+        # Load entire array into memory (each is ~3000x7200 float32 ≈ 82 MB)
+        rp_arrays[schema_field] = da.values
         logger.info(
             "Loaded GloFAS threshold file: %s → %s (var=%s, shape=%s)",
             nc_path.name, schema_field, var_name, da.shape,
         )
-        # Don't close ds yet — we need the DataArray alive
+        ds.close()
 
-    if not loaded_rps:
+    if not rp_arrays:
         raise ForecastValidationError(
             f"No GloFAS v4 threshold NetCDF files found in {netcdf_dir}. "
             "Expected files like flood_threshold_glofas_v4_rl_2.0.nc"
         )
-
-    # Use the first loaded DataArray to get lat/lon coordinates
-    ref_da = next(iter(loaded_rps.values()))
-    lat_coord = "latitude" if "latitude" in ref_da.dims else "lat"
-    lon_coord = "longitude" if "longitude" in ref_da.dims else "lon"
 
     # Load crosswalk
     crosswalk = _load_full_crosswalk()
@@ -500,64 +501,98 @@ def iter_glofas_return_periods_from_netcdf(
     logger.info(
         "Matching %d crosswalk entries to GloFAS threshold grid (%d RPs loaded)",
         len(crosswalk),
-        len(loaded_rps),
+        len(rp_arrays),
     )
 
-    batch: list[ReturnPeriodSchema] = []
-    matched = 0
-    unmatched = 0
+    # Extract all reach IDs and their grid coordinates into arrays
+    reach_ids = list(crosswalk.keys())
+    cw_lats = np.array([crosswalk[r][0] for r in reach_ids], dtype=np.float64)
+    cw_lons = np.array([crosswalk[r][1] for r in reach_ids], dtype=np.float64)
 
-    for reach_id, (grid_lat, grid_lon) in crosswalk.items():
-        thresholds: dict[str, float | None] = {
-            "rp_2": None, "rp_5": None, "rp_10": None,
-            "rp_25": None, "rp_50": None, "rp_100": None,
-        }
-        any_valid = False
+    # Vectorized nearest-neighbor: find closest grid index for each crosswalk entry.
+    # GloFAS grids may be ascending or descending in latitude.
+    lat_ascending = grid_lats[-1] > grid_lats[0]
+    if lat_ascending:
+        lat_indices = np.searchsorted(grid_lats, cw_lats, side="left")
+    else:
+        # Flip for searchsorted (requires ascending), then un-flip indices
+        flipped = grid_lats[::-1]
+        lat_indices = len(grid_lats) - 1 - np.searchsorted(flipped, cw_lats, side="left")
 
-        for schema_field, da in loaded_rps.items():
-            try:
-                val = float(
-                    da.sel(
-                        **{lat_coord: grid_lat, lon_coord: grid_lon},
-                        method="nearest",
-                    ).values
+    lon_ascending = grid_lons[-1] > grid_lons[0]
+    if lon_ascending:
+        lon_indices = np.searchsorted(grid_lons, cw_lons, side="left")
+    else:
+        flipped = grid_lons[::-1]
+        lon_indices = len(grid_lons) - 1 - np.searchsorted(flipped, cw_lons, side="left")
+
+    # Clamp to valid range
+    lat_indices = np.clip(lat_indices, 0, len(grid_lats) - 1)
+    lon_indices = np.clip(lon_indices, 0, len(grid_lons) - 1)
+
+    # Refine: check if the adjacent cell is actually closer
+    for indices, grid_coords, query_coords in [
+        (lat_indices, grid_lats, cw_lats),
+        (lon_indices, grid_lons, cw_lons),
+    ]:
+        alt = np.clip(indices - 1, 0, len(grid_coords) - 1)
+        dist_cur = np.abs(grid_coords[indices] - query_coords)
+        dist_alt = np.abs(grid_coords[alt] - query_coords)
+        use_alt = dist_alt < dist_cur
+        indices[use_alt] = alt[use_alt]
+
+    # Extract threshold values for all crosswalk entries at once (vectorized)
+    rp_fields = ["rp_2", "rp_5", "rp_10", "rp_25", "rp_50", "rp_100"]
+    # Build a (N, 6) array of threshold values
+    n = len(reach_ids)
+    all_thresholds = np.full((n, 6), np.nan, dtype=np.float64)
+    rp_field_to_col = {f: i for i, f in enumerate(rp_fields)}
+
+    for schema_field, arr in rp_arrays.items():
+        col = rp_field_to_col[schema_field]
+        all_thresholds[:, col] = arr[lat_indices, lon_indices]
+
+    # Determine which rows have at least one valid (non-NaN, >0) threshold
+    valid_mask = (all_thresholds > 0) & ~np.isnan(all_thresholds)
+    any_valid = valid_mask.any(axis=1)
+
+    matched = int(any_valid.sum())
+    unmatched = n - matched
+    logger.info(
+        "Vectorized grid matching complete: matched=%d, unmatched=%d",
+        matched, unmatched,
+    )
+
+    # Replace invalid values with None-friendly marker
+    all_thresholds[~valid_mask] = np.nan
+    rps_loaded = list(rp_arrays.keys())
+
+    # Yield in batches
+    valid_indices = np.where(any_valid)[0]
+    for start in range(0, len(valid_indices), batch_size):
+        end = min(start + batch_size, len(valid_indices))
+        batch: list[ReturnPeriodSchema] = []
+        for idx in valid_indices[start:end]:
+            vals = all_thresholds[idx]
+            batch.append(
+                ReturnPeriodSchema(
+                    provider="glofas",
+                    provider_reach_id=reach_ids[idx],
+                    rp_2=None if np.isnan(vals[0]) else float(vals[0]),
+                    rp_5=None if np.isnan(vals[1]) else float(vals[1]),
+                    rp_10=None if np.isnan(vals[2]) else float(vals[2]),
+                    rp_25=None if np.isnan(vals[3]) else float(vals[3]),
+                    rp_50=None if np.isnan(vals[4]) else float(vals[4]),
+                    rp_100=None if np.isnan(vals[5]) else float(vals[5]),
+                    metadata_json={
+                        "source": "glofas_v4_threshold_netcdf",
+                        "dir": str(netcdf_dir),
+                        "grid_lat": float(cw_lats[idx]),
+                        "grid_lon": float(cw_lons[idx]),
+                        "rps_loaded": rps_loaded,
+                    },
                 )
-                if not np.isnan(val) and val > 0:
-                    thresholds[schema_field] = val
-                    any_valid = True
-            except Exception:
-                continue
-
-        if not any_valid:
-            unmatched += 1
-            continue
-
-        matched += 1
-        batch.append(
-            ReturnPeriodSchema(
-                provider="glofas",
-                provider_reach_id=reach_id,
-                rp_2=thresholds["rp_2"],
-                rp_5=thresholds["rp_5"],
-                rp_10=thresholds["rp_10"],
-                rp_25=thresholds["rp_25"],
-                rp_50=thresholds["rp_50"],
-                rp_100=thresholds["rp_100"],
-                metadata_json={
-                    "source": "glofas_v4_threshold_netcdf",
-                    "dir": str(netcdf_dir),
-                    "grid_lat": grid_lat,
-                    "grid_lon": grid_lon,
-                    "rps_loaded": list(loaded_rps.keys()),
-                },
             )
-        )
-
-        if len(batch) >= batch_size:
-            yield batch
-            batch = []
-
-    if batch:
         yield batch
 
     logger.info(
