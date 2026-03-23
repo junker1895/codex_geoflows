@@ -295,8 +295,11 @@ class GlofasForecastProvider(ForecastProviderAdapter):
     def iter_raw_bulk_records(self, run_id: str, staged_raw_path: str) -> Iterator[dict]:
         """Iterate over all crosswalk reaches and yield per-reach/per-timestep records from the GRIB.
 
-        Uses vectorized nearest-index lookup so we avoid per-reach xarray .sel() calls.
+        Groups reaches by their nearest grid cell so each cell's data is
+        extracted only once, regardless of how many reaches map to it.
         """
+        from collections import defaultdict
+
         import numpy as np
 
         grib_path = Path(staged_raw_path)
@@ -329,63 +332,77 @@ class GlofasForecastProvider(ForecastProviderAdapter):
                     ensemble_dim = dim
                     break
 
-            # Build grid coordinate arrays for vectorized nearest-index lookup
             grid_lats = ds["latitude"].values
             grid_lons = ds["longitude"].values
 
-            # Precompute nearest grid indices for all crosswalk entries at once
-            reach_ids = list(crosswalk.keys())
-            want_lats = np.array([crosswalk[r][0] for r in reach_ids])
-            want_lons = np.array([crosswalk[r][1] for r in reach_ids])
-            lat_indices = np.abs(grid_lats[np.newaxis, :] - want_lats[:, np.newaxis]).argmin(axis=1)
-            lon_indices = np.abs(grid_lons[np.newaxis, :] - want_lons[:, np.newaxis]).argmin(axis=1)
+            # Compute nearest grid index per reach using searchsorted
+            # (O(N log G) instead of O(N*G) broadcasting)
+            lat_sorted_idx = np.argsort(grid_lats)
+            lon_sorted_idx = np.argsort(grid_lons)
+            sorted_lats = grid_lats[lat_sorted_idx]
+            sorted_lons = grid_lons[lon_sorted_idx]
 
-            # Load the full data array into memory once
-            all_data = data_arr.values  # shape varies by dims
+            # Group reaches by their nearest (lat_idx, lon_idx) grid cell
+            cell_to_reaches: dict[tuple[int, int], list[str]] = defaultdict(list)
+            for reach_id, (want_lat, want_lon) in crosswalk.items():
+                li = lat_sorted_idx[min(np.searchsorted(sorted_lats, want_lat), len(sorted_lats) - 1)]
+                # Refine: check neighbor
+                li_s = np.searchsorted(sorted_lats, want_lat)
+                if li_s > 0 and (li_s >= len(sorted_lats) or abs(sorted_lats[li_s - 1] - want_lat) < abs(sorted_lats[li_s] - want_lat)):
+                    li = lat_sorted_idx[li_s - 1]
+                else:
+                    li = lat_sorted_idx[min(li_s, len(sorted_lats) - 1)]
+
+                lo_s = np.searchsorted(sorted_lons, want_lon)
+                if lo_s > 0 and (lo_s >= len(sorted_lons) or abs(sorted_lons[lo_s - 1] - want_lon) < abs(sorted_lons[lo_s] - want_lon)):
+                    lo = lon_sorted_idx[lo_s - 1]
+                else:
+                    lo = lon_sorted_idx[min(lo_s, len(sorted_lons) - 1)]
+
+                cell_to_reaches[(int(li), int(lo))].append(reach_id)
+
+            logger.info(
+                "Grouped %d reaches into %d unique grid cells",
+                len(crosswalk), len(cell_to_reaches),
+            )
+
+            # Load full data array into memory once
+            all_data = data_arr.values
             times = ds[time_dim].values
 
             # Resolve dimension order for indexing
             dim_names = list(data_arr.dims)
             lat_axis = dim_names.index("latitude")
             lon_axis = dim_names.index("longitude")
-            time_axis = dim_names.index(time_dim)
-            ens_axis = dim_names.index(ensemble_dim) if ensemble_dim and ensemble_dim in dim_names else None
+            remaining_dims = [d for i, d in enumerate(dim_names) if i not in (lat_axis, lon_axis)]
+            time_pos = remaining_dims.index(time_dim)
+            has_ensemble = ensemble_dim is not None and ensemble_dim in dim_names
 
             logger.info(
-                "Processing dataset: shape=%s, dims=%s, reaches=%d, timesteps=%d",
-                all_data.shape, dim_names, len(reach_ids), len(times),
+                "Processing dataset: shape=%s, dims=%s, cells=%d, timesteps=%d",
+                all_data.shape, dim_names, len(cell_to_reaches), len(times),
             )
 
-            for reach_idx, reach_id_str in enumerate(reach_ids):
-                li = lat_indices[reach_idx]
-                lo = lon_indices[reach_idx]
+            # Precompute datetimes for all timesteps
+            datetimes = [self._to_utc_datetime(t, ds) for t in times]
 
-                # Build index tuple to extract this reach's full timeseries
+            for (li, lo), reach_id_list in cell_to_reaches.items():
+                # Extract this cell's full timeseries (once per cell)
                 idx = [slice(None)] * len(dim_names)
                 idx[lat_axis] = li
                 idx[lon_axis] = lo
                 cell_data = all_data[tuple(idx)]
-                # cell_data shape: (n_times,) or (n_times, n_ensemble) or similar
 
-                for t_idx, t_val in enumerate(times):
-                    dt = self._to_utc_datetime(t_val, ds)
+                for t_idx, dt in enumerate(datetimes):
+                    t_slice = [slice(None)] * len(remaining_dims)
+                    t_slice[time_pos] = t_idx
 
-                    if ens_axis is not None:
-                        # Determine which axis in cell_data corresponds to ensemble
-                        # (after removing lat/lon axes via indexing)
-                        remaining_dims = [d for i, d in enumerate(dim_names) if i not in (lat_axis, lon_axis)]
-                        ens_pos = remaining_dims.index(ensemble_dim)
-                        time_pos = remaining_dims.index(time_dim)
-
-                        t_idx_tuple = [slice(None)] * len(remaining_dims)
-                        t_idx_tuple[time_pos] = t_idx
-                        members = cell_data[tuple(t_idx_tuple)]
-                        members = np.asarray(members).ravel()
+                    if has_ensemble:
+                        members = np.asarray(cell_data[tuple(t_slice)]).ravel()
                         members = members[~np.isnan(members)]
                         if len(members) == 0:
                             continue
-                        yield {
-                            "provider_reach_id": reach_id_str,
+                        record = {
                             "forecast_time_utc": dt,
                             "flow_mean_cms": _safe_float(np.mean(members)),
                             "flow_median_cms": _safe_float(np.median(members)),
@@ -394,18 +411,16 @@ class GlofasForecastProvider(ForecastProviderAdapter):
                             "flow_max_cms": _safe_float(np.max(members)),
                         }
                     else:
-                        remaining_dims = [d for i, d in enumerate(dim_names) if i not in (lat_axis, lon_axis)]
-                        time_pos = remaining_dims.index(time_dim)
-                        t_idx_tuple = [slice(None)] * len(remaining_dims)
-                        t_idx_tuple[time_pos] = t_idx
-                        val = float(cell_data[tuple(t_idx_tuple)])
+                        val = float(cell_data[tuple(t_slice)])
                         if val != val:  # NaN
                             continue
-                        yield {
-                            "provider_reach_id": reach_id_str,
+                        record = {
                             "forecast_time_utc": dt,
                             "flow_mean_cms": _safe_float(val),
                         }
+
+                    for reach_id_str in reach_id_list:
+                        yield {**record, "provider_reach_id": reach_id_str}
 
     def normalize_bulk_record(self, run_id: str, record: dict) -> BulkForecastArtifactRowSchema | None:
         from app.forecast.schemas import BulkForecastArtifactRowSchema
