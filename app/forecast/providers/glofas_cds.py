@@ -127,13 +127,26 @@ def open_glofas_grib(path: str):
 def open_glofas_grib_ensemble(path: str):
     """Open a GloFAS ensemble GRIB as a list of xarray Datasets.
 
-    GRIB files with multiple product types (control + perturbed) may need
-    to be opened as separate datasets via cfgrib's backend_kwargs.
+    GloFAS GRIB files contain multiple product types (control forecast 'cf'
+    and perturbed forecast 'pf') that must be opened separately using
+    cfgrib filter_by_keys.
     """
     import xarray as xr
 
-    try:
-        return xr.open_datasets(path, engine="cfgrib")
-    except Exception:
-        # Fallback: open as single dataset
-        return [xr.open_dataset(path, engine="cfgrib")]
+    datasets: list = []
+    for data_type in ("cf", "pf"):
+        try:
+            ds = xr.open_dataset(
+                path,
+                engine="cfgrib",
+                backend_kwargs={"filter_by_keys": {"dataType": data_type}},
+            )
+            datasets.append(ds)
+        except Exception:
+            logger.debug("No '%s' messages in GRIB %s", data_type, path)
+
+    if datasets:
+        return datasets
+
+    # Fallback: try opening without filters (single-type GRIB)
+    return [xr.open_dataset(path, engine="cfgrib")]
