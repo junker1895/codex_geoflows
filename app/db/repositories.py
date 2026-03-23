@@ -13,6 +13,19 @@ from app.forecast.schemas import (
 )
 
 
+# PostgreSQL supports at most 32,767 bind parameters per statement.
+# We leave headroom and cap at 30,000 to be safe.
+_PG_MAX_PARAMS = 30_000
+
+
+def _chunked(values: list[dict], cols: int) -> list[list[dict]]:
+    """Split *values* into sub-lists that fit within the PG parameter limit."""
+    if cols <= 0:
+        return [values] if values else []
+    chunk_size = max(1, _PG_MAX_PARAMS // cols)
+    return [values[i : i + chunk_size] for i in range(0, len(values), chunk_size)]
+
+
 class ForecastRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -52,12 +65,13 @@ class ForecastRepository:
         if not values:
             return 0
         update_cols = {"rp_2", "rp_5", "rp_10", "rp_25", "rp_50", "rp_100", "metadata_json"}
-        stmt = pg_insert(models.ForecastProviderReturnPeriod).values(values)
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_rp_provider_reach",
-            set_={col: stmt.excluded[col] for col in update_cols},
-        )
-        self.db.execute(stmt)
+        for chunk in _chunked(values, cols=9):
+            stmt = pg_insert(models.ForecastProviderReturnPeriod).values(chunk)
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_rp_provider_reach",
+                set_={col: stmt.excluded[col] for col in update_cols},
+            )
+            self.db.execute(stmt)
         self.db.flush()
         return len(values)
 
@@ -83,12 +97,13 @@ class ForecastRepository:
             "flow_mean_cms", "flow_median_cms", "flow_p25_cms",
             "flow_p75_cms", "flow_max_cms", "raw_payload_json",
         }
-        stmt = pg_insert(models.ForecastProviderReachTimeseries).values(values)
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_ts_provider_run_reach_time",
-            set_={col: stmt.excluded[col] for col in update_cols},
-        )
-        self.db.execute(stmt)
+        for chunk in _chunked(values, cols=10):
+            stmt = pg_insert(models.ForecastProviderReachTimeseries).values(chunk)
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_ts_provider_run_reach_time",
+                set_={col: stmt.excluded[col] for col in update_cols},
+            )
+            self.db.execute(stmt)
         self.db.flush()
         return len(values)
 
@@ -120,12 +135,13 @@ class ForecastRepository:
             "now_mean_cms", "now_max_cms",
             "return_period_band", "severity_score", "is_flagged", "metadata_json",
         }
-        stmt = pg_insert(models.ForecastProviderReachSummary).values(values)
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_summary_provider_run_reach",
-            set_={col: stmt.excluded[col] for col in update_cols},
-        )
-        self.db.execute(stmt)
+        for chunk in _chunked(values, cols=14):
+            stmt = pg_insert(models.ForecastProviderReachSummary).values(chunk)
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_summary_provider_run_reach",
+                set_={col: stmt.excluded[col] for col in update_cols},
+            )
+            self.db.execute(stmt)
         return len(values)
 
 
