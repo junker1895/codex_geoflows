@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     glofas_system_version: str = Field(default="operational", alias="GLOFAS_SYSTEM_VERSION")
     glofas_data_format: str = Field(default="grib", alias="GLOFAS_DATA_FORMAT")
     glofas_bulk_staging_dir: str = Field(default="./data/glofas_raw", alias="GLOFAS_BULK_STAGING_DIR")
+    glofas_bulk_raw_retention_runs: int = Field(default=2, alias="GLOFAS_BULK_RAW_RETENTION_RUNS")
     glofas_grid_resolution: float = Field(default=0.05, alias="GLOFAS_GRID_RESOLUTION")
     glofas_forecast_max_leadtime_hours: int = Field(default=720, alias="GLOFAS_FORECAST_MAX_LEADTIME_HOURS")
     glofas_crosswalk_max_snap_distance_km: float = Field(default=10.0, alias="GLOFAS_CROSSWALK_MAX_SNAP_DISTANCE")

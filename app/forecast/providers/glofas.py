@@ -291,6 +291,21 @@ class GlofasForecastProvider(ForecastProviderAdapter):
         )
         return str(dest)
 
+    def cleanup_old_raw_staging(self) -> int:
+        keep_latest = self.settings.glofas_bulk_raw_retention_runs
+        if keep_latest < 1:
+            return 0
+        staging_dir = Path(self.settings.glofas_bulk_staging_dir)
+        if not staging_dir.exists():
+            return 0
+        files = sorted(staging_dir.glob("*.grib"), key=lambda p: p.stat().st_mtime, reverse=True)
+        removed = 0
+        for path in files[keep_latest:]:
+            logger.info("Removing old GloFAS GRIB: %s", path)
+            path.unlink(missing_ok=True)
+            removed += 1
+        return removed
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
