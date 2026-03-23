@@ -55,6 +55,7 @@ class GlofasForecastProvider(ForecastProviderAdapter):
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._crosswalk_cache: dict[str, tuple[float, float]] | None = None
+        self._supported_reach_filter: set[str] | None = None
 
     def get_provider_name(self) -> str:
         return "glofas"
@@ -443,6 +444,191 @@ class GlofasForecastProvider(ForecastProviderAdapter):
             flow_p75_cms=record.get("flow_p75_cms"),
             flow_max_cms=record.get("flow_max_cms"),
             raw_payload_json={"source": "glofas_grib_bulk"},
+        )
+
+    def set_supported_reach_filter(self, reach_ids: set[str] | set[int] | None) -> None:
+        self._supported_reach_filter = None if reach_ids is None else {str(x).strip() for x in reach_ids}
+
+    def iter_bulk_summary_records(
+        self,
+        run_id: str,
+        *,
+        max_reaches: int | None = None,
+        max_blocks: int | None = None,
+        max_seconds: int | None = None,
+        full_run: bool = False,
+    ) -> Iterator[dict]:
+        """Yield one summary dict per reach from a staged GloFAS GRIB file."""
+        from collections import defaultdict
+
+        import numpy as np
+
+        grib_path = self._staged_grib_path(run_id)
+        if not grib_path.exists():
+            raise ProviderOperationalError(
+                f"GloFAS GRIB not found at {grib_path}. "
+                f"Run 'prepare-bulk-artifact --provider glofas --run-id {run_id}' first."
+            )
+
+        crosswalk = self._load_all_crosswalk()
+        if not crosswalk:
+            logger.warning("No crosswalk entries found for GloFAS — nothing to iterate")
+            return
+
+        supported_reaches = getattr(self, "_supported_reach_filter", None)
+        if supported_reaches is not None:
+            crosswalk = {k: v for k, v in crosswalk.items() if k in supported_reaches}
+            if not crosswalk:
+                logger.warning("No crosswalk entries match the supported reach filter")
+                return
+
+        logger.info("Loaded %d crosswalk entries for bulk summary iteration", len(crosswalk))
+        datasets = self._open_grib_datasets(str(grib_path))
+
+        start = datetime.now(UTC)
+        emitted = 0
+
+        for ds in datasets:
+            discharge_var = self._find_discharge_var(ds)
+            if discharge_var is None:
+                continue
+
+            data_arr = ds[discharge_var]
+            time_dim = "time" if "time" in data_arr.dims else "step"
+            if time_dim not in data_arr.dims:
+                continue
+
+            ensemble_dim = None
+            for dim in data_arr.dims:
+                if dim not in (time_dim, "latitude", "longitude"):
+                    ensemble_dim = dim
+                    break
+
+            grid_lats = ds["latitude"].values
+            grid_lons = ds["longitude"].values
+            lat_sorted_idx = np.argsort(grid_lats)
+            lon_sorted_idx = np.argsort(grid_lons)
+            sorted_lats = grid_lats[lat_sorted_idx]
+            sorted_lons = grid_lons[lon_sorted_idx]
+
+            cell_to_reaches: dict[tuple[int, int], list[str]] = defaultdict(list)
+            for reach_id, (want_lat, want_lon) in crosswalk.items():
+                li_s = np.searchsorted(sorted_lats, want_lat)
+                if li_s > 0 and (li_s >= len(sorted_lats) or abs(sorted_lats[li_s - 1] - want_lat) < abs(sorted_lats[li_s] - want_lat)):
+                    li = lat_sorted_idx[li_s - 1]
+                else:
+                    li = lat_sorted_idx[min(li_s, len(sorted_lats) - 1)]
+
+                lo_s = np.searchsorted(sorted_lons, want_lon)
+                if lo_s > 0 and (lo_s >= len(sorted_lons) or abs(sorted_lons[lo_s - 1] - want_lon) < abs(sorted_lons[lo_s] - want_lon)):
+                    lo = lon_sorted_idx[lo_s - 1]
+                else:
+                    lo = lon_sorted_idx[min(lo_s, len(sorted_lons) - 1)]
+
+                cell_to_reaches[(int(li), int(lo))].append(reach_id)
+
+            logger.info(
+                "Grouped %d reaches into %d unique grid cells for summary",
+                len(crosswalk), len(cell_to_reaches),
+            )
+
+            all_data = data_arr.values
+            times = ds[time_dim].values
+            dim_names = list(data_arr.dims)
+            lat_axis = dim_names.index("latitude")
+            lon_axis = dim_names.index("longitude")
+            remaining_dims = [d for i, d in enumerate(dim_names) if i not in (lat_axis, lon_axis)]
+            time_pos = remaining_dims.index(time_dim)
+            has_ensemble = ensemble_dim is not None and ensemble_dim in dim_names
+
+            datetimes = [self._to_utc_datetime(t, ds) for t in times]
+
+            for (li, lo), reach_id_list in cell_to_reaches.items():
+                if max_seconds is not None and (datetime.now(UTC) - start).total_seconds() >= max_seconds:
+                    return
+                if max_reaches is not None and emitted >= max_reaches:
+                    return
+
+                idx = [slice(None)] * len(dim_names)
+                idx[lat_axis] = li
+                idx[lon_axis] = lo
+                cell_data = all_data[tuple(idx)]
+
+                # Build per-timestep mean/max arrays
+                n_times = len(datetimes)
+                mean_series = np.empty(n_times, dtype=np.float32)
+                max_series = np.empty(n_times, dtype=np.float32)
+
+                for t_idx in range(n_times):
+                    t_slice = [slice(None)] * len(remaining_dims)
+                    t_slice[time_pos] = t_idx
+
+                    if has_ensemble:
+                        members = np.asarray(cell_data[tuple(t_slice)]).ravel()
+                        members = members[~np.isnan(members)]
+                        if len(members) == 0:
+                            mean_series[t_idx] = np.nan
+                            max_series[t_idx] = np.nan
+                        else:
+                            mean_series[t_idx] = np.mean(members)
+                            max_series[t_idx] = np.max(members)
+                    else:
+                        val = float(cell_data[tuple(t_slice)])
+                        mean_series[t_idx] = val
+                        max_series[t_idx] = val
+
+                has_finite_max = np.isfinite(max_series).any()
+                peak_idx = int(np.nanargmax(max_series)) if has_finite_max else None
+
+                for reach_id_str in reach_id_list:
+                    if max_reaches is not None and emitted >= max_reaches:
+                        return
+                    emitted += 1
+                    yield {
+                        "provider_reach_id": reach_id_str,
+                        "peak_time_utc": None if peak_idx is None else datetimes[peak_idx].isoformat(),
+                        "peak_mean_cms": None if not np.isfinite(mean_series).any() else _safe_float(np.nanmax(mean_series)),
+                        "peak_median_cms": None,
+                        "peak_max_cms": None if not has_finite_max else _safe_float(np.nanmax(max_series)),
+                        "now_mean_cms": _safe_float(mean_series[0]),
+                        "now_max_cms": _safe_float(max_series[0]),
+                        "raw_payload_json": {"source": "glofas_grib_bulk_summary"},
+                    }
+
+            elapsed = (datetime.now(UTC) - start).total_seconds()
+            logger.info(
+                "GloFAS bulk summary progress",
+                extra={
+                    "run_id": run_id,
+                    "emitted_reaches": emitted,
+                    "elapsed_seconds": round(elapsed, 2),
+                },
+            )
+
+    def normalize_bulk_summary_record(self, run_id: str, record: dict) -> Any:
+        from app.forecast.schemas import BulkForecastSummaryArtifactRowSchema
+
+        reach_id = str(record.get("provider_reach_id", "")).strip()
+        if not reach_id:
+            return None
+
+        peak_time = record.get("peak_time_utc")
+        peak_time_utc = None
+        if peak_time:
+            peak_time_utc = peak_time if isinstance(peak_time, datetime) else datetime.fromisoformat(str(peak_time)).replace(tzinfo=UTC)
+
+        payload = record.get("raw_payload_json") if isinstance(record.get("raw_payload_json"), dict) else {"source": "glofas_grib_bulk_summary"}
+        return BulkForecastSummaryArtifactRowSchema(
+            provider=self.get_provider_name(),
+            run_id=run_id,
+            provider_reach_id=reach_id,
+            peak_time_utc=peak_time_utc,
+            peak_mean_cms=_safe_float(record.get("peak_mean_cms")),
+            peak_median_cms=_safe_float(record.get("peak_median_cms")),
+            peak_max_cms=_safe_float(record.get("peak_max_cms")),
+            now_mean_cms=_safe_float(record.get("now_mean_cms")),
+            now_max_cms=_safe_float(record.get("now_max_cms")),
+            raw_payload_json=payload,
         )
 
     def cleanup_old_raw_staging(self) -> int:
