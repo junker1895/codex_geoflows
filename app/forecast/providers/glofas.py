@@ -293,7 +293,10 @@ class GlofasForecastProvider(ForecastProviderAdapter):
         return str(dest)
 
     def iter_raw_bulk_records(self, run_id: str, staged_raw_path: str) -> Iterator[dict]:
-        """Iterate over all crosswalk reaches and yield per-reach/per-timestep records from the GRIB."""
+        """Iterate over all crosswalk reaches and yield per-reach/per-timestep records from the GRIB.
+
+        Uses vectorized nearest-index lookup so we avoid per-reach xarray .sel() calls.
+        """
         import numpy as np
 
         grib_path = Path(staged_raw_path)
@@ -305,38 +308,79 @@ class GlofasForecastProvider(ForecastProviderAdapter):
             logger.warning("No crosswalk entries found for GloFAS — nothing to iterate")
             return
 
+        logger.info("Loaded %d crosswalk entries for bulk iteration", len(crosswalk))
         datasets = self._open_grib_datasets(str(grib_path))
 
-        for reach_id_str, (lat, lon) in crosswalk.items():
-            for ds in datasets:
-                try:
-                    cell = ds.sel(latitude=lat, longitude=lon, method="nearest")
-                except Exception:
-                    continue
+        for ds in datasets:
+            discharge_var = self._find_discharge_var(ds)
+            if discharge_var is None:
+                continue
 
-                discharge_var = self._find_discharge_var(ds)
-                if discharge_var is None:
-                    continue
+            data_arr = ds[discharge_var]
 
-                cell_data = cell[discharge_var]
+            time_dim = "time" if "time" in data_arr.dims else "step"
+            if time_dim not in data_arr.dims:
+                continue
 
-                time_dim = "time" if "time" in cell_data.dims else "step"
-                if time_dim not in cell_data.dims:
-                    continue
+            # Identify ensemble dimension (if any)
+            ensemble_dim = None
+            for dim in data_arr.dims:
+                if dim not in (time_dim, "latitude", "longitude"):
+                    ensemble_dim = dim
+                    break
 
-                times = cell_data[time_dim].values
+            # Build grid coordinate arrays for vectorized nearest-index lookup
+            grid_lats = ds["latitude"].values
+            grid_lons = ds["longitude"].values
 
-                ensemble_dim = None
-                for dim in cell_data.dims:
-                    if dim not in (time_dim, "latitude", "longitude"):
-                        ensemble_dim = dim
-                        break
+            # Precompute nearest grid indices for all crosswalk entries at once
+            reach_ids = list(crosswalk.keys())
+            want_lats = np.array([crosswalk[r][0] for r in reach_ids])
+            want_lons = np.array([crosswalk[r][1] for r in reach_ids])
+            lat_indices = np.abs(grid_lats[np.newaxis, :] - want_lats[:, np.newaxis]).argmin(axis=1)
+            lon_indices = np.abs(grid_lons[np.newaxis, :] - want_lons[:, np.newaxis]).argmin(axis=1)
+
+            # Load the full data array into memory once
+            all_data = data_arr.values  # shape varies by dims
+            times = ds[time_dim].values
+
+            # Resolve dimension order for indexing
+            dim_names = list(data_arr.dims)
+            lat_axis = dim_names.index("latitude")
+            lon_axis = dim_names.index("longitude")
+            time_axis = dim_names.index(time_dim)
+            ens_axis = dim_names.index(ensemble_dim) if ensemble_dim and ensemble_dim in dim_names else None
+
+            logger.info(
+                "Processing dataset: shape=%s, dims=%s, reaches=%d, timesteps=%d",
+                all_data.shape, dim_names, len(reach_ids), len(times),
+            )
+
+            for reach_idx, reach_id_str in enumerate(reach_ids):
+                li = lat_indices[reach_idx]
+                lo = lon_indices[reach_idx]
+
+                # Build index tuple to extract this reach's full timeseries
+                idx = [slice(None)] * len(dim_names)
+                idx[lat_axis] = li
+                idx[lon_axis] = lo
+                cell_data = all_data[tuple(idx)]
+                # cell_data shape: (n_times,) or (n_times, n_ensemble) or similar
 
                 for t_idx, t_val in enumerate(times):
                     dt = self._to_utc_datetime(t_val, ds)
 
-                    if ensemble_dim and ensemble_dim in cell_data.dims:
-                        members = cell_data.isel(**{time_dim: t_idx}).values
+                    if ens_axis is not None:
+                        # Determine which axis in cell_data corresponds to ensemble
+                        # (after removing lat/lon axes via indexing)
+                        remaining_dims = [d for i, d in enumerate(dim_names) if i not in (lat_axis, lon_axis)]
+                        ens_pos = remaining_dims.index(ensemble_dim)
+                        time_pos = remaining_dims.index(time_dim)
+
+                        t_idx_tuple = [slice(None)] * len(remaining_dims)
+                        t_idx_tuple[time_pos] = t_idx
+                        members = cell_data[tuple(t_idx_tuple)]
+                        members = np.asarray(members).ravel()
                         members = members[~np.isnan(members)]
                         if len(members) == 0:
                             continue
@@ -350,7 +394,11 @@ class GlofasForecastProvider(ForecastProviderAdapter):
                             "flow_max_cms": _safe_float(np.max(members)),
                         }
                     else:
-                        val = float(cell_data.isel(**{time_dim: t_idx}).values)
+                        remaining_dims = [d for i, d in enumerate(dim_names) if i not in (lat_axis, lon_axis)]
+                        time_pos = remaining_dims.index(time_dim)
+                        t_idx_tuple = [slice(None)] * len(remaining_dims)
+                        t_idx_tuple[time_pos] = t_idx
+                        val = float(cell_data[tuple(t_idx_tuple)])
                         if val != val:  # NaN
                             continue
                         yield {
