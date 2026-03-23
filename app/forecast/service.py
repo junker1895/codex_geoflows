@@ -273,7 +273,7 @@ class ForecastService:
         threshold_path: str | None = None,
         reanalysis_path: str | None = None,
         netcdf_dir: str | None = None,
-        batch_size: int = 5000,
+        batch_size: int = 50000,
     ) -> int:
         """Import GloFAS return period thresholds into the database.
 

@@ -35,62 +35,62 @@ class ForecastRepository:
         return row
 
     def upsert_return_periods(self, rows: Iterable[ReturnPeriodSchema]) -> int:
-        count = 0
-        for payload in rows:
-            row = self.db.execute(
-                select(models.ForecastProviderReturnPeriod).where(
-                    and_(
-                        models.ForecastProviderReturnPeriod.provider == payload.provider,
-                        models.ForecastProviderReturnPeriod.provider_reach_id == payload.provider_reach_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if not row:
-                row = models.ForecastProviderReturnPeriod(
-                    provider=payload.provider, provider_reach_id=payload.provider_reach_id
-                )
-                self.db.add(row)
-            row.rp_2 = payload.rp_2
-            row.rp_5 = payload.rp_5
-            row.rp_10 = payload.rp_10
-            row.rp_25 = payload.rp_25
-            row.rp_50 = payload.rp_50
-            row.rp_100 = payload.rp_100
-            row.metadata_json = payload.metadata_json
-            count += 1
+        values = [
+            {
+                "provider": payload.provider,
+                "provider_reach_id": payload.provider_reach_id,
+                "rp_2": payload.rp_2,
+                "rp_5": payload.rp_5,
+                "rp_10": payload.rp_10,
+                "rp_25": payload.rp_25,
+                "rp_50": payload.rp_50,
+                "rp_100": payload.rp_100,
+                "metadata_json": payload.metadata_json,
+            }
+            for payload in rows
+        ]
+        if not values:
+            return 0
+        update_cols = {"rp_2", "rp_5", "rp_10", "rp_25", "rp_50", "rp_100", "metadata_json"}
+        stmt = pg_insert(models.ForecastProviderReturnPeriod).values(values)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_rp_provider_reach",
+            set_={col: stmt.excluded[col] for col in update_cols},
+        )
+        self.db.execute(stmt)
         self.db.flush()
-        return count
+        return len(values)
 
     def bulk_upsert_timeseries(self, rows: Iterable[TimeseriesPointSchema]) -> int:
-        count = 0
-        for payload in rows:
-            row = self.db.execute(
-                select(models.ForecastProviderReachTimeseries).where(
-                    and_(
-                        models.ForecastProviderReachTimeseries.provider == payload.provider,
-                        models.ForecastProviderReachTimeseries.run_id == payload.run_id,
-                        models.ForecastProviderReachTimeseries.provider_reach_id == payload.provider_reach_id,
-                        models.ForecastProviderReachTimeseries.forecast_time_utc == payload.forecast_time_utc,
-                    )
-                )
-            ).scalar_one_or_none()
-            if not row:
-                row = models.ForecastProviderReachTimeseries(
-                    provider=payload.provider,
-                    run_id=payload.run_id,
-                    provider_reach_id=payload.provider_reach_id,
-                    forecast_time_utc=payload.forecast_time_utc,
-                )
-                self.db.add(row)
-            row.flow_mean_cms = payload.flow_mean_cms
-            row.flow_median_cms = payload.flow_median_cms
-            row.flow_p25_cms = payload.flow_p25_cms
-            row.flow_p75_cms = payload.flow_p75_cms
-            row.flow_max_cms = payload.flow_max_cms
-            row.raw_payload_json = payload.raw_payload_json
-            count += 1
+        values = [
+            {
+                "provider": payload.provider,
+                "run_id": payload.run_id,
+                "provider_reach_id": payload.provider_reach_id,
+                "forecast_time_utc": payload.forecast_time_utc,
+                "flow_mean_cms": payload.flow_mean_cms,
+                "flow_median_cms": payload.flow_median_cms,
+                "flow_p25_cms": payload.flow_p25_cms,
+                "flow_p75_cms": payload.flow_p75_cms,
+                "flow_max_cms": payload.flow_max_cms,
+                "raw_payload_json": payload.raw_payload_json,
+            }
+            for payload in rows
+        ]
+        if not values:
+            return 0
+        update_cols = {
+            "flow_mean_cms", "flow_median_cms", "flow_p25_cms",
+            "flow_p75_cms", "flow_max_cms", "raw_payload_json",
+        }
+        stmt = pg_insert(models.ForecastProviderReachTimeseries).values(values)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_ts_provider_run_reach_time",
+            set_={col: stmt.excluded[col] for col in update_cols},
+        )
+        self.db.execute(stmt)
         self.db.flush()
-        return count
+        return len(values)
 
     def upsert_summaries(self, rows: Iterable[ReachSummarySchema]) -> int:
         values = [
