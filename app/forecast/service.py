@@ -807,6 +807,15 @@ class ForecastService:
             )
             return total
         except Exception as exc:
+            logger.error(
+                "summary ingest failed",
+                extra={"provider": provider, "run_id": resolved_run.run_id, "error": str(exc)},
+                exc_info=True,
+            )
+            # Roll back the failed transaction before writing error metadata.
+            self.db.rollback()
+            # Re-fetch the run row after rollback (previous reference is expired).
+            run_row = self.repo.get_or_create_run(provider, resolved_run.run_id)
             ops = self._run_ops_metadata(run_row)
             ingest_meta = dict(ops.get("summary_ingest", {}))
             ingest_meta["attempted"] = True

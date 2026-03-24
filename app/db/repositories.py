@@ -252,6 +252,10 @@ class ForecastRepository:
     def _format_csv_value(val) -> str:
         if val is None:
             return ""
+        # Floats that are whole numbers must be written without the decimal
+        # so PostgreSQL COPY accepts them for integer columns (e.g. severity_score).
+        if isinstance(val, float) and val.is_integer():
+            return str(int(val))
         return str(val)
 
     def _fallback_upsert_from_table(self, table: pa.Table) -> int:
