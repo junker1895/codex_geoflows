@@ -215,6 +215,22 @@ class ForecastArtifactStore:
                 yield BulkForecastSummaryArtifactRowSchema.model_validate(payload)
             del table
 
+    def iter_summary_tables(self, provider: str, run_id: str):
+        """Yield one pyarrow Table per row group — no Pydantic conversion."""
+        path = self.summary_artifact_path(provider, run_id)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"summary bulk artifact does not exist for provider={provider}, run_id={run_id}: {path}"
+            )
+        if path.suffix == ".jsonl":
+            raise ForecastValidationError("COPY fast-path requires parquet format, not JSONL")
+
+        _, pq = _load_pyarrow()
+        schema = self._summary_schema()
+        pf = pq.ParquetFile(path)
+        for row_group_idx in range(pf.metadata.num_row_groups):
+            yield pf.read_row_group(row_group_idx, columns=schema.names).cast(schema)
+
     def count_summary_rows(self, provider: str, run_id: str) -> int:
         path = self.summary_artifact_path(provider, run_id)
         if not path.exists():

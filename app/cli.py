@@ -215,10 +215,19 @@ def cli_ingest_forecast_summaries(
     provider: str = typer.Option("geoglows", "--provider"),
     run_id: str = typer.Option("latest", "--run-id"),
     replace_existing: bool = typer.Option(False, "--replace-existing"),
+    skip_reclassify: bool = typer.Option(False, "--skip-reclassify", help="Trust artifact classification; skip re-classification with current return periods."),
+    use_copy: bool = typer.Option(False, "--use-copy", help="Use PostgreSQL COPY fast-path for bulk loading (auto-detected when omitted)."),
 ) -> None:
     def _inner() -> None:
         service = _build_service()
-        count = service.ingest_forecast_summaries(provider=provider, run_id=run_id, replace_existing=replace_existing)
+        copy_flag = True if use_copy else None  # None = auto-detect
+        count = service.ingest_forecast_summaries(
+            provider=provider,
+            run_id=run_id,
+            replace_existing=replace_existing,
+            skip_reclassify=skip_reclassify,
+            use_copy=copy_flag,
+        )
         typer.echo(f"upserted summary rows: {count}")
 
     _safe_run(_inner)

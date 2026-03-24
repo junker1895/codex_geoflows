@@ -702,7 +702,14 @@ class ForecastService:
             if hasattr(adapter, "set_supported_reach_filter"):
                 adapter.set_supported_reach_filter(None)
 
-    def ingest_forecast_summaries(self, provider: str, run_id: str, replace_existing: bool = False) -> int:
+    def ingest_forecast_summaries(
+        self,
+        provider: str,
+        run_id: str,
+        replace_existing: bool = False,
+        skip_reclassify: bool = False,
+        use_copy: bool | None = None,
+    ) -> int:
         resolved_run = self.resolve_requested_run_id(provider, run_id)
         if not self.artifacts.summary_exists(provider, resolved_run.run_id):
             raise ValueError("Summary bulk ingest requested, but no summary artifact exists. Run prepare-bulk-summaries first.")
@@ -735,67 +742,24 @@ class ForecastService:
 
         total = 0
         replaced_rows = 0
-        batch: list[ReachSummarySchema] = []
         chunk_index = 0
+
+        # Decide whether to use COPY fast-path.
+        _use_copy = use_copy if use_copy is not None else self.repo._get_psycopg_connection() is not None
+
         try:
             if replace_existing:
                 replaced_rows = self.repo.delete_summaries_for_run(provider, resolved_run.run_id)
                 self.db.commit()
 
-            # Re-classify with current return periods instead of trusting
-            # artifact severity scores, which may be stale if return periods
-            # were updated after the artifact was prepared.
-            rp_lookup = self.repo.get_all_return_periods(provider)
-            logger.info(
-                "loaded return periods for ingest re-classification",
-                extra={"provider": provider, "return_period_count": len(rp_lookup)},
-            )
-
-            for item in self.artifacts.iter_summary_rows(provider, resolved_run.run_id):
-                rp_model = rp_lookup.get(str(item.provider_reach_id))
-                rp_schema = None if rp_model is None else to_return_period_schema(rp_model)
-                cls = classify_peak_flow(item.peak_mean_cms, rp_schema)
-                batch.append(
-                    ReachSummarySchema(
-                        provider=str(item.provider),
-                        run_id=str(item.run_id),
-                        provider_reach_id=str(item.provider_reach_id),
-                        peak_time_utc=item.peak_time_utc,
-                        peak_mean_cms=item.peak_mean_cms,
-                        peak_median_cms=item.peak_median_cms,
-                        peak_max_cms=item.peak_max_cms,
-                        now_mean_cms=item.now_mean_cms,
-                        now_max_cms=item.now_max_cms,
-                        return_period_band=cls.return_period_band,
-                        severity_score=cls.severity_score,
-                        is_flagged=cls.is_flagged,
-                        metadata_json=item.raw_payload_json,
-                    )
+            if _use_copy:
+                total = self._ingest_summaries_copy(
+                    provider, resolved_run.run_id, skip_reclassify=skip_reclassify,
                 )
-                if len(batch) >= self.settings.forecast_bulk_ingest_batch_size:
-                    chunk_index += 1
-                    chunk_rows = self.repo.upsert_summaries(batch)
-                    total += chunk_rows
-                    self.db.commit()
-                    self.db.expire_all()
-                    logger.info(
-                        "summary ingest chunk complete",
-                        extra={
-                            "provider": provider,
-                            "run_id": resolved_run.run_id,
-                            "source": "summary_artifact",
-                            "chunk_number": chunk_index,
-                            "chunk_rows_written": chunk_rows,
-                            "total_rows_written": total,
-                        },
-                    )
-                    batch = []
-            if batch:
-                chunk_index += 1
-                chunk_rows = self.repo.upsert_summaries(batch)
-                total += chunk_rows
-                self.db.commit()
-                self.db.expire_all()
+            else:
+                total = self._ingest_summaries_classic(
+                    provider, resolved_run.run_id, skip_reclassify=skip_reclassify,
+                )
 
             ops = self._run_ops_metadata(run_row)
             ingest_meta = dict(ops.get("summary_ingest", {}))
@@ -856,6 +820,159 @@ class ForecastService:
             self._set_run_ops_metadata(run_row, ops)
             self.db.commit()
             raise
+
+    def _ingest_summaries_classic(self, provider: str, run_id: str, *, skip_reclassify: bool) -> int:
+        """Original row-by-row ingest path (works with any DB backend)."""
+        rp_lookup: dict | None = None
+        if not skip_reclassify:
+            rp_lookup = self.repo.get_all_return_periods(provider)
+            logger.info(
+                "loaded return periods for ingest re-classification",
+                extra={"provider": provider, "return_period_count": len(rp_lookup)},
+            )
+
+        total = 0
+        batch: list[ReachSummarySchema] = []
+        chunk_index = 0
+        for item in self.artifacts.iter_summary_rows(provider, run_id):
+            if skip_reclassify:
+                band = item.return_period_band
+                score = int(item.severity_score) if item.severity_score is not None else 0
+                flagged = bool(item.is_flagged)
+            else:
+                rp_model = rp_lookup.get(str(item.provider_reach_id))  # type: ignore[union-attr]
+                rp_schema = None if rp_model is None else to_return_period_schema(rp_model)
+                cls = classify_peak_flow(item.peak_mean_cms, rp_schema)
+                band = cls.return_period_band
+                score = cls.severity_score
+                flagged = cls.is_flagged
+            batch.append(
+                ReachSummarySchema(
+                    provider=str(item.provider),
+                    run_id=str(item.run_id),
+                    provider_reach_id=str(item.provider_reach_id),
+                    peak_time_utc=item.peak_time_utc,
+                    peak_mean_cms=item.peak_mean_cms,
+                    peak_median_cms=item.peak_median_cms,
+                    peak_max_cms=item.peak_max_cms,
+                    now_mean_cms=item.now_mean_cms,
+                    now_max_cms=item.now_max_cms,
+                    return_period_band=band,
+                    severity_score=score,
+                    is_flagged=flagged,
+                    metadata_json=item.raw_payload_json,
+                )
+            )
+            if len(batch) >= self.settings.forecast_bulk_ingest_batch_size:
+                chunk_index += 1
+                chunk_rows = self.repo.upsert_summaries(batch)
+                total += chunk_rows
+                self.db.commit()
+                self.db.expire_all()
+                logger.info(
+                    "summary ingest chunk complete",
+                    extra={
+                        "provider": provider,
+                        "run_id": run_id,
+                        "source": "summary_artifact",
+                        "chunk_number": chunk_index,
+                        "chunk_rows_written": chunk_rows,
+                        "total_rows_written": total,
+                    },
+                )
+                batch = []
+        if batch:
+            chunk_index += 1
+            chunk_rows = self.repo.upsert_summaries(batch)
+            total += chunk_rows
+            self.db.commit()
+            self.db.expire_all()
+        return total
+
+    def _ingest_summaries_copy(self, provider: str, run_id: str, *, skip_reclassify: bool) -> int:
+        """COPY-based fast ingest path (PostgreSQL + psycopg3 only).
+
+        Reads Arrow tables directly from the parquet file and bulk-loads
+        them via COPY into a staging table, then merges into the target.
+        """
+        import pyarrow as pa
+        import pyarrow.compute as pc
+
+        rp_lookup: dict | None = None
+        if not skip_reclassify:
+            rp_lookup = self.repo.get_all_return_periods(provider)
+            logger.info(
+                "loaded return periods for ingest re-classification (COPY path)",
+                extra={"provider": provider, "return_period_count": len(rp_lookup)},
+            )
+
+        total = 0
+        chunk_index = 0
+        for table in self.artifacts.iter_summary_tables(provider, run_id):
+            chunk_index += 1
+
+            if not skip_reclassify and rp_lookup:
+                table = self._reclassify_arrow_table(table, rp_lookup)
+
+            # Add columns the DB expects but the parquet doesn't have.
+            if "first_exceedance_time_utc" not in table.column_names:
+                table = table.append_column(
+                    "first_exceedance_time_utc",
+                    pa.array([None] * table.num_rows, type=pa.timestamp("us", tz="UTC")),
+                )
+            if "metadata_json" not in table.column_names:
+                table = table.append_column(
+                    "metadata_json",
+                    pa.array([None] * table.num_rows, type=pa.string()),
+                )
+
+            chunk_rows = self.repo.copy_upsert_summaries_from_table(table)
+            total += chunk_rows
+            self.db.commit()
+            self.db.expire_all()
+            logger.info(
+                "summary ingest chunk complete",
+                extra={
+                    "provider": provider,
+                    "run_id": run_id,
+                    "source": "summary_artifact",
+                    "chunk_number": chunk_index,
+                    "chunk_rows_written": chunk_rows,
+                    "total_rows_written": total,
+                    "method": "copy",
+                },
+            )
+            del table
+        return total
+
+    @staticmethod
+    def _reclassify_arrow_table(table, rp_lookup: dict):
+        """Re-classify severity for every row in an Arrow table using current return periods."""
+        import pyarrow as pa
+
+        reach_ids = table.column("provider_reach_id").to_pylist()
+        peak_means = table.column("peak_mean_cms").to_pylist()
+
+        bands = []
+        scores = []
+        flags = []
+        for reach_id, peak_mean in zip(reach_ids, peak_means):
+            rp_model = rp_lookup.get(str(reach_id))
+            rp_schema = None if rp_model is None else to_return_period_schema(rp_model)
+            cls = classify_peak_flow(peak_mean, rp_schema)
+            bands.append(cls.return_period_band)
+            scores.append(float(cls.severity_score))
+            flags.append(cls.is_flagged)
+
+        # Replace the classification columns in the table.
+        col_idx_band = table.schema.get_field_index("return_period_band")
+        col_idx_score = table.schema.get_field_index("severity_score")
+        col_idx_flag = table.schema.get_field_index("is_flagged")
+
+        table = table.set_column(col_idx_band, "return_period_band", pa.array(bands, type=pa.string()))
+        table = table.set_column(col_idx_score, "severity_score", pa.array(scores, type=pa.float64()))
+        table = table.set_column(col_idx_flag, "is_flagged", pa.array(flags, type=pa.bool_()))
+        return table
 
     def ingest_forecast_run(
         self,
