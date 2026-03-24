@@ -604,6 +604,11 @@ class GlofasForecastProvider(ForecastProviderAdapter):
                     "elapsed_seconds": round(elapsed, 2),
                 },
             )
+            # Use only the first dataset (cf) for summaries — processing
+            # the perturbed forecast (pf) too would duplicate reaches and
+            # risks OOM due to its ~50-member ensemble size.
+            if emitted > 0:
+                break
 
     def normalize_bulk_summary_record(self, run_id: str, record: dict) -> Any:
         from app.forecast.schemas import BulkForecastSummaryArtifactRowSchema
