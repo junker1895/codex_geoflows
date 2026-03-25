@@ -63,3 +63,25 @@ def test_zero_thresholds_treated_as_unknown():
     assert result.severity_score == 0
     assert result.return_period_band == "unknown"
     assert result.is_flagged is False
+
+
+def test_near_zero_thresholds_treated_as_invalid():
+    """Near-zero values (e.g. 1e-20) from GloFAS return-period datasets are
+    physically meaningless and must not cause false severity-6 classifications."""
+    thresholds = _thresholds(
+        rp_2=1e-20, rp_5=1e-15, rp_10=1e-10,
+        rp_25=1e-8, rp_50=1e-6, rp_100=1e-4,
+    )
+    result = classify_peak_flow(5.0, thresholds)
+    # All thresholds below 0.01 m³/s → treated as invalid → unknown
+    assert result.severity_score == 0
+    assert result.return_period_band == "unknown"
+    assert result.is_flagged is False
+
+
+def test_threshold_at_minimum_boundary():
+    """Thresholds exactly at the 0.01 m³/s minimum are accepted."""
+    thresholds = _thresholds(rp_2=0.01, rp_5=0.02)
+    result = classify_peak_flow(0.015, thresholds)
+    assert result.return_period_band == "2"
+    assert result.severity_score == 1
