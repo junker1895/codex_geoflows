@@ -429,6 +429,8 @@ def cli_import_glofas_return_periods(
 def cli_build_crosswalk(
     provider: str = typer.Option("glofas", "--provider"),
     metadata_path: str | None = typer.Option(None, "--metadata-path", help="Local path to GeoGloWS metadata parquet (~250 MB)"),
+    threshold_dir: str | None = typer.Option(None, "--threshold-dir", help="Dir with GloFAS v4 threshold NetCDF files for river masking"),
+    min_river_cms: float = typer.Option(1.0, "--min-river-cms", help="Min rp_2 (m³/s) for a grid cell to be a river cell"),
     max_snap_km: float = typer.Option(10.0, "--max-snap-km"),
     grid_resolution: float = typer.Option(0.05, "--grid-resolution"),
     batch_size: int = typer.Option(5000, "--batch-size"),
@@ -442,6 +444,8 @@ def cli_build_crosswalk(
         db = SessionLocal()
         count = build_glofas_crosswalk(
             metadata_parquet_path=metadata_path,
+            glofas_threshold_dir=threshold_dir,
+            min_river_threshold_cms=min_river_cms,
             glofas_grid_resolution=grid_resolution,
             max_snap_distance_km=max_snap_km,
             batch_size=batch_size,

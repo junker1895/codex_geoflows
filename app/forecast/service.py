@@ -621,16 +621,11 @@ class ForecastService:
             )
             stats = {"raw_records_seen": 0, "normalized_rows_written": 0, "rows_dropped_invalid": 0, "rows_dropped_filtered": 0}
 
-            # Batch-load return periods upfront instead of N+1 queries.
-            # GloFAS forecasts are keyed to GeoGloWS reach IDs (via crosswalk),
-            # so we use GeoGloWS return periods for classification — they are
-            # properly calibrated for those reaches, whereas GloFAS grid-cell
-            # thresholds can be orders of magnitude too small.
-            rp_provider = "geoglows" if provider == "glofas" else provider
-            rp_lookup = self.repo.get_all_return_periods(rp_provider)
+            # Batch-load all return periods upfront instead of N+1 queries
+            rp_lookup = self.repo.get_all_return_periods(provider)
             logger.info(
                 "loaded return periods for classification",
-                extra={"provider": provider, "rp_provider": rp_provider, "return_period_count": len(rp_lookup)},
+                extra={"provider": provider, "return_period_count": len(rp_lookup)},
             )
 
             def _summary_rows() -> Iterator[BulkForecastSummaryArtifactRowSchema]:
@@ -839,11 +834,10 @@ class ForecastService:
         """Original row-by-row ingest path (works with any DB backend)."""
         rp_lookup: dict | None = None
         if not skip_reclassify:
-            rp_provider = "geoglows" if provider == "glofas" else provider
-            rp_lookup = self.repo.get_all_return_periods(rp_provider)
+            rp_lookup = self.repo.get_all_return_periods(provider)
             logger.info(
                 "loaded return periods for ingest re-classification",
-                extra={"provider": provider, "rp_provider": rp_provider, "return_period_count": len(rp_lookup)},
+                extra={"provider": provider, "return_period_count": len(rp_lookup)},
             )
 
         total = 0
@@ -915,11 +909,10 @@ class ForecastService:
 
         rp_lookup: dict | None = None
         if not skip_reclassify:
-            rp_provider = "geoglows" if provider == "glofas" else provider
-            rp_lookup = self.repo.get_all_return_periods(rp_provider)
+            rp_lookup = self.repo.get_all_return_periods(provider)
             logger.info(
                 "loaded return periods for ingest re-classification (COPY path)",
-                extra={"provider": provider, "rp_provider": rp_provider, "return_period_count": len(rp_lookup)},
+                extra={"provider": provider, "return_period_count": len(rp_lookup)},
             )
 
         total = 0
@@ -1214,11 +1207,10 @@ class ForecastService:
             summaries: list[ReachSummarySchema] = []
             for reach_id in reach_ids:
                 ts_rows = [to_timeseries_schema(x) for x in self.repo.get_timeseries(provider, resolved_run.run_id, reach_id)]
-                rp_provider = "geoglows" if provider == "glofas" else provider
-                rp_model = self.repo.get_return_period(rp_provider, reach_id)
+                rp_model = self.repo.get_return_period(provider, reach_id)
                 rp_schema = None if not rp_model else to_return_period_schema(rp_model)
                 if rp_schema is None:
-                    logger.info("generating summary without return periods", extra={"provider": provider, "rp_provider": rp_provider, "run_id": resolved_run.run_id, "reach_id": reach_id})
+                    logger.info("generating summary without return periods", extra={"provider": provider, "run_id": resolved_run.run_id, "reach_id": reach_id})
                 summary = adapter.summarize_reach(resolved_run.run_id, reach_id, ts_rows, rp_schema)
                 logger.info("summary peak values", extra={"provider": provider, "run_id": resolved_run.run_id, "reach_id": reach_id, "peak_mean_cms": summary.peak_mean_cms, "peak_median_cms": summary.peak_median_cms, "peak_max_cms": summary.peak_max_cms})
                 summaries.append(summary)
@@ -1270,8 +1262,7 @@ class ForecastService:
 
         t1 = perf_counter()
         run_id_concrete = self._require_concrete_run_id(run.run_id)
-        rp_provider = "geoglows" if provider == "glofas" else provider
-        rp_row = self.repo.get_return_period(rp_provider, provider_reach_id)
+        rp_row = self.repo.get_return_period(provider, provider_reach_id)
         return_period_query_seconds = perf_counter() - t1
 
         cache_key = f"{provider}:{run.run_id}:{provider_reach_id}:{timeseries_limit}"
