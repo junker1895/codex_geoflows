@@ -622,6 +622,9 @@ def _load_full_crosswalk() -> dict[str, tuple[float, float]]:
                 ReachGridCrosswalk.grid_lat,
                 ReachGridCrosswalk.grid_lon,
             ).where(ReachGridCrosswalk.target_provider == "glofas")
+                .where(ReachGridCrosswalk.is_valid_match.is_(True))
+                .where(ReachGridCrosswalk.grid_lat.is_not(None))
+                .where(ReachGridCrosswalk.grid_lon.is_not(None))
         ).all()
         return {r.reach_id: (r.grid_lat, r.grid_lon) for r in rows}
     finally:

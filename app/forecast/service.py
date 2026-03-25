@@ -324,8 +324,14 @@ class ForecastService:
         total_upserted = 0
         total_processed = 0
         for rows in iterator:
+            sanitized_rows, rejected = _sanitize_glofas_return_period_rows(rows)
+            if rejected:
+                logger.info(
+                    "rejected invalid GloFAS return-period rows",
+                    extra={"batch_rows": len(rows), "rejected_rows": rejected},
+                )
             total_processed += len(rows)
-            upserted = self.repo.upsert_return_periods(rows)
+            upserted = self.repo.upsert_return_periods(sanitized_rows)
             total_upserted += upserted
             self.db.commit()
             logger.info(
@@ -1711,6 +1717,34 @@ class ForecastService:
 
 def to_run_schema(row: models.ForecastRun) -> ForecastRunSchema:
     return ForecastRunSchema.model_validate(row, from_attributes=True)
+
+
+def _sanitize_glofas_return_period_rows(rows: list[ReturnPeriodSchema]) -> tuple[list[ReturnPeriodSchema], int]:
+    """Apply guardrails to GloFAS RP ladders before DB upsert."""
+    import math
+
+    accepted: list[ReturnPeriodSchema] = []
+    rejected = 0
+    for row in rows:
+        ladder = [row.rp_2, row.rp_5, row.rp_10, row.rp_25, row.rp_50, row.rp_100]
+        if any(v is None or not math.isfinite(float(v)) for v in ladder):
+            rejected += 1
+            continue
+        values = [float(v) for v in ladder]
+        if values[0] <= 0 or values[-1] <= 0:
+            rejected += 1
+            continue
+        if values[0] < 0.01 or values[-1] < 0.01:
+            rejected += 1
+            continue
+        if values[0] == values[-1] and values[0] < 0.1:
+            rejected += 1
+            continue
+        if any(values[i] >= values[i + 1] for i in range(len(values) - 1)):
+            rejected += 1
+            continue
+        accepted.append(row)
+    return accepted, rejected
 
 
 def to_return_period_schema(row: models.ForecastProviderReturnPeriod) -> ReturnPeriodSchema:

@@ -1,3 +1,4 @@
+import math
 from app.forecast.schemas import ClassificationResult, ReturnPeriodSchema
 
 
@@ -35,6 +36,6 @@ def _valid_threshold(value: float | None, min_cms: float = 0.01) -> float | None
     flow threshold (defaults to >= 0.01 m³/s).  Near-zero values such as
     1e-20 that occasionally appear in GloFAS return-period datasets are
     treated as missing so they don't cause false severity-6 classifications."""
-    if isinstance(value, (float, int)) and value >= min_cms:
+    if isinstance(value, (float, int)) and math.isfinite(float(value)) and value >= min_cms:
         return float(value)
     return None
