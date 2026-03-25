@@ -676,6 +676,9 @@ class GlofasForecastProvider(ForecastProviderAdapter):
                     ReachGridCrosswalk.grid_lat,
                     ReachGridCrosswalk.grid_lon,
                 ).where(ReachGridCrosswalk.target_provider == "glofas")
+                .where(ReachGridCrosswalk.is_valid_match.is_(True))
+                .where(ReachGridCrosswalk.grid_lat.is_not(None))
+                .where(ReachGridCrosswalk.grid_lon.is_not(None))
             ).all()
             return {r.reach_id: (r.grid_lat, r.grid_lon) for r in rows}
         finally:
@@ -704,6 +707,9 @@ class GlofasForecastProvider(ForecastProviderAdapter):
                 ).where(
                     and_(
                         ReachGridCrosswalk.target_provider == "glofas",
+                        ReachGridCrosswalk.is_valid_match.is_(True),
+                        ReachGridCrosswalk.grid_lat.is_not(None),
+                        ReachGridCrosswalk.grid_lon.is_not(None),
                         ReachGridCrosswalk.reach_id.in_(str_ids),
                     )
                 )
