@@ -30,9 +30,12 @@ class Settings(BaseSettings):
     forecast_cache_dir: str = Field(default="./data/forecast_cache", alias="FORECAST_CACHE_DIR")
     forecast_cache_max_gb: float = Field(default=2.0, alias="FORECAST_CACHE_MAX_GB")
     forecast_cleanup_cache_after_run: bool = Field(default=True, alias="FORECAST_CLEANUP_CACHE_AFTER_RUN")
-    forecast_default_max_reaches: int = Field(default=25000, alias="FORECAST_DEFAULT_MAX_REACHES")
-    forecast_default_max_blocks: int = Field(default=20, alias="FORECAST_DEFAULT_MAX_BLOCKS")
-    forecast_default_max_seconds: int = Field(default=900, alias="FORECAST_DEFAULT_MAX_SECONDS")
+    # Production-tuned defaults for summary-first GEOGLOWS flow.
+    # For full-network summary preparation the default caps are generous;
+    # operators can tighten them via env vars.
+    forecast_default_max_reaches: int = Field(default=500000, alias="FORECAST_DEFAULT_MAX_REACHES")
+    forecast_default_max_blocks: int = Field(default=200, alias="FORECAST_DEFAULT_MAX_BLOCKS")
+    forecast_default_max_seconds: int = Field(default=3600, alias="FORECAST_DEFAULT_MAX_SECONDS")
     forecast_detail_cache_ttl_seconds: int = Field(default=300, alias="FORECAST_DETAIL_CACHE_TTL_SECONDS")
     forecast_detail_cache_max_items: int = Field(default=128, alias="FORECAST_DETAIL_CACHE_MAX_ITEMS")
     geoglows_enabled: bool = Field(default=True, alias="GEOGLOWS_ENABLED")
@@ -62,6 +65,21 @@ class Settings(BaseSettings):
     geoglows_bulk_download_max_retries: int = Field(default=2, alias="GEOGLOWS_BULK_DOWNLOAD_MAX_RETRIES")
     geoglows_bulk_overwrite_existing_raw: bool = Field(default=False, alias="GEOGLOWS_BULK_OVERWRITE_EXISTING_RAW")
     geoglows_bulk_raw_retention_runs: int = Field(default=5, alias="GEOGLOWS_BULK_RAW_RETENTION_RUNS")
+
+    # GloFAS provider settings
+    glofas_enabled: bool = Field(default=False, alias="GLOFAS_ENABLED")
+    glofas_cds_url: str = Field(
+        default="https://ewds.climate.copernicus.eu/api", alias="GLOFAS_CDS_URL"
+    )
+    glofas_cds_key: str | None = Field(default=None, alias="GLOFAS_CDS_KEY")
+    glofas_system_version: str = Field(default="operational", alias="GLOFAS_SYSTEM_VERSION")
+    glofas_data_format: str = Field(default="grib", alias="GLOFAS_DATA_FORMAT")
+    glofas_bulk_staging_dir: str = Field(default="./data/glofas_raw", alias="GLOFAS_BULK_STAGING_DIR")
+    glofas_bulk_raw_retention_runs: int = Field(default=2, alias="GLOFAS_BULK_RAW_RETENTION_RUNS")
+    glofas_grid_resolution: float = Field(default=0.05, alias="GLOFAS_GRID_RESOLUTION")
+    glofas_forecast_max_leadtime_hours: int = Field(default=720, alias="GLOFAS_FORECAST_MAX_LEADTIME_HOURS")
+    glofas_crosswalk_max_snap_distance_km: float = Field(default=10.0, alias="GLOFAS_CROSSWALK_MAX_SNAP_DISTANCE")
+    glofas_bulk_overwrite_existing_raw: bool = Field(default=False, alias="GLOFAS_BULK_OVERWRITE_EXISTING_RAW")
 
     @field_validator("forecast_enabled_providers", mode="before")
     @classmethod

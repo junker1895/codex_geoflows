@@ -8,6 +8,10 @@
 </head>
 <body>
   <div id="map"></div>
+  <div id="provider-toggle">
+    <button class="provider-btn active" data-provider="geoglows">GeoGloWS</button>
+    <button class="provider-btn" data-provider="glofas">GloFAS</button>
+  </div>
   <div id="legend">
     <h3>Flood Risk</h3>
     <div class="legend-item"><span class="swatch" style="background:#1a9850"></span> Normal</div>
@@ -19,8 +23,12 @@
     <div class="legend-item"><span class="swatch" style="background:#67001f"></span> RP 100-yr</div>
   </div>
   <div id="info-panel" class="hidden">
-    <button id="info-close">&times;</button>
+    <div id="info-titlebar">
+      <span id="info-title">Reach Info</span>
+      <button id="info-close">&times;</button>
+    </div>
     <div id="info-content"></div>
+    <canvas id="forecast-chart"></canvas>
   </div>
   <div id="status-bar">Loading…</div>
   <script type="module" src="/src/main.js"></script>

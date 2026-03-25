@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 *.egg-info/
 data/
+glofas_flood_thresholds/

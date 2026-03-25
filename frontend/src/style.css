@@ -4,6 +4,35 @@ body, html { width: 100%; height: 100%; font-family: system-ui, sans-serif; }
 
 #map { width: 100%; height: 100%; }
 
+/* Provider toggle */
+#provider-toggle {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 0;
+  z-index: 3;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.25);
+}
+.provider-btn {
+  padding: 7px 16px;
+  border: none;
+  background: rgba(255,255,255,0.92);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  color: #555;
+  transition: background 0.15s, color 0.15s;
+}
+.provider-btn:hover { background: #eee; }
+.provider-btn.active {
+  background: #1565c0;
+  color: #fff;
+}
+
 /* Legend */
 #legend {
   position: absolute;
@@ -25,8 +54,10 @@ body, html { width: 100%; height: 100%; font-family: system-ui, sans-serif; }
   position: absolute;
   top: 12px;
   right: 12px;
-  width: 320px;
-  max-height: 50vh;
+  width: 420px;
+  min-width: 280px;
+  max-width: 80vw;
+  max-height: 85vh;
   overflow-y: auto;
   background: rgba(255,255,255,0.95);
   border-radius: 8px;
@@ -34,11 +65,30 @@ body, html { width: 100%; height: 100%; font-family: system-ui, sans-serif; }
   box-shadow: 0 2px 8px rgba(0,0,0,0.2);
   font-size: 13px;
   z-index: 3;
+  resize: horizontal;
+  overflow: auto;
+}
+#forecast-chart {
+  width: 100% !important;
+  height: 260px !important;
+  margin-top: 10px;
 }
 #info-panel.hidden { display: none; }
+#info-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: grab;
+  user-select: none;
+  margin: -14px -14px 8px -14px;
+  padding: 8px 10px;
+  background: rgba(0,0,0,0.05);
+  border-radius: 8px 8px 0 0;
+}
+#info-titlebar:active { cursor: grabbing; }
+#info-title { font-weight: 600; font-size: 13px; }
 #info-close {
-  position: absolute; top: 6px; right: 8px;
-  background: none; border: none; font-size: 18px; cursor: pointer;
+  background: none; border: none; font-size: 18px; cursor: pointer; line-height: 1;
 }
 #info-content table { width: 100%; border-collapse: collapse; }
 #info-content td { padding: 3px 4px; border-bottom: 1px solid #eee; }

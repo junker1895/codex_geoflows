@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
+from app.forecast.exceptions import ForecastValidationError
 from app.db import models
 from app.db.repositories import ForecastRepository
 from app.forecast.artifacts import ForecastArtifactStore
@@ -263,6 +264,87 @@ class ForecastService:
                 "total_reaches_processed": total_processed,
                 "total_upserted": total_upserted,
                 "classification_available": self.repo.has_return_periods("geoglows"),
+            },
+        )
+        return total_upserted
+
+    def import_glofas_return_periods(
+        self,
+        threshold_path: str | None = None,
+        reanalysis_path: str | None = None,
+        netcdf_dir: str | None = None,
+        batch_size: int = 50000,
+    ) -> int:
+        """Import GloFAS return period thresholds into the database.
+
+        Supports three modes:
+        - netcdf_dir: directory with official GloFAS v4 threshold NetCDF files
+          (flood_threshold_glofas_v4_rl_*.nc) — preferred, gives all 6 RPs
+        - threshold_path: a pre-computed parquet/CSV with lat, lon, rp_2, rp_5, rp_20
+        - reanalysis_path: a GloFAS reanalysis GRIB to extract thresholds from
+
+        Exactly one must be provided.
+        """
+        from app.forecast.providers.glofas_return_periods import (
+            iter_glofas_return_periods_from_crosswalk,
+            iter_glofas_return_periods_from_netcdf,
+            iter_glofas_return_periods_from_threshold_file,
+        )
+
+        sources_given = sum(bool(x) for x in [threshold_path, reanalysis_path, netcdf_dir])
+        if sources_given != 1:
+            raise ForecastValidationError(
+                "Provide exactly one of --netcdf-dir, --threshold-path, or --reanalysis-path."
+            )
+
+        if netcdf_dir:
+            iterator = iter_glofas_return_periods_from_netcdf(
+                netcdf_dir=netcdf_dir,
+                batch_size=batch_size,
+            )
+            source = netcdf_dir
+        elif threshold_path:
+            iterator = iter_glofas_return_periods_from_threshold_file(
+                threshold_path=threshold_path,
+                batch_size=batch_size,
+            )
+            source = threshold_path
+        else:
+            iterator = iter_glofas_return_periods_from_crosswalk(
+                reanalysis_path=reanalysis_path,
+                batch_size=batch_size,
+            )
+            source = reanalysis_path
+
+        logger.info(
+            "starting GloFAS return-period import",
+            extra={"source": source, "batch_size": batch_size},
+        )
+
+        total_upserted = 0
+        total_processed = 0
+        for rows in iterator:
+            total_processed += len(rows)
+            upserted = self.repo.upsert_return_periods(rows)
+            total_upserted += upserted
+            self.db.commit()
+            logger.info(
+                "upserted GloFAS return-period batch",
+                extra={
+                    "batch_rows": len(rows),
+                    "batch_upserted": upserted,
+                    "total_processed": total_processed,
+                    "total_upserted": total_upserted,
+                },
+            )
+
+        logger.info(
+            "completed GloFAS return-period import",
+            extra={
+                "source": source,
+                "total_processed": total_processed,
+                "total_upserted": total_upserted,
+                "classification_available": self.repo.has_return_periods("glofas"),
             },
         )
         return total_upserted
@@ -620,7 +702,14 @@ class ForecastService:
             if hasattr(adapter, "set_supported_reach_filter"):
                 adapter.set_supported_reach_filter(None)
 
-    def ingest_forecast_summaries(self, provider: str, run_id: str, replace_existing: bool = False) -> int:
+    def ingest_forecast_summaries(
+        self,
+        provider: str,
+        run_id: str,
+        replace_existing: bool = False,
+        skip_reclassify: bool = False,
+        use_copy: bool | None = None,
+    ) -> int:
         resolved_run = self.resolve_requested_run_id(provider, run_id)
         if not self.artifacts.summary_exists(provider, resolved_run.run_id):
             raise ValueError("Summary bulk ingest requested, but no summary artifact exists. Run prepare-bulk-summaries first.")
@@ -653,67 +742,24 @@ class ForecastService:
 
         total = 0
         replaced_rows = 0
-        batch: list[ReachSummarySchema] = []
         chunk_index = 0
+
+        # Decide whether to use COPY fast-path.
+        _use_copy = use_copy if use_copy is not None else self.repo._get_psycopg_connection() is not None
+
         try:
             if replace_existing:
                 replaced_rows = self.repo.delete_summaries_for_run(provider, resolved_run.run_id)
                 self.db.commit()
 
-            # Re-classify with current return periods instead of trusting
-            # artifact severity scores, which may be stale if return periods
-            # were updated after the artifact was prepared.
-            rp_lookup = self.repo.get_all_return_periods(provider)
-            logger.info(
-                "loaded return periods for ingest re-classification",
-                extra={"provider": provider, "return_period_count": len(rp_lookup)},
-            )
-
-            for item in self.artifacts.iter_summary_rows(provider, resolved_run.run_id):
-                rp_model = rp_lookup.get(str(item.provider_reach_id))
-                rp_schema = None if rp_model is None else to_return_period_schema(rp_model)
-                cls = classify_peak_flow(item.peak_mean_cms, rp_schema)
-                batch.append(
-                    ReachSummarySchema(
-                        provider=str(item.provider),
-                        run_id=str(item.run_id),
-                        provider_reach_id=str(item.provider_reach_id),
-                        peak_time_utc=item.peak_time_utc,
-                        peak_mean_cms=item.peak_mean_cms,
-                        peak_median_cms=item.peak_median_cms,
-                        peak_max_cms=item.peak_max_cms,
-                        now_mean_cms=item.now_mean_cms,
-                        now_max_cms=item.now_max_cms,
-                        return_period_band=cls.return_period_band,
-                        severity_score=cls.severity_score,
-                        is_flagged=cls.is_flagged,
-                        metadata_json=item.raw_payload_json,
-                    )
+            if _use_copy:
+                total = self._ingest_summaries_copy(
+                    provider, resolved_run.run_id, skip_reclassify=skip_reclassify,
                 )
-                if len(batch) >= self.settings.forecast_bulk_ingest_batch_size:
-                    chunk_index += 1
-                    chunk_rows = self.repo.upsert_summaries(batch)
-                    total += chunk_rows
-                    self.db.commit()
-                    self.db.expire_all()
-                    logger.info(
-                        "summary ingest chunk complete",
-                        extra={
-                            "provider": provider,
-                            "run_id": resolved_run.run_id,
-                            "source": "summary_artifact",
-                            "chunk_number": chunk_index,
-                            "chunk_rows_written": chunk_rows,
-                            "total_rows_written": total,
-                        },
-                    )
-                    batch = []
-            if batch:
-                chunk_index += 1
-                chunk_rows = self.repo.upsert_summaries(batch)
-                total += chunk_rows
-                self.db.commit()
-                self.db.expire_all()
+            else:
+                total = self._ingest_summaries_classic(
+                    provider, resolved_run.run_id, skip_reclassify=skip_reclassify,
+                )
 
             ops = self._run_ops_metadata(run_row)
             ingest_meta = dict(ops.get("summary_ingest", {}))
@@ -761,6 +807,15 @@ class ForecastService:
             )
             return total
         except Exception as exc:
+            logger.error(
+                "summary ingest failed",
+                extra={"provider": provider, "run_id": resolved_run.run_id, "error": str(exc)},
+                exc_info=True,
+            )
+            # Roll back the failed transaction before writing error metadata.
+            self.db.rollback()
+            # Re-fetch the run row after rollback (previous reference is expired).
+            run_row = self.repo.get_or_create_run(provider, resolved_run.run_id)
             ops = self._run_ops_metadata(run_row)
             ingest_meta = dict(ops.get("summary_ingest", {}))
             ingest_meta["attempted"] = True
@@ -774,6 +829,159 @@ class ForecastService:
             self._set_run_ops_metadata(run_row, ops)
             self.db.commit()
             raise
+
+    def _ingest_summaries_classic(self, provider: str, run_id: str, *, skip_reclassify: bool) -> int:
+        """Original row-by-row ingest path (works with any DB backend)."""
+        rp_lookup: dict | None = None
+        if not skip_reclassify:
+            rp_lookup = self.repo.get_all_return_periods(provider)
+            logger.info(
+                "loaded return periods for ingest re-classification",
+                extra={"provider": provider, "return_period_count": len(rp_lookup)},
+            )
+
+        total = 0
+        batch: list[ReachSummarySchema] = []
+        chunk_index = 0
+        for item in self.artifacts.iter_summary_rows(provider, run_id):
+            if skip_reclassify:
+                band = item.return_period_band
+                score = int(item.severity_score) if item.severity_score is not None else 0
+                flagged = bool(item.is_flagged)
+            else:
+                rp_model = rp_lookup.get(str(item.provider_reach_id))  # type: ignore[union-attr]
+                rp_schema = None if rp_model is None else to_return_period_schema(rp_model)
+                cls = classify_peak_flow(item.peak_mean_cms, rp_schema)
+                band = cls.return_period_band
+                score = cls.severity_score
+                flagged = cls.is_flagged
+            batch.append(
+                ReachSummarySchema(
+                    provider=str(item.provider),
+                    run_id=str(item.run_id),
+                    provider_reach_id=str(item.provider_reach_id),
+                    peak_time_utc=item.peak_time_utc,
+                    peak_mean_cms=item.peak_mean_cms,
+                    peak_median_cms=item.peak_median_cms,
+                    peak_max_cms=item.peak_max_cms,
+                    now_mean_cms=item.now_mean_cms,
+                    now_max_cms=item.now_max_cms,
+                    return_period_band=band,
+                    severity_score=score,
+                    is_flagged=flagged,
+                    metadata_json=item.raw_payload_json,
+                )
+            )
+            if len(batch) >= self.settings.forecast_bulk_ingest_batch_size:
+                chunk_index += 1
+                chunk_rows = self.repo.upsert_summaries(batch)
+                total += chunk_rows
+                self.db.commit()
+                self.db.expire_all()
+                logger.info(
+                    "summary ingest chunk complete",
+                    extra={
+                        "provider": provider,
+                        "run_id": run_id,
+                        "source": "summary_artifact",
+                        "chunk_number": chunk_index,
+                        "chunk_rows_written": chunk_rows,
+                        "total_rows_written": total,
+                    },
+                )
+                batch = []
+        if batch:
+            chunk_index += 1
+            chunk_rows = self.repo.upsert_summaries(batch)
+            total += chunk_rows
+            self.db.commit()
+            self.db.expire_all()
+        return total
+
+    def _ingest_summaries_copy(self, provider: str, run_id: str, *, skip_reclassify: bool) -> int:
+        """COPY-based fast ingest path (PostgreSQL + psycopg3 only).
+
+        Reads Arrow tables directly from the parquet file and bulk-loads
+        them via COPY into a staging table, then merges into the target.
+        """
+        import pyarrow as pa
+        import pyarrow.compute as pc
+
+        rp_lookup: dict | None = None
+        if not skip_reclassify:
+            rp_lookup = self.repo.get_all_return_periods(provider)
+            logger.info(
+                "loaded return periods for ingest re-classification (COPY path)",
+                extra={"provider": provider, "return_period_count": len(rp_lookup)},
+            )
+
+        total = 0
+        chunk_index = 0
+        for table in self.artifacts.iter_summary_tables(provider, run_id):
+            chunk_index += 1
+
+            if not skip_reclassify and rp_lookup:
+                table = self._reclassify_arrow_table(table, rp_lookup)
+
+            # Add columns the DB expects but the parquet doesn't have.
+            if "first_exceedance_time_utc" not in table.column_names:
+                table = table.append_column(
+                    "first_exceedance_time_utc",
+                    pa.array([None] * table.num_rows, type=pa.timestamp("us", tz="UTC")),
+                )
+            if "metadata_json" not in table.column_names:
+                table = table.append_column(
+                    "metadata_json",
+                    pa.array([None] * table.num_rows, type=pa.string()),
+                )
+
+            chunk_rows = self.repo.copy_upsert_summaries_from_table(table)
+            total += chunk_rows
+            self.db.commit()
+            self.db.expire_all()
+            logger.info(
+                "summary ingest chunk complete",
+                extra={
+                    "provider": provider,
+                    "run_id": run_id,
+                    "source": "summary_artifact",
+                    "chunk_number": chunk_index,
+                    "chunk_rows_written": chunk_rows,
+                    "total_rows_written": total,
+                    "method": "copy",
+                },
+            )
+            del table
+        return total
+
+    @staticmethod
+    def _reclassify_arrow_table(table, rp_lookup: dict):
+        """Re-classify severity for every row in an Arrow table using current return periods."""
+        import pyarrow as pa
+
+        reach_ids = table.column("provider_reach_id").to_pylist()
+        peak_means = table.column("peak_mean_cms").to_pylist()
+
+        bands = []
+        scores = []
+        flags = []
+        for reach_id, peak_mean in zip(reach_ids, peak_means):
+            rp_model = rp_lookup.get(str(reach_id))
+            rp_schema = None if rp_model is None else to_return_period_schema(rp_model)
+            cls = classify_peak_flow(peak_mean, rp_schema)
+            bands.append(cls.return_period_band)
+            scores.append(float(cls.severity_score))
+            flags.append(cls.is_flagged)
+
+        # Replace the classification columns in the table.
+        col_idx_band = table.schema.get_field_index("return_period_band")
+        col_idx_score = table.schema.get_field_index("severity_score")
+        col_idx_flag = table.schema.get_field_index("is_flagged")
+
+        table = table.set_column(col_idx_band, "return_period_band", pa.array(bands, type=pa.string()))
+        table = table.set_column(col_idx_score, "severity_score", pa.array(scores, type=pa.float64()))
+        table = table.set_column(col_idx_flag, "is_flagged", pa.array(flags, type=pa.bool_()))
+        return table
 
     def ingest_forecast_run(
         self,

@@ -1,6 +1,12 @@
-from collections.abc import Iterable
+from __future__ import annotations
 
-from sqlalchemy import Select, and_, delete, desc, exists, func, select
+import csv
+import io
+import logging
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
+
+from sqlalchemy import Select, and_, delete, desc, exists, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -11,6 +17,24 @@ from app.forecast.schemas import (
     ReturnPeriodSchema,
     TimeseriesPointSchema,
 )
+
+if TYPE_CHECKING:
+    import pyarrow as pa
+
+logger = logging.getLogger(__name__)
+
+
+# PostgreSQL supports at most 32,767 bind parameters per statement.
+# We leave headroom and cap at 30,000 to be safe.
+_PG_MAX_PARAMS = 30_000
+
+
+def _chunked(values: list[dict], cols: int) -> list[list[dict]]:
+    """Split *values* into sub-lists that fit within the PG parameter limit."""
+    if cols <= 0:
+        return [values] if values else []
+    chunk_size = max(1, _PG_MAX_PARAMS // cols)
+    return [values[i : i + chunk_size] for i in range(0, len(values), chunk_size)]
 
 
 class ForecastRepository:
@@ -35,62 +59,64 @@ class ForecastRepository:
         return row
 
     def upsert_return_periods(self, rows: Iterable[ReturnPeriodSchema]) -> int:
-        count = 0
-        for payload in rows:
-            row = self.db.execute(
-                select(models.ForecastProviderReturnPeriod).where(
-                    and_(
-                        models.ForecastProviderReturnPeriod.provider == payload.provider,
-                        models.ForecastProviderReturnPeriod.provider_reach_id == payload.provider_reach_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if not row:
-                row = models.ForecastProviderReturnPeriod(
-                    provider=payload.provider, provider_reach_id=payload.provider_reach_id
-                )
-                self.db.add(row)
-            row.rp_2 = payload.rp_2
-            row.rp_5 = payload.rp_5
-            row.rp_10 = payload.rp_10
-            row.rp_25 = payload.rp_25
-            row.rp_50 = payload.rp_50
-            row.rp_100 = payload.rp_100
-            row.metadata_json = payload.metadata_json
-            count += 1
+        values = [
+            {
+                "provider": payload.provider,
+                "provider_reach_id": payload.provider_reach_id,
+                "rp_2": payload.rp_2,
+                "rp_5": payload.rp_5,
+                "rp_10": payload.rp_10,
+                "rp_25": payload.rp_25,
+                "rp_50": payload.rp_50,
+                "rp_100": payload.rp_100,
+                "metadata_json": payload.metadata_json,
+            }
+            for payload in rows
+        ]
+        if not values:
+            return 0
+        update_cols = {"rp_2", "rp_5", "rp_10", "rp_25", "rp_50", "rp_100", "metadata_json"}
+        for chunk in _chunked(values, cols=9):
+            stmt = pg_insert(models.ForecastProviderReturnPeriod).values(chunk)
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_rp_provider_reach",
+                set_={col: stmt.excluded[col] for col in update_cols},
+            )
+            self.db.execute(stmt)
         self.db.flush()
-        return count
+        return len(values)
 
     def bulk_upsert_timeseries(self, rows: Iterable[TimeseriesPointSchema]) -> int:
-        count = 0
-        for payload in rows:
-            row = self.db.execute(
-                select(models.ForecastProviderReachTimeseries).where(
-                    and_(
-                        models.ForecastProviderReachTimeseries.provider == payload.provider,
-                        models.ForecastProviderReachTimeseries.run_id == payload.run_id,
-                        models.ForecastProviderReachTimeseries.provider_reach_id == payload.provider_reach_id,
-                        models.ForecastProviderReachTimeseries.forecast_time_utc == payload.forecast_time_utc,
-                    )
-                )
-            ).scalar_one_or_none()
-            if not row:
-                row = models.ForecastProviderReachTimeseries(
-                    provider=payload.provider,
-                    run_id=payload.run_id,
-                    provider_reach_id=payload.provider_reach_id,
-                    forecast_time_utc=payload.forecast_time_utc,
-                )
-                self.db.add(row)
-            row.flow_mean_cms = payload.flow_mean_cms
-            row.flow_median_cms = payload.flow_median_cms
-            row.flow_p25_cms = payload.flow_p25_cms
-            row.flow_p75_cms = payload.flow_p75_cms
-            row.flow_max_cms = payload.flow_max_cms
-            row.raw_payload_json = payload.raw_payload_json
-            count += 1
+        values = [
+            {
+                "provider": payload.provider,
+                "run_id": payload.run_id,
+                "provider_reach_id": payload.provider_reach_id,
+                "forecast_time_utc": payload.forecast_time_utc,
+                "flow_mean_cms": payload.flow_mean_cms,
+                "flow_median_cms": payload.flow_median_cms,
+                "flow_p25_cms": payload.flow_p25_cms,
+                "flow_p75_cms": payload.flow_p75_cms,
+                "flow_max_cms": payload.flow_max_cms,
+                "raw_payload_json": payload.raw_payload_json,
+            }
+            for payload in rows
+        ]
+        if not values:
+            return 0
+        update_cols = {
+            "flow_mean_cms", "flow_median_cms", "flow_p25_cms",
+            "flow_p75_cms", "flow_max_cms", "raw_payload_json",
+        }
+        for chunk in _chunked(values, cols=10):
+            stmt = pg_insert(models.ForecastProviderReachTimeseries).values(chunk)
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_ts_provider_run_reach_time",
+                set_={col: stmt.excluded[col] for col in update_cols},
+            )
+            self.db.execute(stmt)
         self.db.flush()
-        return count
+        return len(values)
 
     def upsert_summaries(self, rows: Iterable[ReachSummarySchema]) -> int:
         values = [
@@ -120,14 +146,139 @@ class ForecastRepository:
             "now_mean_cms", "now_max_cms",
             "return_period_band", "severity_score", "is_flagged", "metadata_json",
         }
-        stmt = pg_insert(models.ForecastProviderReachSummary).values(values)
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_summary_provider_run_reach",
-            set_={col: stmt.excluded[col] for col in update_cols},
-        )
-        self.db.execute(stmt)
+        for chunk in _chunked(values, cols=14):
+            stmt = pg_insert(models.ForecastProviderReachSummary).values(chunk)
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_summary_provider_run_reach",
+                set_={col: stmt.excluded[col] for col in update_cols},
+            )
+            self.db.execute(stmt)
         return len(values)
 
+    # ------------------------------------------------------------------
+    # COPY-based fast path (PostgreSQL + psycopg3 only)
+    # ------------------------------------------------------------------
+
+    _SUMMARY_COPY_COLS = (
+        "provider", "run_id", "provider_reach_id",
+        "peak_time_utc", "first_exceedance_time_utc",
+        "peak_mean_cms", "peak_median_cms", "peak_max_cms",
+        "now_mean_cms", "now_max_cms",
+        "return_period_band", "severity_score", "is_flagged", "metadata_json",
+    )
+
+    _SUMMARY_UPDATE_COLS = (
+        "peak_time_utc", "first_exceedance_time_utc",
+        "peak_mean_cms", "peak_median_cms", "peak_max_cms",
+        "now_mean_cms", "now_max_cms",
+        "return_period_band", "severity_score", "is_flagged", "metadata_json",
+    )
+
+    def copy_upsert_summaries_from_table(self, table: pa.Table) -> int:
+        """Bulk-load an Arrow table into forecast_provider_reach_summaries
+        using PostgreSQL COPY (via psycopg3) + a temp staging table for upsert.
+
+        Falls back to the regular ``upsert_summaries`` path when the
+        underlying connection is not psycopg3 / PostgreSQL.
+        """
+        num_rows = table.num_rows
+        if num_rows == 0:
+            return 0
+
+        raw_conn = self._get_psycopg_connection()
+        if raw_conn is None:
+            return self._fallback_upsert_from_table(table)
+
+        cols = self._SUMMARY_COPY_COLS
+        col_list = ", ".join(cols)
+        update_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in self._SUMMARY_UPDATE_COLS)
+
+        # Create an UNLOGGED temp table (no WAL overhead) matching the target schema.
+        self.db.execute(text(
+            "CREATE TEMP TABLE _stg_summaries (LIKE forecast_provider_reach_summaries INCLUDING DEFAULTS) "
+            "ON COMMIT DROP"
+        ))
+        self.db.flush()
+
+        # Build CSV in-memory from the Arrow table.
+        buf = self._arrow_table_to_csv(table, cols)
+
+        # COPY into the temp table.
+        raw_cursor = raw_conn.cursor()
+        with raw_cursor.copy(
+            f"COPY _stg_summaries ({col_list}) FROM STDIN WITH (FORMAT csv, HEADER true)"
+        ) as copy:
+            copy.write(buf.getvalue())
+
+        # Merge from staging into the real table.
+        self.db.execute(text(
+            f"INSERT INTO forecast_provider_reach_summaries ({col_list}) "
+            f"SELECT {col_list} FROM _stg_summaries "
+            f"ON CONFLICT ON CONSTRAINT uq_summary_provider_run_reach "
+            f"DO UPDATE SET {update_set}"
+        ))
+
+        return num_rows
+
+    def _get_psycopg_connection(self):
+        """Return the underlying psycopg connection, or None if unavailable."""
+        try:
+            sa_conn = self.db.connection()
+            dbapi_conn = sa_conn.connection.dbapi_connection
+            # psycopg3 connections have a .pgconn attribute
+            if hasattr(dbapi_conn, "pgconn"):
+                return dbapi_conn
+        except Exception:
+            pass
+        return None
+
+    def _arrow_table_to_csv(self, table: pa.Table, cols: tuple[str, ...]) -> io.BytesIO:
+        """Serialize selected columns of an Arrow table to CSV bytes."""
+        buf = io.BytesIO()
+        wrapper = io.TextIOWrapper(buf, encoding="utf-8", newline="")
+        writer = csv.writer(wrapper)
+        writer.writerow(cols)
+
+        # Convert to Python rows — Arrow's to_pylist() is faster than per-row iteration.
+        for row in table.to_pylist():
+            writer.writerow(self._format_csv_value(row.get(c)) for c in cols)
+
+        wrapper.flush()
+        wrapper.detach()  # prevent close from closing buf
+        buf.seek(0)
+        return buf
+
+    @staticmethod
+    def _format_csv_value(val) -> str:
+        if val is None:
+            return ""
+        # Floats that are whole numbers must be written without the decimal
+        # so PostgreSQL COPY accepts them for integer columns (e.g. severity_score).
+        if isinstance(val, float) and val.is_integer():
+            return str(int(val))
+        return str(val)
+
+    def _fallback_upsert_from_table(self, table: pa.Table) -> int:
+        """Convert Arrow table to ReachSummarySchema list and use the regular path."""
+        rows = []
+        for r in table.to_pylist():
+            rows.append(ReachSummarySchema(
+                provider=str(r["provider"]),
+                run_id=str(r["run_id"]),
+                provider_reach_id=str(r["provider_reach_id"]),
+                peak_time_utc=r.get("peak_time_utc"),
+                first_exceedance_time_utc=r.get("first_exceedance_time_utc"),
+                peak_mean_cms=r.get("peak_mean_cms"),
+                peak_median_cms=r.get("peak_median_cms"),
+                peak_max_cms=r.get("peak_max_cms"),
+                now_mean_cms=r.get("now_mean_cms"),
+                now_max_cms=r.get("now_max_cms"),
+                return_period_band=r.get("return_period_band"),
+                severity_score=int(r.get("severity_score", 0) or 0),
+                is_flagged=bool(r.get("is_flagged", False)),
+                metadata_json=r.get("metadata_json"),
+            ))
+        return self.upsert_summaries(rows)
 
     def delete_summaries_for_run(self, provider: str, run_id: str) -> int:
         stmt = delete(models.ForecastProviderReachSummary).where(

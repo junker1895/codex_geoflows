@@ -77,6 +77,25 @@ class ForecastProviderReachTimeseries(Base):
     )
 
 
+class ReachGridCrosswalk(Base):
+    """Maps GeoGloWS reach IDs to GloFAS grid cells (or other grid-based providers)."""
+
+    __tablename__ = "reach_grid_crosswalk"
+    __table_args__ = (
+        UniqueConstraint("reach_id", "target_provider", name="uq_crosswalk_reach_provider"),
+        Index("ix_crosswalk_provider", "target_provider"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    reach_id: Mapped[str] = mapped_column(String(128), index=True)
+    target_provider: Mapped[str] = mapped_column(String(64))
+    grid_lat: Mapped[float] = mapped_column(Float)
+    grid_lon: Mapped[float] = mapped_column(Float)
+    upstream_area_km2: Mapped[float | None] = mapped_column(Float, nullable=True)
+    distance_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ForecastProviderReachSummary(Base):
     __tablename__ = "forecast_provider_reach_summaries"
     __table_args__ = (

@@ -14,6 +14,7 @@ from app.forecast.jobs import prepare_bulk_artifact
 from app.forecast.providers.geoglows import GeoglowsForecastProvider
 from app.forecast.providers.geoglows_forecast_zarr import describe_forecast_dataset, open_geoglows_public_forecast_run_zarr
 from app.forecast.providers.geoglows_return_periods import open_geoglows_public_return_periods_zarr
+from app.forecast.providers.glofas import GlofasForecastProvider
 from app.forecast.service import ForecastService
 
 cli = typer.Typer(help="Forecast ingestion CLI")
@@ -29,6 +30,8 @@ def _build_service() -> ForecastService:
     providers = {}
     if settings.geoglows_enabled and "geoglows" in settings.forecast_enabled_providers:
         providers["geoglows"] = GeoglowsForecastProvider(settings)
+    if settings.glofas_enabled and "glofas" in settings.forecast_enabled_providers:
+        providers["glofas"] = GlofasForecastProvider(settings)
     return ForecastService(db=db, settings=settings, providers=providers)
 
 
@@ -212,10 +215,19 @@ def cli_ingest_forecast_summaries(
     provider: str = typer.Option("geoglows", "--provider"),
     run_id: str = typer.Option("latest", "--run-id"),
     replace_existing: bool = typer.Option(False, "--replace-existing"),
+    skip_reclassify: bool = typer.Option(False, "--skip-reclassify", help="Trust artifact classification; skip re-classification with current return periods."),
+    use_copy: bool = typer.Option(False, "--use-copy", help="Use PostgreSQL COPY fast-path for bulk loading (auto-detected when omitted)."),
 ) -> None:
     def _inner() -> None:
         service = _build_service()
-        count = service.ingest_forecast_summaries(provider=provider, run_id=run_id, replace_existing=replace_existing)
+        copy_flag = True if use_copy else None  # None = auto-detect
+        count = service.ingest_forecast_summaries(
+            provider=provider,
+            run_id=run_id,
+            replace_existing=replace_existing,
+            skip_reclassify=skip_reclassify,
+            use_copy=copy_flag,
+        )
         typer.echo(f"upserted summary rows: {count}")
 
     _safe_run(_inner)
@@ -379,6 +391,63 @@ def cli_smoke_geoglows(
 
         if not forecast_ok:
             raise typer.Exit(code=5)
+
+    _safe_run(_inner)
+
+
+@cli.command("import-glofas-return-periods")
+def cli_import_glofas_return_periods(
+    netcdf_dir: str | None = typer.Option(None, "--netcdf-dir", help="Directory with official GloFAS v4 threshold NetCDF files (flood_threshold_glofas_v4_rl_*.nc)"),
+    threshold_path: str | None = typer.Option(None, "--threshold-path", help="Pre-computed threshold file (parquet/CSV) with lat, lon, rp_2, rp_5, rp_20"),
+    reanalysis_path: str | None = typer.Option(None, "--reanalysis-path", help="GloFAS reanalysis GRIB to extract thresholds from"),
+    batch_size: int = typer.Option(5000, "--batch-size"),
+) -> None:
+    """Import GloFAS return period thresholds into the database.
+
+    Provide exactly one of:
+      --netcdf-dir     (preferred) directory with official GloFAS v4 NetCDF files
+      --threshold-path pre-computed parquet/CSV file
+      --reanalysis-path GloFAS reanalysis GRIB
+
+    Thresholds are mapped to GeoGloWS reach IDs via the crosswalk table.
+    """
+
+    def _inner() -> None:
+        service = _build_service()
+        count = service.import_glofas_return_periods(
+            netcdf_dir=netcdf_dir,
+            threshold_path=threshold_path,
+            reanalysis_path=reanalysis_path,
+            batch_size=batch_size,
+        )
+        typer.echo(f"upserted GloFAS return periods: {count}")
+
+    _safe_run(_inner)
+
+
+@cli.command("build-crosswalk")
+def cli_build_crosswalk(
+    provider: str = typer.Option("glofas", "--provider"),
+    metadata_path: str | None = typer.Option(None, "--metadata-path", help="Local path to GeoGloWS metadata parquet (~250 MB)"),
+    max_snap_km: float = typer.Option(10.0, "--max-snap-km"),
+    grid_resolution: float = typer.Option(0.05, "--grid-resolution"),
+    batch_size: int = typer.Option(5000, "--batch-size"),
+) -> None:
+    """Build reach-to-grid crosswalk table for a grid-based provider (e.g. GloFAS)."""
+
+    def _inner() -> None:
+        from app.forecast.providers.glofas_crosswalk import build_glofas_crosswalk
+
+        configure_logging(get_settings().log_level)
+        db = SessionLocal()
+        count = build_glofas_crosswalk(
+            metadata_parquet_path=metadata_path,
+            glofas_grid_resolution=grid_resolution,
+            max_snap_distance_km=max_snap_km,
+            batch_size=batch_size,
+            db_session=db,
+        )
+        typer.echo(f"built crosswalk for provider={provider}: {count} rows")
 
     _safe_run(_inner)
 

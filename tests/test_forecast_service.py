@@ -828,3 +828,130 @@ def test_summary_ingest_persists_final_ops_state(db_session, tmp_path):
     assert ops.get("current_status") == "map_ready"
     assert ops.get("map_ready") is True
     assert "map_ready" in ops.get("completed_stages", [])
+
+
+def test_ingest_forecast_summaries_skip_reclassify(db_session, tmp_path):
+    """When skip_reclassify=True, artifact classification values are used as-is."""
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100"])
+
+    service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+    service.ingest_forecast_summaries("geoglows", run.run_id, skip_reclassify=True)
+
+    summary = service.repo.get_summary("geoglows", run.run_id, "100")
+    assert summary is not None
+    # With FakeProvider: peak=22.0, rp_2=10, rp_5=20, rp_10=30 → band="5", score=2
+    # Since prepare already classifies AND skip_reclassify trusts it, same result.
+    assert summary.return_period_band == "5"
+    assert summary.severity_score == 2
+
+
+def test_ingest_forecast_summaries_skip_reclassify_keeps_stale_values(db_session, tmp_path):
+    """With skip_reclassify, changing return periods after prepare does NOT affect ingest."""
+    from app.forecast.schemas import ReturnPeriodSchema
+
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100"])
+    service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+
+    # Update return periods to make peak=22.0 fall below rp_2
+    updated_rp = ReturnPeriodSchema(
+        provider="geoglows", provider_reach_id="100",
+        rp_2=25, rp_5=50, rp_10=75, rp_25=100, rp_50=150, rp_100=200,
+    )
+    service.repo.upsert_return_periods([updated_rp])
+    db_session.commit()
+
+    # With skip_reclassify, old classification from the artifact is kept
+    service.ingest_forecast_summaries("geoglows", run.run_id, replace_existing=True, skip_reclassify=True)
+    summary = service.repo.get_summary("geoglows", run.run_id, "100")
+    assert summary is not None
+    assert summary.severity_score == 2  # stale value from artifact, NOT 0
+    assert summary.return_period_band == "5"
+
+
+def test_copy_upsert_fallback_on_sqlite(db_session, tmp_path):
+    """copy_upsert_summaries_from_table falls back to regular upsert on SQLite."""
+    import pyarrow as pa
+
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100"])
+
+    table = pa.table({
+        "provider": ["geoglows"],
+        "run_id": [run.run_id],
+        "provider_reach_id": ["100"],
+        "peak_time_utc": pa.array([None], type=pa.timestamp("us", tz="UTC")),
+        "first_exceedance_time_utc": pa.array([None], type=pa.timestamp("us", tz="UTC")),
+        "peak_mean_cms": [22.0],
+        "peak_median_cms": [22.0],
+        "peak_max_cms": [22.0],
+        "now_mean_cms": [5.0],
+        "now_max_cms": [5.0],
+        "return_period_band": ["5"],
+        "severity_score": [2.0],
+        "is_flagged": [True],
+        "metadata_json": pa.array([None], type=pa.string()),
+    })
+
+    count = service.repo.copy_upsert_summaries_from_table(table)
+    db_session.commit()
+    assert count == 1
+    summary = service.repo.get_summary("geoglows", run.run_id, "100")
+    assert summary is not None
+    assert summary.peak_mean_cms == 22.0
+
+
+def test_reclassify_arrow_table():
+    """Unit test for _reclassify_arrow_table static method."""
+    import pyarrow as pa
+    from app.db.models import ForecastProviderReturnPeriod
+
+    rp = ForecastProviderReturnPeriod()
+    rp.provider = "geoglows"
+    rp.provider_reach_id = "100"
+    rp.rp_2 = 10.0
+    rp.rp_5 = 20.0
+    rp.rp_10 = 30.0
+    rp.rp_25 = 40.0
+    rp.rp_50 = 50.0
+    rp.rp_100 = 60.0
+
+    table = pa.table({
+        "provider": ["geoglows"],
+        "run_id": ["2024010100"],
+        "provider_reach_id": ["100"],
+        "peak_time_utc": pa.array([None], type=pa.timestamp("us", tz="UTC")),
+        "peak_mean_cms": [22.0],
+        "peak_median_cms": [22.0],
+        "peak_max_cms": [22.0],
+        "now_mean_cms": [5.0],
+        "now_max_cms": [5.0],
+        "return_period_band": ["unknown"],
+        "severity_score": [0.0],
+        "is_flagged": [False],
+    })
+
+    result = ForecastService._reclassify_arrow_table(table, {"100": rp})
+    assert result.column("return_period_band").to_pylist() == ["5"]
+    assert result.column("severity_score").to_pylist() == [2.0]
+    assert result.column("is_flagged").to_pylist() == [True]
+
+
+def test_ingest_summaries_use_copy_false_forces_classic_path(db_session, tmp_path):
+    """Explicit use_copy=False forces the classic (non-COPY) path."""
+    settings = Settings(FORECAST_BULK_ARTIFACT_DIR=str(tmp_path / "artifacts"))
+    service = ForecastService(db_session, settings, {"geoglows": FakeProvider()})
+    run = service.discover_latest_run("geoglows")
+    service.ingest_return_periods("geoglows", ["100", "101", "102", "103", "104", "105"])
+    service.prepare_bulk_summaries("geoglows", run.run_id, if_present="overwrite")
+
+    count = service.ingest_forecast_summaries("geoglows", run.run_id, use_copy=False)
+    assert count == 6
+    assert service.repo.count_summaries_for_run("geoglows", run.run_id) == 6

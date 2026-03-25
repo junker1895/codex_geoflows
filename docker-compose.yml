@@ -23,6 +23,14 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     volumes:
       - .:/app
+      - forecast_artifacts:/app/data/forecast_artifacts
+      - forecast_cache:/app/data/forecast_cache
+      - geoglows_raw:/app/data/geoglows_raw
+      - glofas_raw:/app/data/glofas_raw
 
 volumes:
   pgdata:
+  forecast_artifacts:
+  forecast_cache:
+  geoglows_raw:
+  glofas_raw:
