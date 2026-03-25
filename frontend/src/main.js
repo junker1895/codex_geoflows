@@ -587,16 +587,19 @@ function switchProvider(newProvider) {
   // Clear existing forecast data
   forecastIndex = {};
   currentTier = null;
-  appliedFeatureStates.clear();
 
-  // Clear feature states on the map
+  // Clear feature states on the map before clearing the tracking set
   if (map && map.getSource('rivers')) {
-    // Remove and re-add the highlight layer to clear all feature states
-    if (highlightLayerAdded) {
-      map.removeLayer('rivers-highlighted');
-      highlightLayerAdded = false;
+    for (const reachId of appliedFeatureStates) {
+      const numId = Number(reachId);
+      if (isNaN(numId)) continue;
+      map.setFeatureState(
+        { source: 'rivers', sourceLayer: 'rivers', id: numId },
+        { severity: 0 }
+      );
     }
   }
+  appliedFeatureStates.clear();
 
   // Close info panel
   infoPanel.classList.add('hidden');
