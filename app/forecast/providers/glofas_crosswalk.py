@@ -211,7 +211,7 @@ def _load_geoglows_reaches(metadata_parquet_path: str | None, attributes_parquet
             meta_id: "reach_id",
             lat_col: "lat",
             lon_col: "lon",
-            area_col: "reach_upstream_area_km2",
+            area_col: "DSContArea_raw",
         }
     )
 
@@ -219,7 +219,28 @@ def _load_geoglows_reaches(metadata_parquet_path: str | None, attributes_parquet
     joined = joined.loc[valid_coords].copy()
     logger.info("Rows with valid coordinates: %d", len(joined))
 
-    joined["reach_upstream_area_km2"] = pd.to_numeric(joined["reach_upstream_area_km2"], errors="coerce")
+    joined["DSContArea_raw"] = pd.to_numeric(joined["DSContArea_raw"], errors="coerce")
+    raw_area_values = joined["DSContArea_raw"].to_numpy(dtype=np.float64)
+    raw_area_values = raw_area_values[np.isfinite(raw_area_values)]
+    if raw_area_values.size:
+        logger.info(
+            "DSContArea raw stats (assumed m^2): min=%.3f median=%.3f max=%.3f",
+            float(np.min(raw_area_values)),
+            float(np.median(raw_area_values)),
+            float(np.max(raw_area_values)),
+        )
+
+    joined["reach_upstream_area_km2"] = joined["DSContArea_raw"] / 1_000_000.0
+    converted_area_values = joined["reach_upstream_area_km2"].to_numpy(dtype=np.float64)
+    converted_area_values = converted_area_values[np.isfinite(converted_area_values)]
+    if converted_area_values.size:
+        logger.info(
+            "DSContArea converted stats (km^2): min=%.3f median=%.3f max=%.3f",
+            float(np.min(converted_area_values)),
+            float(np.median(converted_area_values)),
+            float(np.max(converted_area_values)),
+        )
+
     valid_area = np.isfinite(joined["reach_upstream_area_km2"]) & (joined["reach_upstream_area_km2"] > 0)
     joined = joined.loc[valid_area].copy()
     logger.info("Rows with valid DSContArea (>0): %d", len(joined))
@@ -258,6 +279,14 @@ def _load_glofas_candidates(
 
     uparea_m2 = uparea_da.values
     uparea_km2 = uparea_m2 / 1_000_000.0
+    uparea_km2_values = uparea_km2[np.isfinite(uparea_km2)]
+    if uparea_km2_values.size:
+        logger.info(
+            "GloFAS uparea stats (km^2): min=%.3f median=%.3f max=%.3f",
+            float(np.min(uparea_km2_values)),
+            float(np.median(uparea_km2_values)),
+            float(np.max(uparea_km2_values)),
+        )
 
     river_mask = _load_river_mask_from_thresholds(
         threshold_dir=threshold_dir,
@@ -334,6 +363,9 @@ def _select_best_candidate(
             continue
 
         distance_km = float(dist_rad) * 6371.0
+        if distance_km > 20.0:
+            continue
+
         area_penalty = abs(math.log(area_ratio)) * area_weight
         match_score = distance_km + area_penalty
 
