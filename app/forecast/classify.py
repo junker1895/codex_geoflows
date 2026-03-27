@@ -1,3 +1,4 @@
+import math
 from app.forecast.schemas import ClassificationResult, ReturnPeriodSchema
 
 
@@ -30,7 +31,11 @@ def classify_peak_flow(peak_flow: float | None, thresholds: ReturnPeriodSchema |
     return ClassificationResult(return_period_band="100", severity_score=6, is_flagged=True)
 
 
-def _valid_threshold(value: float | None) -> float | None:
-    if isinstance(value, (float, int)) and value > 0:
+def _valid_threshold(value: float | None, min_cms: float = 0.01) -> float | None:
+    """Return *value* as a float if it represents a physically meaningful
+    flow threshold (defaults to >= 0.01 m³/s).  Near-zero values such as
+    1e-20 that occasionally appear in GloFAS return-period datasets are
+    treated as missing so they don't cause false severity-6 classifications."""
+    if isinstance(value, (float, int)) and math.isfinite(float(value)) and value >= min_cms:
         return float(value)
     return None

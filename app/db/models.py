@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, String, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -89,10 +89,16 @@ class ReachGridCrosswalk(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     reach_id: Mapped[str] = mapped_column(String(128), index=True)
     target_provider: Mapped[str] = mapped_column(String(64))
-    grid_lat: Mapped[float] = mapped_column(Float)
-    grid_lon: Mapped[float] = mapped_column(Float)
+    grid_lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    grid_lon: Mapped[float | None] = mapped_column(Float, nullable=True)
     upstream_area_km2: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reach_upstream_area_km2: Mapped[float | None] = mapped_column(Float, nullable=True)
+    grid_upstream_area_km2: Mapped[float | None] = mapped_column(Float, nullable=True)
+    area_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
     distance_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    match_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    match_method: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_valid_match: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

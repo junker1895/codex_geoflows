@@ -428,9 +428,14 @@ def cli_import_glofas_return_periods(
 @cli.command("build-crosswalk")
 def cli_build_crosswalk(
     provider: str = typer.Option("glofas", "--provider"),
-    metadata_path: str | None = typer.Option(None, "--metadata-path", help="Local path to GeoGloWS metadata parquet (~250 MB)"),
-    max_snap_km: float = typer.Option(10.0, "--max-snap-km"),
-    grid_resolution: float = typer.Option(0.05, "--grid-resolution"),
+    metadata_path: str | None = typer.Option(None, "--metadata-path", help="Local path to GEOGLOWS metadata parquet"),
+    attributes_path: str | None = typer.Option(None, "--attributes-path", help="Path to GEOGLOWS streams/model attributes parquet (must include DSContArea)"),
+    uparea_path: str | None = typer.Option(None, "--uparea-path", help="Path to GloFAS uparea NetCDF (uparea_glofas_v4_0.nc)"),
+    threshold_dir: str | None = typer.Option(None, "--threshold-dir", help="Dir with GloFAS v4 threshold NetCDF files for river masking"),
+    nearest_k: int = typer.Option(16, "--nearest-k", help="Number of nearest candidate GloFAS cells to score per reach"),
+    max_area_ratio: float = typer.Option(10.0, "--max-area-ratio", help="Hard reject candidates with area ratio above this value"),
+    min_river_cms: float = typer.Option(1.0, "--min-river-cms", help="Min rp_2 (m³/s) for a grid cell to be a river cell"),
+    area_weight: float = typer.Option(20.0, "--area-weight", help="Weight multiplier for drainage-area mismatch penalty"),
     batch_size: int = typer.Option(5000, "--batch-size"),
 ) -> None:
     """Build reach-to-grid crosswalk table for a grid-based provider (e.g. GloFAS)."""
@@ -442,8 +447,13 @@ def cli_build_crosswalk(
         db = SessionLocal()
         count = build_glofas_crosswalk(
             metadata_parquet_path=metadata_path,
-            glofas_grid_resolution=grid_resolution,
-            max_snap_distance_km=max_snap_km,
+            attributes_parquet_path=attributes_path,
+            uparea_netcdf_path=uparea_path,
+            glofas_threshold_dir=threshold_dir,
+            nearest_candidates_k=nearest_k,
+            max_area_ratio=max_area_ratio,
+            min_river_threshold_cms=min_river_cms,
+            area_weight=area_weight,
             batch_size=batch_size,
             db_session=db,
         )
