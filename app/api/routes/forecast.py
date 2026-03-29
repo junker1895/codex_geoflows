@@ -40,8 +40,8 @@ def providers(db: Session = Depends(get_db_session)) -> list[str]:
     return get_forecast_service(db).list_providers()
 
 
-@router.get("/runs/latest", response_model=ForecastRunSchema)
-def latest_run(provider: str = Query(...), db: Session = Depends(get_db_session)) -> ForecastRunSchema:
+@router.get("/runs/latest")
+def latest_run(provider: str = Query(...), db: Session = Depends(get_db_session)) -> Response:
     service = get_forecast_service(db)
     try:
         run = service.get_latest_run(provider)
@@ -51,9 +51,13 @@ def latest_run(provider: str = Query(...), db: Session = Depends(get_db_session)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ForecastValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("forecast latest_run route failed", extra={"provider": provider})
+        raise HTTPException(status_code=500, detail="latest run resolution failed") from exc
     if not run:
         raise HTTPException(status_code=404, detail=f"No run found for provider '{provider}'")
-    return run
+    payload = orjson.dumps(run.model_dump())
+    return Response(content=payload, media_type="application/json")
 
 
 @router.get("/reaches/{provider}/{provider_reach_id}", response_model=ReachDetailResponse)
