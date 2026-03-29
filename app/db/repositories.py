@@ -489,9 +489,8 @@ class ForecastRepository:
                 min_lon = min_lat = max_lon = max_lat = None
             if None not in (min_lon, min_lat, max_lon, max_lat):
                 C = models.ReachGridCrosswalk
-                spatial_match = (
-                    select(C.id)
-                    .where(
+                stmt = stmt.where(
+                    exists().where(
                         and_(
                             C.reach_id == S.provider_reach_id,
                             C.grid_lon.is_not(None),
@@ -502,9 +501,7 @@ class ForecastRepository:
                             C.grid_lat <= max_lat,
                         )
                     )
-                    .limit(1)
                 )
-                stmt = stmt.where(exists(spatial_match))
         if limit:
             stmt = stmt.limit(limit)
         rows = self.db.execute(stmt).all()
