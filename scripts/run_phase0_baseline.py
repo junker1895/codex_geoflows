@@ -130,7 +130,7 @@ def run_iteration(base_url: str, provider: str, timeseries_limit: int) -> list[S
             )
         )
 
-    if reach_for_detail:
+    if reach_for_detail and timeseries_limit > 0:
         code, body, dur = do_get(
             base_url,
             f"/forecast/reaches/{provider}/{reach_for_detail}",
@@ -155,26 +155,33 @@ def run_iteration(base_url: str, provider: str, timeseries_limit: int) -> list[S
 
 
 def summarize(samples: list[Sample]) -> list[dict]:
-    buckets: dict[tuple[str, str], list[Sample]] = defaultdict(list)
+    buckets: dict[tuple[str, str, str], list[Sample]] = defaultdict(list)
     for sample in samples:
-        key = (sample.provider, sample.endpoint)
+        tier = ""
+        if sample.meta and isinstance(sample.meta, dict):
+            tier = str(sample.meta.get("tier") or "")
+        key = (sample.provider, sample.endpoint, tier)
         buckets[key].append(sample)
 
     rows: list[dict] = []
-    for (provider, endpoint), vals in sorted(buckets.items()):
+    for (provider, endpoint, tier), vals in sorted(buckets.items()):
         ok_vals = [v for v in vals if v.status_code == 200]
         durations = [v.duration_ms for v in ok_vals]
         payloads = [float(v.payload_bytes) for v in ok_vals]
+        counts = [float(v.count) for v in ok_vals if v.count is not None]
         rows.append(
             {
                 "provider": provider,
                 "endpoint": endpoint,
+                "tier": tier or None,
                 "samples_total": len(vals),
                 "samples_ok": len(ok_vals),
                 "latency_ms_p50": round(percentile(durations, 50), 2) if durations else None,
                 "latency_ms_p95": round(percentile(durations, 95), 2) if durations else None,
                 "payload_bytes_p50": int(round(percentile(payloads, 50))) if payloads else None,
                 "payload_bytes_p95": int(round(percentile(payloads, 95))) if payloads else None,
+                "count_p50": int(round(percentile(counts, 50))) if counts else None,
+                "count_p95": int(round(percentile(counts, 95))) if counts else None,
                 "errors": len(vals) - len(ok_vals),
             }
         )
@@ -188,11 +195,14 @@ def print_summary(summary_rows: list[dict]) -> None:
     headers = [
         "provider",
         "endpoint",
+        "tier",
         "samples_ok/total",
         "p50_ms",
         "p95_ms",
         "p50_bytes",
         "p95_bytes",
+        "p50_count",
+        "p95_count",
         "errors",
     ]
     print(" | ".join(headers))
@@ -203,11 +213,14 @@ def print_summary(summary_rows: list[dict]) -> None:
                 [
                     row["provider"],
                     row["endpoint"],
+                    str(row["tier"] or "-"),
                     f'{row["samples_ok"]}/{row["samples_total"]}',
                     str(row["latency_ms_p50"]),
                     str(row["latency_ms_p95"]),
                     str(row["payload_bytes_p50"]),
                     str(row["payload_bytes_p95"]),
+                    str(row["count_p50"]),
+                    str(row["count_p95"]),
                     str(row["errors"]),
                 ]
             )
@@ -224,7 +237,12 @@ def main() -> int:
         help="Providers to test (default: geoglows glofas).",
     )
     parser.add_argument("--iterations", type=int, default=3, help="How many passes to run.")
-    parser.add_argument("--timeseries-limit", type=int, default=500, help="Reach detail timeseries_limit.")
+    parser.add_argument(
+        "--timeseries-limit",
+        type=int,
+        default=500,
+        help="Reach detail timeseries_limit. Set 0 to skip detail calls.",
+    )
     parser.add_argument("--out-json", default="", help="Optional path to write full JSON report.")
     args = parser.parse_args()
 

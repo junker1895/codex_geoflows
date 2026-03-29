@@ -71,10 +71,16 @@ If backend is running locally (e.g. via `docker compose up`), you can run:
 python scripts/run_phase0_baseline.py --base-url http://localhost:8000 --iterations 3 --out-json phase0-report.json
 ```
 
+Map-only focused run (skip detail endpoint):
+
+```bash
+python scripts/run_phase0_baseline.py --base-url http://localhost:8000 --iterations 5 --timeseries-limit 0 --out-json phase0-map-only.json
+```
+
 This script automates API-side checks for:
 
 - `/forecast/runs/latest`
 - `/forecast/map/severity` at the current zoom-tier thresholds
 - one `/forecast/reaches/{provider}/{reach_id}` detail request per provider/iteration
 
-And prints p50/p95 summary rows for latency and payload bytes.
+And prints p50/p95 summary rows (including per-tier map summaries) for latency, payload bytes, and returned counts.
