@@ -351,22 +351,16 @@ async function initMap() {
       },
     });
 
-    // Debug: log river feature properties once source loads
-    map.once('sourcedata', (e) => {
-      if (e.sourceId !== 'rivers' || !e.isSourceLoaded) return;
+    // Debug: log river feature properties once map is idle and tiles loaded
+    map.once('idle', () => {
       const feats = map.querySourceFeatures('rivers', { sourceLayer: 'rivers' });
+      console.info('[rivers] features at current zoom:', feats.length);
       if (feats.length > 0) {
-        console.info('[rivers] sample feature properties:', feats[0].properties);
-        console.info('[rivers] sample feature id:', feats[0].id);
-        console.info('[rivers] all property keys:', Object.keys(feats[0].properties));
-        // Log a few more to see variation
-        const orders = new Set();
-        feats.slice(0, 200).forEach(f => {
-          Object.entries(f.properties).forEach(([k, v]) => {
-            if (/order|strahler|area|uparea|class|rank/i.test(k)) orders.add(`${k}=${v}`);
-          });
-        });
-        if (orders.size) console.info('[rivers] size-related props sample:', [...orders].slice(0, 20));
+        console.info('[rivers] sample properties:', JSON.stringify(feats[0].properties));
+        console.info('[rivers] sample id:', feats[0].id);
+        console.info('[rivers] all keys:', Object.keys(feats[0].properties));
+      } else {
+        console.info('[rivers] no features at this zoom - try zooming in and check again with: map.querySourceFeatures("rivers", {sourceLayer:"rivers"}).slice(0,3).map(f=>f.properties)');
       }
     });
 
