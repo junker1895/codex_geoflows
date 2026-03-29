@@ -318,12 +318,11 @@ async function initMap() {
       paint: { 'raster-fade-duration': 0 },
     });
 
-    // Add rivers PMTiles source with promoteId for efficient feature-state ops
+    // Add rivers PMTiles source (IDs are already baked into the tileset)
     map.addSource('rivers', {
       type: 'vector',
       url: `pmtiles://${PMTILES_URL}`,
       maxzoom: riversMaxZoom,
-      promoteId: { rivers: 'id' },
     });
 
     // Base river layer – minzoom 3 so we skip rendering at ultra-global zoom
@@ -491,10 +490,13 @@ function _applyVisibleFeatureStatesBatch() {
     seen.add(reachId);
 
     const info = forecastIndex[reachId];
-    const severity = info ? (info.severity_score || 0) : 0;
+    if (!info) continue; // no forecast data for this reach – skip
 
-    // Skip if already applied with correct value
-    if (appliedFeatureStates.has(reachId) && !info) continue;
+    const severity = info.severity_score || 0;
+    if (severity === 0) continue;
+
+    // Skip if we already wrote this exact state
+    if (appliedFeatureStates.has(reachId)) continue;
 
     const numId = Number(reachId);
     if (isNaN(numId)) continue;
@@ -503,9 +505,7 @@ function _applyVisibleFeatureStatesBatch() {
       { source: 'rivers', sourceLayer: 'rivers', id: numId },
       { severity }
     );
-    if (severity > 0) {
-      appliedFeatureStates.add(reachId);
-    }
+    appliedFeatureStates.add(reachId);
     writes += 1;
   }
 
