@@ -6,7 +6,7 @@ import logging
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Select, and_, delete, desc, exists, func, select, text
+from sqlalchemy import Select, and_, delete, desc, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -326,11 +326,9 @@ class ForecastRepository:
             # Only return runs that have at least one summary row
             S = models.ForecastProviderReachSummary
             stmt = stmt.where(
-                exists(
-                    select(S.id).where(
-                        and_(S.provider == models.ForecastRun.provider, S.run_id == models.ForecastRun.run_id)
-                    )
-                )
+                select(S.id)
+                .where(and_(S.provider == models.ForecastRun.provider, S.run_id == models.ForecastRun.run_id))
+                .exists()
             )
         return self.db.execute(
             stmt.order_by(desc(models.ForecastRun.run_date_utc)).limit(1)
@@ -460,6 +458,8 @@ class ForecastRepository:
         run_id: str,
         min_severity_score: int = 1,
         limit: int | None = None,
+        reach_ids: list[str] | None = None,
+        bbox: str | None = None,
     ) -> dict[str, int]:
         """Return {provider_reach_id: severity_score} for flagged reaches.
 
@@ -478,6 +478,35 @@ class ForecastRepository:
             )
             .order_by(desc(S.severity_score))
         )
+        if reach_ids:
+            stmt = stmt.where(S.provider_reach_id.in_(reach_ids))
+        if bbox:
+            try:
+                min_lon, min_lat, max_lon, max_lat = [float(x) for x in bbox.split(",")]
+            except Exception:
+                min_lon = min_lat = max_lon = max_lat = None
+            if None not in (min_lon, min_lat, max_lon, max_lat):
+                C = models.ReachGridCrosswalk
+                crosswalk_provider = "glofas" if provider == "geoglows" else provider
+                spatial_match = (
+                    select(1)
+                    .select_from(C)
+                    .where(
+                        and_(
+                            C.reach_id == S.provider_reach_id,
+                            C.target_provider == crosswalk_provider,
+                            C.grid_lon.is_not(None),
+                            C.grid_lat.is_not(None),
+                            C.grid_lon >= min_lon,
+                            C.grid_lon <= max_lon,
+                            C.grid_lat >= min_lat,
+                            C.grid_lat <= max_lat,
+                        )
+                    )
+                    .correlate(S)
+                    .exists()
+                )
+                stmt = stmt.where(spatial_match)
         if limit:
             stmt = stmt.limit(limit)
         rows = self.db.execute(stmt).all()
