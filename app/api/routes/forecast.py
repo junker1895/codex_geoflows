@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_forecast_service
 from app.db.session import get_db_session
+from app.db.repositories import ForecastRepository
 from app.forecast.exceptions import (
     ForecastValidationError,
     ProviderBackendUnavailableError,
@@ -43,21 +44,31 @@ def providers(db: Session = Depends(get_db_session)) -> list[str]:
 @router.get("/runs/latest")
 def latest_run(provider: str = Query(...), db: Session = Depends(get_db_session)) -> Response:
     service = get_forecast_service(db)
+    if provider not in service.list_providers():
+        raise HTTPException(status_code=400, detail=f"Provider '{provider}' is not enabled")
+
+    repo = ForecastRepository(db)
     try:
-        run = service.get_latest_run(provider)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except (ProviderBackendUnavailableError, ProviderOperationalError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except ForecastValidationError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        run = repo.get_latest_run(provider, require_has_data=True)
+        if run is None:
+            run = repo.get_latest_run(provider, require_has_data=False)
     except Exception as exc:
         logger.exception("forecast latest_run route failed", extra={"provider": provider})
-        raise HTTPException(status_code=500, detail="latest run resolution failed") from exc
-    if not run:
+        raise HTTPException(status_code=500, detail="latest run query failed") from exc
+
+    if run is None:
         raise HTTPException(status_code=404, detail=f"No run found for provider '{provider}'")
-    payload = orjson.dumps(run.model_dump())
-    return Response(content=payload, media_type="application/json")
+
+    payload = {
+        "provider": str(run.provider),
+        "run_id": str(run.run_id),
+        "run_date_utc": run.run_date_utc or run.issued_at_utc,
+        "issued_at_utc": run.issued_at_utc,
+        "source_type": str(run.source_type or "unknown"),
+        "ingest_status": str(run.ingest_status or "pending"),
+        "metadata_json": run.metadata_json if isinstance(run.metadata_json, dict) else None,
+    }
+    return Response(content=orjson.dumps(payload), media_type="application/json")
 
 
 @router.get("/reaches/{provider}/{provider_reach_id}", response_model=ReachDetailResponse)
@@ -170,6 +181,27 @@ def map_severity(
             "elapsed_seconds": elapsed_seconds,
         },
     )
+    return Response(content=payload, media_type="application/json")
+
+
+@router.post("/map/severity/filter")
+def map_severity_filter(
+    request: SeverityFilterRequest,
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Severity payload filtered to a provided set of reach IDs."""
+    started = perf_counter()
+    service = get_forecast_service(db)
+    resolved_run_id, severity = service.get_severity_map(
+        request.provider,
+        request.run_id,
+        request.min_severity_score,
+        limit=request.limit,
+        reach_ids=request.reach_ids or None,
+        bbox=request.bbox,
+    )
+    elapsed_seconds = round(perf_counter() - started, 6)
+    count = len(severity)
     payload = orjson.dumps({"run_id": resolved_run_id, "severity": severity})
     payload_bytes = len(payload)
     logger.info(
