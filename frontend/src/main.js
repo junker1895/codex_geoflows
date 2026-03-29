@@ -329,39 +329,56 @@ async function initMap() {
       maxzoom: riversMaxZoom,
     });
 
-    // Base river layer – filter by strmOrder based on zoom so only major
-    // rivers show at low zoom, progressively revealing smaller streams.
-    map.addLayer({
-      id: 'rivers-base',
-      type: 'line',
-      source: 'rivers',
-      'source-layer': 'rivers',
-      filter: [
-        '>=',
-        ['get', 'strmOrder'],
-        [
-          'interpolate', ['linear'], ['zoom'],
-          2, 4,   // global: major rivers only (order 4+)
-          4, 3,   // continental: order 3+
-          6, 2,   // regional: order 2+
-          8, 1,   // local: show everything
-        ],
-      ],
-      paint: {
-        'line-color': '#4a90d9',
-        'line-width': [
-          'interpolate',
-          ['linear'],
-          ['zoom'],
-          2, 1,
-          4, 1.2,
-          6, 1.2,
-          10, 1.8,
-          14, 2.5,
-        ],
-        'line-opacity': 0.5,
-      },
-    });
+    // -----------------------------------------------------------------------
+    // River layers – progressive reveal by strmOrder + minzoom
+    // -----------------------------------------------------------------------
+    // Visible base layers (what you see)
+    //   rivers-major:  strmOrder >= 4, always visible
+    //   rivers-medium: strmOrder 2–3, visible from z5
+    //   rivers-minor:  strmOrder 1,   visible from z8
+    // Ghost query layers (invisible, allow queryRenderedFeatures at all zooms)
+    //   rivers-query-major, rivers-query-medium, rivers-query-minor
+
+    const RIVER_TIERS = [
+      { id: 'rivers-major',  filter: ['>=', ['get', 'strmOrder'], 4], minzoom: 0,  width: [2, 1.5, 5, 2, 8, 2.5, 12, 3.5] },
+      { id: 'rivers-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 2], ['<', ['get', 'strmOrder'], 4]], minzoom: 5,  width: [5, 0.8, 8, 1.2, 12, 2] },
+      { id: 'rivers-minor',  filter: ['<', ['get', 'strmOrder'], 2], minzoom: 8,  width: [8, 0.5, 10, 0.8, 12, 1.2, 14, 1.8] },
+    ];
+
+    for (const tier of RIVER_TIERS) {
+      // Visible layer
+      map.addLayer({
+        id: tier.id,
+        type: 'line',
+        source: 'rivers',
+        'source-layer': 'rivers',
+        minzoom: tier.minzoom,
+        filter: tier.filter,
+        paint: {
+          'line-color': '#4a90d9',
+          'line-width': ['interpolate', ['linear'], ['zoom'], ...tier.width],
+          'line-opacity': 0.5,
+        },
+      });
+
+      // Ghost query layer – transparent, no minzoom, for click/query at all zooms
+      map.addLayer({
+        id: `${tier.id}-query`,
+        type: 'line',
+        source: 'rivers',
+        'source-layer': 'rivers',
+        minzoom: 0,
+        filter: tier.filter,
+        paint: {
+          'line-color': 'transparent',
+          'line-width': 6, // generous hit area
+          'line-opacity': 0,
+        },
+      });
+    }
+
+    // All layer IDs for event binding and feature queries
+    const RIVER_LAYER_IDS = RIVER_TIERS.flatMap(t => [t.id, `${t.id}-query`]);
 
     // Get the run ID first
     try {
@@ -402,77 +419,74 @@ async function initMap() {
     // Re-apply feature states as new tiles stream in (pan/zoom)
     map.on('sourcedata', onSourceData);
 
-    // Click handlers
-    map.on('click', 'rivers-highlighted', onRiverClick);
-    map.on('click', 'rivers-base', onRiverClick);
-    map.on('mouseenter', 'rivers-highlighted', () => {
-      map.getCanvas().style.cursor = 'pointer';
-    });
-    map.on('mouseleave', 'rivers-highlighted', () => {
-      map.getCanvas().style.cursor = '';
-    });
-    map.on('mouseenter', 'rivers-base', () => {
-      map.getCanvas().style.cursor = 'pointer';
-    });
-    map.on('mouseleave', 'rivers-base', () => {
-      map.getCanvas().style.cursor = '';
-    });
+    // Click / cursor handlers for all river layers (highlight layers bound later in addHighlightLayer)
+    for (const layerId of RIVER_LAYER_IDS) {
+      map.on('click', layerId, onRiverClick);
+      map.on('mouseenter', layerId, () => { map.getCanvas().style.cursor = 'pointer'; });
+      map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
+    }
   });
 }
 
 // ---------------------------------------------------------------------------
-// River highlight layer – uses feature-state for scalable styling
+// River highlight layers – one per tier, feature-state driven styling
 // ---------------------------------------------------------------------------
-let highlightLayerAdded = false;
+const HIGHLIGHT_LAYER_IDS = [];
+let highlightLayersAdded = false;
+
+const HIGHLIGHT_PAINT = {
+  'line-color': [
+    'match',
+    ['coalesce', ['feature-state', 'severity'], 0],
+    1, SEVERITY_COLORS[1],
+    2, SEVERITY_COLORS[2],
+    3, SEVERITY_COLORS[3],
+    4, SEVERITY_COLORS[4],
+    5, SEVERITY_COLORS[5],
+    6, SEVERITY_COLORS[6],
+    'transparent',
+  ],
+  'line-width': [
+    'match',
+    ['coalesce', ['feature-state', 'severity'], 0],
+    1, SEVERITY_WIDTHS[1],
+    2, SEVERITY_WIDTHS[2],
+    3, SEVERITY_WIDTHS[3],
+    4, SEVERITY_WIDTHS[4],
+    5, SEVERITY_WIDTHS[5],
+    6, SEVERITY_WIDTHS[6],
+    0,
+  ],
+  'line-opacity': 1,
+};
 
 function addHighlightLayer() {
-  if (highlightLayerAdded) return;
+  if (highlightLayersAdded) return;
 
-  // Use feature-state driven styling – works with any number of features
-  // Same strmOrder filter as base layer so highlights match visible rivers
-  map.addLayer({
-    id: 'rivers-highlighted',
-    type: 'line',
-    source: 'rivers',
-    'source-layer': 'rivers',
-    filter: [
-      '>=',
-      ['get', 'strmOrder'],
-      [
-        'interpolate', ['linear'], ['zoom'],
-        2, 4,
-        4, 3,
-        6, 2,
-        8, 1,
-      ],
-    ],
-    paint: {
-      'line-color': [
-        'match',
-        ['coalesce', ['feature-state', 'severity'], 0],
-        1, SEVERITY_COLORS[1],
-        2, SEVERITY_COLORS[2],
-        3, SEVERITY_COLORS[3],
-        4, SEVERITY_COLORS[4],
-        5, SEVERITY_COLORS[5],
-        6, SEVERITY_COLORS[6],
-        'transparent',
-      ],
-      'line-width': [
-        'match',
-        ['coalesce', ['feature-state', 'severity'], 0],
-        1, SEVERITY_WIDTHS[1],
-        2, SEVERITY_WIDTHS[2],
-        3, SEVERITY_WIDTHS[3],
-        4, SEVERITY_WIDTHS[4],
-        5, SEVERITY_WIDTHS[5],
-        6, SEVERITY_WIDTHS[6],
-        0,
-      ],
-      'line-opacity': 1,
-    },
-  });
-  highlightLayerAdded = true;
+  // Create a highlight layer for each tier so visibility matches base layers
+  const tiers = [
+    { id: 'rivers-highlight-major',  filter: ['>=', ['get', 'strmOrder'], 4], minzoom: 0 },
+    { id: 'rivers-highlight-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 2], ['<', ['get', 'strmOrder'], 4]], minzoom: 5 },
+    { id: 'rivers-highlight-minor',  filter: ['<', ['get', 'strmOrder'], 2], minzoom: 8 },
+  ];
+
+  for (const tier of tiers) {
+    map.addLayer({
+      id: tier.id,
+      type: 'line',
+      source: 'rivers',
+      'source-layer': 'rivers',
+      minzoom: tier.minzoom,
+      filter: tier.filter,
+      paint: HIGHLIGHT_PAINT,
+    });
+    HIGHLIGHT_LAYER_IDS.push(tier.id);
+    // Bind click/cursor handlers
+    map.on('click', tier.id, onRiverClick);
+    map.on('mouseenter', tier.id, () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', tier.id, () => { map.getCanvas().style.cursor = ''; });
+  }
+  highlightLayersAdded = true;
 }
 
 const appliedFeatureStates = new Set();
