@@ -85,7 +85,20 @@ def map_reaches(
             flagged_only=flagged_only,
             min_severity_score=min_severity_score,
         )
-        logger.info("forecast map_reaches route completed", extra={"provider": provider, "requested_run_id": run_id or "latest", "resolved_run_id": resolved_run_id, "elapsed_seconds": round(perf_counter()-started,6)})
+        logger.info(
+            "forecast map_reaches route completed",
+            extra={
+                "provider": provider,
+                "requested_run_id": run_id or "latest",
+                "resolved_run_id": resolved_run_id,
+                "bbox": bbox,
+                "limit": limit,
+                "flagged_only": flagged_only,
+                "min_severity_score": min_severity_score,
+                "count": response.meta.count,
+                "elapsed_seconds": round(perf_counter() - started, 6),
+            },
+        )
         return response
     except ValueError as exc:
         logger.exception("forecast map_reaches route failed", extra={"provider": provider, "requested_run_id": run_id or "latest", "resolved_run_id": resolved_run_id})
@@ -117,6 +130,16 @@ def map_severity(
         },
     )
     payload = orjson.dumps({"run_id": resolved_run_id, "severity": severity})
+    payload_bytes = len(payload)
+    logger.info(
+        "forecast map_severity payload prepared",
+        extra={
+            "provider": provider,
+            "run_id": resolved_run_id,
+            "count": len(severity),
+            "payload_bytes": payload_bytes,
+        },
+    )
     return Response(content=payload, media_type="application/json")
 
 
