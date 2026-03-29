@@ -493,6 +493,7 @@ class ForecastRepository:
                     exists().where(
                         and_(
                             C.reach_id == S.provider_reach_id,
+                            C.target_provider == provider,
                             C.grid_lon.is_not(None),
                             C.grid_lat.is_not(None),
                             C.grid_lon >= min_lon,
