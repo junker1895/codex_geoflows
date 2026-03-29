@@ -1732,13 +1732,16 @@ class ForecastService:
 
 def to_run_schema(row: models.ForecastRun) -> ForecastRunSchema:
     metadata_json = row.metadata_json if isinstance(row.metadata_json, dict) else None
+    run_date_utc = row.run_date_utc or row.issued_at_utc or datetime.now(UTC)
+    source_type = row.source_type or "unknown"
+    ingest_status = row.ingest_status or "pending"
     return ForecastRunSchema(
         provider=str(row.provider),
         run_id=str(row.run_id),
-        run_date_utc=row.run_date_utc,
+        run_date_utc=run_date_utc,
         issued_at_utc=row.issued_at_utc,
-        source_type=str(row.source_type),
-        ingest_status=str(row.ingest_status),
+        source_type=str(source_type),
+        ingest_status=str(ingest_status),
         metadata_json=metadata_json,
     )
 
