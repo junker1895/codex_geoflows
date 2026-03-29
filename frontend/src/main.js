@@ -331,14 +331,14 @@ async function initMap() {
       type: 'line',
       source: 'rivers',
       'source-layer': 'rivers',
-      minzoom: 3,
       paint: {
         'line-color': '#4a90d9',
         'line-width': [
           'interpolate',
           ['linear'],
           ['zoom'],
-          3, 0.8,
+          2, 0.5,
+          4, 0.8,
           6, 1.2,
           10, 1.8,
           14, 2.5,
@@ -418,7 +418,6 @@ function addHighlightLayer() {
     type: 'line',
     source: 'rivers',
     'source-layer': 'rivers',
-    minzoom: 3,
     paint: {
       'line-color': [
         'match',
