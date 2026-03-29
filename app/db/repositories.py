@@ -488,25 +488,22 @@ class ForecastRepository:
             if None not in (min_lon, min_lat, max_lon, max_lat):
                 C = models.ReachGridCrosswalk
                 crosswalk_provider = "glofas" if provider == "geoglows" else provider
-                spatial_match = (
-                    select(1)
-                    .select_from(C)
-                    .where(
-                        and_(
-                            C.reach_id == S.provider_reach_id,
-                            C.target_provider == crosswalk_provider,
-                            C.grid_lon.is_not(None),
-                            C.grid_lat.is_not(None),
-                            C.grid_lon >= min_lon,
-                            C.grid_lon <= max_lon,
-                            C.grid_lat >= min_lat,
-                            C.grid_lat <= max_lat,
-                        )
+                stmt = stmt.join(
+                    C,
+                    and_(
+                        C.reach_id == S.provider_reach_id,
+                        C.target_provider == crosswalk_provider,
+                    ),
+                ).where(
+                    and_(
+                        C.grid_lon.is_not(None),
+                        C.grid_lat.is_not(None),
+                        C.grid_lon >= min_lon,
+                        C.grid_lon <= max_lon,
+                        C.grid_lat >= min_lat,
+                        C.grid_lat <= max_lat,
                     )
-                    .correlate(S)
-                    .exists()
                 )
-                stmt = stmt.where(spatial_match)
         if limit:
             stmt = stmt.limit(limit)
         rows = self.db.execute(stmt).all()
