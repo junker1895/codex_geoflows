@@ -380,6 +380,17 @@ async function initMap() {
     // All layer IDs for event binding and feature queries
     const RIVER_LAYER_IDS = RIVER_TIERS.flatMap(t => [t.id, `${t.id}-query`]);
 
+    // Debug: log strmOrder distribution once tiles load
+    map.once('idle', () => {
+      const feats = map.querySourceFeatures('rivers', { sourceLayer: 'rivers' });
+      const orders = {};
+      feats.forEach(f => {
+        const o = f.properties?.strmOrder ?? 'none';
+        orders[o] = (orders[o] || 0) + 1;
+      });
+      console.info('[rivers] strmOrder distribution at zoom', map.getZoom().toFixed(1), ':', orders, '(total:', feats.length, ')');
+    });
+
     // Get the run ID first
     try {
       await loadRunId();
