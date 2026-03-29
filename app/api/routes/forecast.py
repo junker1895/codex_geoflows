@@ -47,6 +47,10 @@ def latest_run(provider: str = Query(...), db: Session = Depends(get_db_session)
         run = service.get_latest_run(provider)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (ProviderBackendUnavailableError, ProviderOperationalError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ForecastValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not run:
         raise HTTPException(status_code=404, detail=f"No run found for provider '{provider}'")
     return run
