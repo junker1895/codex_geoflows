@@ -6,7 +6,7 @@ import logging
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Select, and_, delete, desc, exists, func, select, text
+from sqlalchemy import Select, and_, delete, desc, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
