@@ -461,6 +461,7 @@ class ForecastRepository:
         min_severity_score: int = 1,
         limit: int | None = None,
         reach_ids: list[str] | None = None,
+        bbox: str | None = None,
     ) -> dict[str, int]:
         """Return {provider_reach_id: severity_score} for flagged reaches.
 
@@ -481,6 +482,29 @@ class ForecastRepository:
         )
         if reach_ids:
             stmt = stmt.where(S.provider_reach_id.in_(reach_ids))
+        if bbox:
+            try:
+                min_lon, min_lat, max_lon, max_lat = [float(x) for x in bbox.split(",")]
+            except Exception:
+                min_lon = min_lat = max_lon = max_lat = None
+            if None not in (min_lon, min_lat, max_lon, max_lat):
+                C = models.ReachGridCrosswalk
+                spatial_match = (
+                    select(C.id)
+                    .where(
+                        and_(
+                            C.reach_id == S.provider_reach_id,
+                            C.grid_lon.is_not(None),
+                            C.grid_lat.is_not(None),
+                            C.grid_lon >= min_lon,
+                            C.grid_lon <= max_lon,
+                            C.grid_lat >= min_lat,
+                            C.grid_lat <= max_lat,
+                        )
+                    )
+                    .limit(1)
+                )
+                stmt = stmt.where(exists(spatial_match))
         if limit:
             stmt = stmt.limit(limit)
         rows = self.db.execute(stmt).all()

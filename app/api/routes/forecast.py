@@ -31,6 +31,7 @@ class SeverityFilterRequest(BaseModel):
     run_id: str | None = None
     min_severity_score: int = Field(default=1, ge=1, le=6)
     limit: int | None = Field(default=None, ge=1)
+    bbox: str | None = None
     reach_ids: list[str] = Field(default_factory=list)
 
 
@@ -133,12 +134,19 @@ def map_severity(
     run_id: str | None = Query(default=None),
     min_severity_score: int = Query(default=1, ge=1, le=6),
     limit: int | None = Query(default=None, ge=1),
+    bbox: str | None = Query(default=None),
     db: Session = Depends(get_db_session),
 ) -> Response:
     """Ultra-compact severity payload for map colouring: ``{run_id, severity: {reach_id: score}}``."""
     started = perf_counter()
     service = get_forecast_service(db)
-    resolved_run_id, severity = service.get_severity_map(provider, run_id, min_severity_score, limit=limit)
+    resolved_run_id, severity = service.get_severity_map(
+        provider,
+        run_id,
+        min_severity_score,
+        limit=limit,
+        bbox=bbox,
+    )
     elapsed_seconds = round(perf_counter() - started, 6)
     count = len(severity)
     logger.info(
@@ -186,15 +194,17 @@ def map_severity_filter(
         request.min_severity_score,
         limit=request.limit,
         reach_ids=request.reach_ids or None,
+        bbox=request.bbox,
     )
     elapsed_seconds = round(perf_counter() - started, 6)
     count = len(severity)
     payload = orjson.dumps({"run_id": resolved_run_id, "severity": severity})
     payload_bytes = len(payload)
     logger.info(
-        "forecast map_severity_filter route completed provider=%s run_id=%s requested_reach_ids=%s count=%s elapsed_seconds=%s payload_bytes=%s",
+        "forecast map_severity_filter route completed provider=%s run_id=%s bbox=%s requested_reach_ids=%s count=%s elapsed_seconds=%s payload_bytes=%s",
         request.provider,
         resolved_run_id,
+        request.bbox,
         len(request.reach_ids),
         count,
         elapsed_seconds,

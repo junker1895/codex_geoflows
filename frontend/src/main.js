@@ -63,17 +63,15 @@ function getTierForZoom(zoom) {
   return ZOOM_SEVERITY_TIERS[ZOOM_SEVERITY_TIERS.length - 1];
 }
 
-function getVisibleReachIds(maxIds = 4000) {
-  if (!map) return [];
-  const seen = new Set();
-  const features = map.queryRenderedFeatures(undefined, { layers: ['rivers-base'] });
-  for (const f of features) {
-    const id = f?.id;
-    if (id == null) continue;
-    seen.add(String(id));
-    if (seen.size >= maxIds) break;
-  }
-  return Array.from(seen);
+function getCurrentBbox() {
+  if (!map) return null;
+  const b = map.getBounds();
+  return [
+    b.getWest().toFixed(6),
+    b.getSouth().toFixed(6),
+    b.getEast().toFixed(6),
+    b.getNorth().toFixed(6),
+  ].join(',');
 }
 
 function getViewKey(zoom, minSeverity) {
@@ -204,8 +202,8 @@ async function loadRunId() {
 }
 
 async function loadSeverityMap(minSeverity, limit, signal) {
-  const visibleIds = getVisibleReachIds();
-  if (visibleIds.length === 0) return {};
+  const bbox = getCurrentBbox();
+  if (!bbox) return {};
   const resp = await fetchJSON(
     `${API_BASE}/map/severity/filter`,
     signal,
@@ -218,7 +216,8 @@ async function loadSeverityMap(minSeverity, limit, signal) {
         run_id: currentRunId,
         min_severity_score: minSeverity,
         limit,
-        reach_ids: visibleIds,
+        bbox,
+        reach_ids: [],
       }),
     }
   );

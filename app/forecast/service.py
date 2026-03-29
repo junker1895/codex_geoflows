@@ -1408,6 +1408,7 @@ class ForecastService:
         min_severity_score: int = 1,
         limit: int | None = None,
         reach_ids: list[str] | None = None,
+        bbox: str | None = None,
     ) -> tuple[str, dict[str, int]]:
         """Return (resolved_run_id, {reach_id: severity}) – ultra-compact payload for map colouring."""
         self._get_provider(provider)
@@ -1421,6 +1422,7 @@ class ForecastService:
             min_severity_score=min_severity_score,
             limit=limit,
             reach_ids=reach_ids,
+            bbox=bbox,
         )
         return (concrete, data)
 
