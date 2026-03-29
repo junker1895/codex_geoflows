@@ -329,39 +329,38 @@ async function initMap() {
       maxzoom: riversMaxZoom,
     });
 
-    // Base river layer – minzoom 3 so we skip rendering at ultra-global zoom
+    // Base river layer – filter by strmOrder based on zoom so only major
+    // rivers show at low zoom, progressively revealing smaller streams.
     map.addLayer({
       id: 'rivers-base',
       type: 'line',
       source: 'rivers',
       'source-layer': 'rivers',
+      filter: [
+        '>=',
+        ['get', 'strmOrder'],
+        [
+          'interpolate', ['linear'], ['zoom'],
+          2, 7,   // global: only the largest rivers (order 7+)
+          4, 5,   // continental: order 5+
+          6, 3,   // regional: order 3+
+          8, 1,   // local: show everything
+        ],
+      ],
       paint: {
         'line-color': '#4a90d9',
         'line-width': [
           'interpolate',
           ['linear'],
           ['zoom'],
-          2, 0.5,
-          4, 0.8,
+          2, 1,
+          4, 1.2,
           6, 1.2,
           10, 1.8,
           14, 2.5,
         ],
         'line-opacity': 0.5,
       },
-    });
-
-    // Debug: log river feature properties once map is idle and tiles loaded
-    map.once('idle', () => {
-      const feats = map.querySourceFeatures('rivers', { sourceLayer: 'rivers' });
-      console.info('[rivers] features at current zoom:', feats.length);
-      if (feats.length > 0) {
-        console.info('[rivers] sample properties:', JSON.stringify(feats[0].properties));
-        console.info('[rivers] sample id:', feats[0].id);
-        console.info('[rivers] all keys:', Object.keys(feats[0].properties));
-      } else {
-        console.info('[rivers] no features at this zoom - try zooming in and check again with: map.querySourceFeatures("rivers", {sourceLayer:"rivers"}).slice(0,3).map(f=>f.properties)');
-      }
     });
 
     // Get the run ID first
@@ -430,11 +429,23 @@ function addHighlightLayer() {
   if (highlightLayerAdded) return;
 
   // Use feature-state driven styling – works with any number of features
+  // Same strmOrder filter as base layer so highlights match visible rivers
   map.addLayer({
     id: 'rivers-highlighted',
     type: 'line',
     source: 'rivers',
     'source-layer': 'rivers',
+    filter: [
+      '>=',
+      ['get', 'strmOrder'],
+      [
+        'interpolate', ['linear'], ['zoom'],
+        2, 7,
+        4, 5,
+        6, 3,
+        8, 1,
+      ],
+    ],
     paint: {
       'line-color': [
         'match',
