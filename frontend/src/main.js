@@ -26,13 +26,13 @@ const SEVERITY_COLORS = {
 };
 
 const SEVERITY_WIDTHS = {
-  0: 1,
-  1: 2,
-  2: 2.5,
-  3: 3,
-  4: 3.5,
-  5: 4,
-  6: 5,
+  0: 1.5,
+  1: 3,
+  2: 3.5,
+  3: 4,
+  4: 5,
+  5: 5.5,
+  6: 6.5,
 };
 
 // Band labels for info panel
@@ -338,10 +338,10 @@ async function initMap() {
           'interpolate',
           ['linear'],
           ['zoom'],
-          3, 0.2,
-          6, 0.6,
-          10, 1,
-          14, 1.5,
+          3, 0.8,
+          6, 1.2,
+          10, 1.8,
+          14, 2.5,
         ],
         'line-opacity': 0.5,
       },
