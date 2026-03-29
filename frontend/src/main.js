@@ -351,6 +351,25 @@ async function initMap() {
       },
     });
 
+    // Debug: log river feature properties once source loads
+    map.once('sourcedata', (e) => {
+      if (e.sourceId !== 'rivers' || !e.isSourceLoaded) return;
+      const feats = map.querySourceFeatures('rivers', { sourceLayer: 'rivers' });
+      if (feats.length > 0) {
+        console.info('[rivers] sample feature properties:', feats[0].properties);
+        console.info('[rivers] sample feature id:', feats[0].id);
+        console.info('[rivers] all property keys:', Object.keys(feats[0].properties));
+        // Log a few more to see variation
+        const orders = new Set();
+        feats.slice(0, 200).forEach(f => {
+          Object.entries(f.properties).forEach(([k, v]) => {
+            if (/order|strahler|area|uparea|class|rank/i.test(k)) orders.add(`${k}=${v}`);
+          });
+        });
+        if (orders.size) console.info('[rivers] size-related props sample:', [...orders].slice(0, 20));
+      }
+    });
+
     // Get the run ID first
     try {
       await loadRunId();
