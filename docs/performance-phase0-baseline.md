@@ -62,3 +62,19 @@ Phase 0 is complete when:
 1. Baseline metrics are captured for all scenarios.
 2. Top 3 bottlenecks are identified with evidence.
 3. Quantitative targets for Phase 1+ are agreed and documented.
+
+## Optional automation script
+
+If backend is running locally (e.g. via `docker compose up`), you can run:
+
+```bash
+python scripts/run_phase0_baseline.py --base-url http://localhost:8000 --iterations 3 --out-json phase0-report.json
+```
+
+This script automates API-side checks for:
+
+- `/forecast/runs/latest`
+- `/forecast/map/severity` at the current zoom-tier thresholds
+- one `/forecast/reaches/{provider}/{reach_id}` detail request per provider/iteration
+
+And prints p50/p95 summary rows for latency and payload bytes.
