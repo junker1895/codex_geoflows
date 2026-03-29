@@ -69,9 +69,11 @@ function getTierForZoom(zoom) {
 let forecastIndex = {}; // provider_reach_id → { severity_score, return_period_band, ... }
 let currentRunId = null;
 let currentTier = null; // track which tier is loaded to avoid redundant fetches
+let lastBboxKey = null; // track viewport to detect meaningful pans
 let map;
 let loadingAbort = null; // AbortController for in-flight requests
 let forecastChart = null; // Chart.js instance
+let viewportTimer = null; // unified debounce for zoom+pan
 const PERF_ENABLED = true;
 
 const perfState = {
@@ -183,14 +185,28 @@ async function loadSeverityMap(minSeverity, limit, signal) {
 }
 
 // ---------------------------------------------------------------------------
+// Viewport helpers
+// ---------------------------------------------------------------------------
+
+/** Quantise a bounding box to a grid so small pans don't trigger reloads. */
+function bboxKey(bounds, step = 2) {
+  const snap = (v) => (Math.round(v / step) * step).toFixed(0);
+  return `${snap(bounds.getWest())},${snap(bounds.getSouth())},${snap(bounds.getEast())},${snap(bounds.getNorth())}`;
+}
+
+// ---------------------------------------------------------------------------
 // Load data for current zoom level
 // ---------------------------------------------------------------------------
 async function loadDataForZoom(zoom) {
   const started = nowMs();
   const tier = getTierForZoom(zoom);
 
-  // Skip if we already have this tier (or a more detailed one) loaded
-  if (currentTier && tier.minSeverity >= currentTier.minSeverity) return;
+  // Skip if same tier AND viewport hasn't moved significantly
+  const newBboxKey = bboxKey(map.getBounds());
+  const tierChanged = !currentTier || tier.minSeverity < currentTier.minSeverity;
+  const viewportChanged = newBboxKey !== lastBboxKey;
+
+  if (!tierChanged && !viewportChanged) return;
 
   // Cancel any in-flight request
   if (loadingAbort) loadingAbort.abort();
@@ -215,12 +231,13 @@ async function loadDataForZoom(zoom) {
     );
 
     currentTier = tier;
+    lastBboxKey = newBboxKey;
     setStatus(
       `Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded (severity ≥ ${tier.minSeverity})`
     );
 
-    // Rebuild the highlighted layer
-    updateHighlightedLayer();
+    // Apply feature states only to visible features
+    applyVisibleFeatureStates();
     recordPerf('interactions', {
       kind: 'zoom_data_load',
       provider: PROVIDER,
@@ -236,6 +253,15 @@ async function loadDataForZoom(zoom) {
     console.warn('Could not load forecast summaries:', err);
     setStatus('Error loading forecast data');
   }
+}
+
+/** Unified handler for zoom + pan: debounce then load data + apply states. */
+function onViewportChange() {
+  clearTimeout(viewportTimer);
+  viewportTimer = setTimeout(() => {
+    if (!currentRunId) return;
+    loadDataForZoom(map.getZoom());
+  }, 300);
 }
 
 // ---------------------------------------------------------------------------
@@ -285,29 +311,37 @@ async function initMap() {
       tileSize: 256,
       attribution: '&copy; OpenStreetMap contributors',
     });
-    map.addLayer({ id: 'osm-tiles', type: 'raster', source: 'osm' });
+    map.addLayer({
+      id: 'osm-tiles',
+      type: 'raster',
+      source: 'osm',
+      paint: { 'raster-fade-duration': 0 },
+    });
 
-    // Add rivers PMTiles source
+    // Add rivers PMTiles source with promoteId for efficient feature-state ops
     map.addSource('rivers', {
       type: 'vector',
       url: `pmtiles://${PMTILES_URL}`,
       maxzoom: riversMaxZoom,
+      promoteId: { rivers: 'id' },
     });
 
-    // Base river layer (all rivers, muted colour)
+    // Base river layer – minzoom 3 so we skip rendering at ultra-global zoom
     map.addLayer({
       id: 'rivers-base',
       type: 'line',
       source: 'rivers',
       'source-layer': 'rivers',
+      minzoom: 3,
       paint: {
         'line-color': '#4a90d9',
         'line-width': [
           'interpolate',
           ['linear'],
           ['zoom'],
-          2, 0.3,
-          8, 1,
+          3, 0.2,
+          6, 0.6,
+          10, 1,
           14, 1.5,
         ],
         'line-opacity': 0.5,
@@ -326,17 +360,14 @@ async function initMap() {
     // Initial data load for current zoom
     await loadDataForZoom(map.getZoom());
 
-    // Reload on zoom changes (debounced)
-    let zoomTimer = null;
+    // Unified viewport handler – fires on both zoom and pan
     map.on('zoomend', () => {
-      clearTimeout(zoomTimer);
-      const zoom = map.getZoom();
       recordPerf('interactions', {
         kind: 'zoomend',
         provider: PROVIDER,
-        zoom: Number(zoom.toFixed(2)),
+        zoom: Number(map.getZoom().toFixed(2)),
       });
-      zoomTimer = setTimeout(() => loadDataForZoom(map.getZoom()), 300);
+      onViewportChange();
     });
     map.on('moveend', () => {
       const c = map.getCenter();
@@ -348,7 +379,13 @@ async function initMap() {
         center_lat: Number(c.lat.toFixed(4)),
       });
       emitPerfSnapshot('moveend');
+      onViewportChange();
+      // Also apply feature states for newly-visible tiles after pan
+      applyVisibleFeatureStates();
     });
+
+    // Re-apply feature states as new tiles stream in (pan/zoom)
+    map.on('sourcedata', onSourceData);
 
     // Click handlers
     map.on('click', 'rivers-highlighted', onRiverClick);
@@ -382,6 +419,7 @@ function addHighlightLayer() {
     type: 'line',
     source: 'rivers',
     'source-layer': 'rivers',
+    minzoom: 3,
     paint: {
       'line-color': [
         'match',
@@ -412,30 +450,80 @@ function addHighlightLayer() {
 }
 
 const appliedFeatureStates = new Set();
+let rafPending = false;
 
-function updateHighlightedLayer() {
+/**
+ * Apply feature states only to reaches currently rendered in the viewport.
+ * Uses querySourceFeatures to get the IDs of tiles loaded by MapLibre,
+ * then sets severity only for those – avoiding thousands of wasted writes
+ * for off-screen features.
+ */
+function applyVisibleFeatureStates() {
+  if (rafPending) return;
+  rafPending = true;
+  requestAnimationFrame(() => {
+    rafPending = false;
+    _applyVisibleFeatureStatesBatch();
+  });
+}
+
+function _applyVisibleFeatureStatesBatch() {
   const started = nowMs();
   addHighlightLayer();
-  let writes = 0;
 
-  // Set feature state for each reach in the forecast index
-  for (const [reachId, info] of Object.entries(forecastIndex)) {
-    if (appliedFeatureStates.has(reachId)) continue;
+  // Get all river features currently loaded in visible tiles
+  let visibleFeatures;
+  try {
+    visibleFeatures = map.querySourceFeatures('rivers', {
+      sourceLayer: 'rivers',
+    });
+  } catch {
+    // Source not loaded yet
+    return;
+  }
+
+  let writes = 0;
+  const seen = new Set();
+
+  for (const feature of visibleFeatures) {
+    const reachId = String(feature.id ?? '');
+    if (!reachId || seen.has(reachId)) continue;
+    seen.add(reachId);
+
+    const info = forecastIndex[reachId];
+    const severity = info ? (info.severity_score || 0) : 0;
+
+    // Skip if already applied with correct value
+    if (appliedFeatureStates.has(reachId) && !info) continue;
+
     const numId = Number(reachId);
     if (isNaN(numId)) continue;
+
     map.setFeatureState(
       { source: 'rivers', sourceLayer: 'rivers', id: numId },
-      { severity: info.severity_score || 0 }
+      { severity }
     );
-    appliedFeatureStates.add(reachId);
+    if (severity > 0) {
+      appliedFeatureStates.add(reachId);
+    }
     writes += 1;
   }
+
   recordPerf('featureStateWrites', {
-    kind: 'apply_feature_state_batch',
+    kind: 'apply_visible_feature_state_batch',
     writes,
+    visible_features: visibleFeatures.length,
+    unique_visible: seen.size,
     indexed_reaches: Object.keys(forecastIndex).length,
     duration_ms: Number((nowMs() - started).toFixed(2)),
   });
+}
+
+/** Re-apply states when new tiles finish loading (e.g. after pan/zoom). */
+function onSourceData(e) {
+  if (e.sourceId === 'rivers' && e.isSourceLoaded) {
+    applyVisibleFeatureStates();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -717,6 +805,7 @@ function switchProvider(newProvider) {
   // Clear existing forecast data
   forecastIndex = {};
   currentTier = null;
+  lastBboxKey = null;
 
   // Clear feature states on the map before clearing the tracking set
   if (map && map.getSource('rivers')) {
