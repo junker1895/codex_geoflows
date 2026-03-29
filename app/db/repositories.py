@@ -489,13 +489,14 @@ class ForecastRepository:
                 min_lon = min_lat = max_lon = max_lat = None
             if None not in (min_lon, min_lat, max_lon, max_lat):
                 C = models.ReachGridCrosswalk
+                crosswalk_provider = "glofas" if provider == "geoglows" else provider
                 spatial_match = (
                     select(1)
                     .select_from(C)
                     .where(
                         and_(
                             C.reach_id == S.provider_reach_id,
-                            C.target_provider == provider,
+                            C.target_provider == crosswalk_provider,
                             C.grid_lon.is_not(None),
                             C.grid_lat.is_not(None),
                             C.grid_lon >= min_lon,
