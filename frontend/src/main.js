@@ -341,9 +341,9 @@ async function initMap() {
         ['get', 'strmOrder'],
         [
           'interpolate', ['linear'], ['zoom'],
-          2, 7,   // global: only the largest rivers (order 7+)
-          4, 5,   // continental: order 5+
-          6, 3,   // regional: order 3+
+          2, 4,   // global: major rivers only (order 4+)
+          4, 3,   // continental: order 3+
+          6, 2,   // regional: order 2+
           8, 1,   // local: show everything
         ],
       ],
@@ -440,9 +440,9 @@ function addHighlightLayer() {
       ['get', 'strmOrder'],
       [
         'interpolate', ['linear'], ['zoom'],
-        2, 7,
-        4, 5,
-        6, 3,
+        2, 4,
+        4, 3,
+        6, 2,
         8, 1,
       ],
     ],
