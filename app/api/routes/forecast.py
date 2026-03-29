@@ -3,6 +3,7 @@ from time import perf_counter
 
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_forecast_service
@@ -23,6 +24,14 @@ from app.forecast.schemas import (
 
 router = APIRouter(prefix="/forecast", tags=["forecast"])
 logger = logging.getLogger(__name__)
+
+
+class SeverityFilterRequest(BaseModel):
+    provider: str
+    run_id: str | None = None
+    min_severity_score: int = Field(default=1, ge=1, le=6)
+    limit: int | None = Field(default=None, ge=1)
+    reach_ids: list[str] = Field(default_factory=list)
 
 
 @router.get("/providers", response_model=list[str])
@@ -159,6 +168,37 @@ def map_severity(
             "count": count,
             "payload_bytes": payload_bytes,
         },
+    )
+    return Response(content=payload, media_type="application/json")
+
+
+@router.post("/map/severity/filter")
+def map_severity_filter(
+    request: SeverityFilterRequest,
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Severity payload filtered to a provided set of reach IDs."""
+    started = perf_counter()
+    service = get_forecast_service(db)
+    resolved_run_id, severity = service.get_severity_map(
+        request.provider,
+        request.run_id,
+        request.min_severity_score,
+        limit=request.limit,
+        reach_ids=request.reach_ids or None,
+    )
+    elapsed_seconds = round(perf_counter() - started, 6)
+    count = len(severity)
+    payload = orjson.dumps({"run_id": resolved_run_id, "severity": severity})
+    payload_bytes = len(payload)
+    logger.info(
+        "forecast map_severity_filter route completed provider=%s run_id=%s requested_reach_ids=%s count=%s elapsed_seconds=%s payload_bytes=%s",
+        request.provider,
+        resolved_run_id,
+        len(request.reach_ids),
+        count,
+        elapsed_seconds,
+        payload_bytes,
     )
     return Response(content=payload, media_type="application/json")
 

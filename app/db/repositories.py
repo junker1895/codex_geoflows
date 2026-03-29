@@ -460,6 +460,7 @@ class ForecastRepository:
         run_id: str,
         min_severity_score: int = 1,
         limit: int | None = None,
+        reach_ids: list[str] | None = None,
     ) -> dict[str, int]:
         """Return {provider_reach_id: severity_score} for flagged reaches.
 
@@ -478,6 +479,8 @@ class ForecastRepository:
             )
             .order_by(desc(S.severity_score))
         )
+        if reach_ids:
+            stmt = stmt.where(S.provider_reach_id.in_(reach_ids))
         if limit:
             stmt = stmt.limit(limit)
         rows = self.db.execute(stmt).all()

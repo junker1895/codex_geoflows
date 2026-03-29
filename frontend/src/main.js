@@ -63,12 +63,38 @@ function getTierForZoom(zoom) {
   return ZOOM_SEVERITY_TIERS[ZOOM_SEVERITY_TIERS.length - 1];
 }
 
+function getVisibleReachIds(maxIds = 4000) {
+  if (!map) return [];
+  const seen = new Set();
+  const features = map.queryRenderedFeatures(undefined, { layers: ['rivers-base'] });
+  for (const f of features) {
+    const id = f?.id;
+    if (id == null) continue;
+    seen.add(String(id));
+    if (seen.size >= maxIds) break;
+  }
+  return Array.from(seen);
+}
+
+function getViewKey(zoom, minSeverity) {
+  const b = map.getBounds();
+  return [
+    Number(zoom.toFixed(2)),
+    minSeverity,
+    Number(b.getWest().toFixed(2)),
+    Number(b.getSouth().toFixed(2)),
+    Number(b.getEast().toFixed(2)),
+    Number(b.getNorth().toFixed(2)),
+  ].join('|');
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 let forecastIndex = {}; // provider_reach_id → { severity_score, return_period_band, ... }
 let currentRunId = null;
 let currentTier = null; // track which tier is loaded to avoid redundant fetches
+let currentViewKey = null; // track viewport key to reload when map view changes
 let map;
 let loadingAbort = null; // AbortController for in-flight requests
 let forecastChart = null; // Chart.js instance
@@ -141,9 +167,11 @@ if (typeof PerformanceObserver !== 'undefined') {
 // ---------------------------------------------------------------------------
 // Forecast API helpers
 // ---------------------------------------------------------------------------
-async function fetchJSON(url, signal, perfLabel = 'fetch') {
+async function fetchJSON(url, signal, perfLabel = 'fetch', init = {}) {
   const started = nowMs();
-  const res = await fetch(url, signal ? { signal } : undefined);
+  const reqInit = { ...init };
+  if (signal) reqInit.signal = signal;
+  const res = await fetch(url, reqInit);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const cloned = res.clone();
   const text = await cloned.text();
@@ -176,9 +204,24 @@ async function loadRunId() {
 }
 
 async function loadSeverityMap(minSeverity, limit, signal) {
-  let url = `${API_BASE}/map/severity?provider=${PROVIDER}&run_id=${currentRunId}&min_severity_score=${minSeverity}`;
-  if (limit) url += `&limit=${limit}`;
-  const resp = await fetchJSON(url, signal, 'map/severity');
+  const visibleIds = getVisibleReachIds();
+  if (visibleIds.length === 0) return {};
+  const resp = await fetchJSON(
+    `${API_BASE}/map/severity/filter`,
+    signal,
+    'map/severity/filter',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: PROVIDER,
+        run_id: currentRunId,
+        min_severity_score: minSeverity,
+        limit,
+        reach_ids: visibleIds,
+      }),
+    }
+  );
   return resp.severity || {};
 }
 
@@ -188,9 +231,10 @@ async function loadSeverityMap(minSeverity, limit, signal) {
 async function loadDataForZoom(zoom) {
   const started = nowMs();
   const tier = getTierForZoom(zoom);
+  const viewKey = getViewKey(zoom, tier.minSeverity);
 
-  // Skip if we already have this tier (or a more detailed one) loaded
-  if (currentTier && tier.minSeverity >= currentTier.minSeverity) return;
+  // Skip if this exact view/tier was already loaded.
+  if (currentTier && currentViewKey === viewKey) return;
 
   // Cancel any in-flight request
   if (loadingAbort) loadingAbort.abort();
@@ -199,6 +243,10 @@ async function loadDataForZoom(zoom) {
   setStatus(`Loading severity ≥ ${tier.minSeverity} reaches…`);
 
   try {
+    // Clear previous viewport state before loading current view.
+    clearAppliedFeatureStates();
+    forecastIndex = {};
+
     const severityMap = await loadSeverityMap(
       tier.minSeverity,
       tier.limit,
@@ -215,6 +263,7 @@ async function loadDataForZoom(zoom) {
     );
 
     currentTier = tier;
+    currentViewKey = viewKey;
     setStatus(
       `Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded (severity ≥ ${tier.minSeverity})`
     );
@@ -326,17 +375,32 @@ async function initMap() {
     // Initial data load for current zoom
     await loadDataForZoom(map.getZoom());
 
-    // Reload on zoom changes (debounced)
-    let zoomTimer = null;
+    // Reload on map movement / zoom changes (debounced)
+    let viewTimer = null;
+    const scheduleViewReload = () => {
+      clearTimeout(viewTimer);
+      viewTimer = setTimeout(() => loadDataForZoom(map.getZoom()), 300);
+    };
     map.on('zoomend', () => {
-      clearTimeout(zoomTimer);
       const zoom = map.getZoom();
       recordPerf('interactions', {
         kind: 'zoomend',
         provider: PROVIDER,
         zoom: Number(zoom.toFixed(2)),
       });
-      zoomTimer = setTimeout(() => loadDataForZoom(map.getZoom()), 300);
+      scheduleViewReload();
+    });
+    map.on('moveend', () => {
+      const c = map.getCenter();
+      recordPerf('interactions', {
+        kind: 'moveend',
+        provider: PROVIDER,
+        zoom: Number(map.getZoom().toFixed(2)),
+        center_lng: Number(c.lng.toFixed(4)),
+        center_lat: Number(c.lat.toFixed(4)),
+      });
+      emitPerfSnapshot('moveend');
+      scheduleViewReload();
     });
     map.on('moveend', () => {
       const c = map.getCenter();
@@ -412,6 +476,19 @@ function addHighlightLayer() {
 }
 
 const appliedFeatureStates = new Set();
+
+function clearAppliedFeatureStates() {
+  if (!map || !map.getSource('rivers')) return;
+  for (const reachId of appliedFeatureStates) {
+    const numId = Number(reachId);
+    if (isNaN(numId)) continue;
+    map.setFeatureState(
+      { source: 'rivers', sourceLayer: 'rivers', id: numId },
+      { severity: 0 }
+    );
+  }
+  appliedFeatureStates.clear();
+}
 
 function updateHighlightedLayer() {
   const started = nowMs();
@@ -717,19 +794,10 @@ function switchProvider(newProvider) {
   // Clear existing forecast data
   forecastIndex = {};
   currentTier = null;
+  currentViewKey = null;
 
-  // Clear feature states on the map before clearing the tracking set
-  if (map && map.getSource('rivers')) {
-    for (const reachId of appliedFeatureStates) {
-      const numId = Number(reachId);
-      if (isNaN(numId)) continue;
-      map.setFeatureState(
-        { source: 'rivers', sourceLayer: 'rivers', id: numId },
-        { severity: 0 }
-      );
-    }
-  }
-  appliedFeatureStates.clear();
+  // Clear feature states on the map.
+  clearAppliedFeatureStates();
 
   // Close info panel
   infoPanel.classList.add('hidden');
