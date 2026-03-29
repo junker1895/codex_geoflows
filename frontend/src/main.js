@@ -272,14 +272,17 @@ async function initMap() {
   const protocol = new pmtiles.Protocol();
   maplibregl.addProtocol('pmtiles', protocol.tile);
 
-  // Read PMTiles header for maxzoom
+  // Read PMTiles header for zoom range
   let riversMaxZoom = 14;
+  let riversMinZoom = 0;
   try {
     const archive = new pmtiles.PMTiles(PMTILES_URL);
     const header = await archive.getHeader();
     riversMaxZoom = header.maxZoom || 14;
+    riversMinZoom = header.minZoom || 0;
+    console.info('[pmtiles] header:', { minZoom: riversMinZoom, maxZoom: riversMaxZoom });
   } catch (e) {
-    console.warn('Could not read PMTiles header, using default maxzoom=14');
+    console.warn('Could not read PMTiles header, using defaults');
   }
 
   map = new maplibregl.Map({
@@ -297,7 +300,8 @@ async function initMap() {
       glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
     },
     center: [0, 20],
-    zoom: 2,
+    zoom: Math.max(2, riversMinZoom),
+    minZoom: riversMinZoom,
     maxZoom: 18,
   });
 
@@ -322,6 +326,7 @@ async function initMap() {
     map.addSource('rivers', {
       type: 'vector',
       url: `pmtiles://${PMTILES_URL}`,
+      minzoom: riversMinZoom,
       maxzoom: riversMaxZoom,
     });
 
