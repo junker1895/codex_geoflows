@@ -1255,7 +1255,13 @@ class ForecastService:
             raise
 
     def get_latest_run(self, provider: str) -> ForecastRunSchema | None:
-        return self.resolve_requested_run_id_local(provider, "latest", require_existing=False, require_has_data=True)
+        self._get_provider(provider)
+        try:
+            return self.resolve_requested_run_id_local(provider, "latest", require_existing=False, require_has_data=True)
+        except Exception:
+            logger.exception("latest run resolution failed; falling back to local latest run row", extra={"provider": provider})
+            latest = self.repo.get_latest_run(provider, require_has_data=True)
+            return None if latest is None else to_run_schema(latest)
 
     def get_reach_detail(
         self, provider: str, provider_reach_id: str, run_id: str | None = None, timeseries_limit: int | None = None
