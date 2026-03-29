@@ -402,17 +402,6 @@ async function initMap() {
       emitPerfSnapshot('moveend');
       scheduleViewReload();
     });
-    map.on('moveend', () => {
-      const c = map.getCenter();
-      recordPerf('interactions', {
-        kind: 'moveend',
-        provider: PROVIDER,
-        zoom: Number(map.getZoom().toFixed(2)),
-        center_lng: Number(c.lng.toFixed(4)),
-        center_lat: Number(c.lat.toFixed(4)),
-      });
-      emitPerfSnapshot('moveend');
-    });
 
     // Click handlers
     map.on('click', 'rivers-highlighted', onRiverClick);

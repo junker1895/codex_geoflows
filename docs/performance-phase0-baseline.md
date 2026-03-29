@@ -77,6 +77,12 @@ Map-only focused run (skip detail endpoint):
 python scripts/run_phase0_baseline.py --base-url http://localhost:8000 --iterations 5 --timeseries-limit 0 --out-json phase0-map-only.json
 ```
 
+Viewport-filter endpoint run (exercise `POST /forecast/map/severity/filter`):
+
+```bash
+python scripts/run_phase0_baseline.py --base-url http://localhost:8000 --iterations 5 --timeseries-limit 0 --use-filter-endpoint --filter-reach-count 1000 --out-json phase1-after.json
+```
+
 This script automates API-side checks for:
 
 - `/forecast/runs/latest`

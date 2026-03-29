@@ -70,7 +70,34 @@ def do_get(base_url: str, path: str, params: dict[str, str | int]) -> tuple[int,
     return code, body, elapsed_ms
 
 
-def run_iteration(base_url: str, provider: str, timeseries_limit: int) -> list[Sample]:
+def do_post_json(base_url: str, path: str, payload: dict) -> tuple[int, bytes, float]:
+    url = f"{base_url.rstrip('/')}{path}"
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url=url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    started = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+            code = resp.getcode()
+    except urllib.error.HTTPError as exc:
+        data = exc.read()
+        code = exc.code
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    return code, data, elapsed_ms
+
+
+def run_iteration(
+    base_url: str,
+    provider: str,
+    timeseries_limit: int,
+    use_filter_endpoint: bool,
+    filter_reach_count: int,
+) -> list[Sample]:
     out: list[Sample] = []
     code, body, dur = do_get(base_url, "/forecast/runs/latest", {"provider": provider})
     if code != 200:
@@ -100,17 +127,51 @@ def run_iteration(base_url: str, provider: str, timeseries_limit: int) -> list[S
     )
 
     reach_for_detail: str | None = None
-    for tier in DEFAULT_TIERS:
-        code, body, dur = do_get(
+    reach_filter_ids: list[str] = []
+    if use_filter_endpoint:
+        seed_code, seed_body, _ = do_get(
             base_url,
             "/forecast/map/severity",
             {
                 "provider": provider,
                 "run_id": run_id,
-                "min_severity_score": tier["min_severity_score"],
-                "limit": tier["limit"],
+                "min_severity_score": 1,
+                "limit": filter_reach_count,
             },
         )
+        if seed_code == 200:
+            seed_payload = json.loads(seed_body.decode("utf-8"))
+            seed_severity = seed_payload.get("severity", {})
+            reach_filter_ids = list(seed_severity.keys())[:filter_reach_count]
+            if reach_filter_ids:
+                reach_for_detail = reach_filter_ids[0]
+
+    for tier in DEFAULT_TIERS:
+        if use_filter_endpoint:
+            code, body, dur = do_post_json(
+                base_url,
+                "/forecast/map/severity/filter",
+                {
+                    "provider": provider,
+                    "run_id": run_id,
+                    "min_severity_score": tier["min_severity_score"],
+                    "limit": tier["limit"],
+                    "reach_ids": reach_filter_ids,
+                },
+            )
+            endpoint = "/forecast/map/severity/filter"
+        else:
+            code, body, dur = do_get(
+                base_url,
+                "/forecast/map/severity",
+                {
+                    "provider": provider,
+                    "run_id": run_id,
+                    "min_severity_score": tier["min_severity_score"],
+                    "limit": tier["limit"],
+                },
+            )
+            endpoint = "/forecast/map/severity"
         count = None
         if code == 200:
             payload = json.loads(body.decode("utf-8"))
@@ -120,13 +181,17 @@ def run_iteration(base_url: str, provider: str, timeseries_limit: int) -> list[S
                 reach_for_detail = next(iter(severity.keys()))
         out.append(
             Sample(
-                endpoint="/forecast/map/severity",
+                endpoint=endpoint,
                 provider=provider,
                 status_code=code,
                 duration_ms=dur,
                 payload_bytes=len(body),
                 count=count,
-                meta={"tier": tier["name"], "run_id": run_id},
+                meta={
+                    "tier": tier["name"],
+                    "run_id": run_id,
+                    "filter_reach_ids": len(reach_filter_ids) if use_filter_endpoint else None,
+                },
             )
         )
 
@@ -243,6 +308,17 @@ def main() -> int:
         default=500,
         help="Reach detail timeseries_limit. Set 0 to skip detail calls.",
     )
+    parser.add_argument(
+        "--use-filter-endpoint",
+        action="store_true",
+        help="Use POST /forecast/map/severity/filter instead of GET /forecast/map/severity.",
+    )
+    parser.add_argument(
+        "--filter-reach-count",
+        type=int,
+        default=1000,
+        help="When --use-filter-endpoint is set, number of reach IDs to include in each POST body.",
+    )
     parser.add_argument("--out-json", default="", help="Optional path to write full JSON report.")
     args = parser.parse_args()
 
@@ -252,7 +328,13 @@ def main() -> int:
         print(f"\n--- Iteration {i}/{args.iterations} ---")
         for provider in args.providers:
             print(f"provider={provider}")
-            samples = run_iteration(args.base_url, provider, args.timeseries_limit)
+            samples = run_iteration(
+                args.base_url,
+                provider,
+                args.timeseries_limit,
+                args.use_filter_endpoint,
+                args.filter_reach_count,
+            )
             all_samples.extend(samples)
             for s in samples:
                 tier = ""
