@@ -181,6 +181,27 @@ def map_severity(
             "elapsed_seconds": elapsed_seconds,
         },
     )
+    return Response(content=payload, media_type="application/json")
+
+
+@router.post("/map/severity/filter")
+def map_severity_filter(
+    request: SeverityFilterRequest,
+    db: Session = Depends(get_db_session),
+) -> Response:
+    """Severity payload filtered to a provided set of reach IDs."""
+    started = perf_counter()
+    service = get_forecast_service(db)
+    resolved_run_id, severity = service.get_severity_map(
+        request.provider,
+        request.run_id,
+        request.min_severity_score,
+        limit=request.limit,
+        reach_ids=request.reach_ids or None,
+        bbox=request.bbox,
+    )
+    elapsed_seconds = round(perf_counter() - started, 6)
+    count = len(severity)
     payload = orjson.dumps({"run_id": resolved_run_id, "severity": severity})
     payload_bytes = len(payload)
     logger.info(
