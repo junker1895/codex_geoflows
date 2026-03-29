@@ -6,7 +6,7 @@ import logging
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Select, and_, delete, desc, exists, func, select, text
+from sqlalchemy import Select, and_, delete, desc, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -489,8 +489,10 @@ class ForecastRepository:
                 min_lon = min_lat = max_lon = max_lat = None
             if None not in (min_lon, min_lat, max_lon, max_lat):
                 C = models.ReachGridCrosswalk
-                stmt = stmt.where(
-                    exists().where(
+                spatial_match = (
+                    select(1)
+                    .select_from(C)
+                    .where(
                         and_(
                             C.reach_id == S.provider_reach_id,
                             C.target_provider == provider,
@@ -502,7 +504,10 @@ class ForecastRepository:
                             C.grid_lat <= max_lat,
                         )
                     )
+                    .correlate(S)
+                    .exists()
                 )
+                stmt = stmt.where(spatial_match)
         if limit:
             stmt = stmt.limit(limit)
         rows = self.db.execute(stmt).all()
