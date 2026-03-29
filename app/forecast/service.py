@@ -1255,7 +1255,13 @@ class ForecastService:
             raise
 
     def get_latest_run(self, provider: str) -> ForecastRunSchema | None:
-        return self.resolve_requested_run_id_local(provider, "latest", require_existing=False, require_has_data=True)
+        self._get_provider(provider)
+        try:
+            return self.resolve_requested_run_id_local(provider, "latest", require_existing=False, require_has_data=True)
+        except Exception:
+            logger.exception("latest run resolution failed; falling back to local latest run row", extra={"provider": provider})
+            latest = self.repo.get_latest_run(provider, require_has_data=True)
+            return None if latest is None else to_run_schema(latest)
 
     def get_reach_detail(
         self, provider: str, provider_reach_id: str, run_id: str | None = None, timeseries_limit: int | None = None
@@ -1407,6 +1413,8 @@ class ForecastService:
         run_id: str | None = None,
         min_severity_score: int = 1,
         limit: int | None = None,
+        reach_ids: list[str] | None = None,
+        bbox: str | None = None,
     ) -> tuple[str, dict[str, int]]:
         """Return (resolved_run_id, {reach_id: severity}) – ultra-compact payload for map colouring."""
         self._get_provider(provider)
@@ -1414,7 +1422,14 @@ class ForecastService:
         if not run:
             return ("", {})
         concrete = self._require_concrete_run_id(run.run_id)
-        data = self.repo.get_severity_map(provider, concrete, min_severity_score=min_severity_score, limit=limit)
+        data = self.repo.get_severity_map(
+            provider,
+            concrete,
+            min_severity_score=min_severity_score,
+            limit=limit,
+            reach_ids=reach_ids,
+            bbox=bbox,
+        )
         return (concrete, data)
 
     def get_provider_health(self, provider: str, refresh_upstream: bool = False) -> ProviderHealthResponse:
@@ -1716,7 +1731,16 @@ class ForecastService:
 
 
 def to_run_schema(row: models.ForecastRun) -> ForecastRunSchema:
-    return ForecastRunSchema.model_validate(row, from_attributes=True)
+    metadata_json = row.metadata_json if isinstance(row.metadata_json, dict) else None
+    return ForecastRunSchema(
+        provider=str(row.provider),
+        run_id=str(row.run_id),
+        run_date_utc=row.run_date_utc,
+        issued_at_utc=row.issued_at_utc,
+        source_type=str(row.source_type),
+        ingest_status=str(row.ingest_status),
+        metadata_json=metadata_json,
+    )
 
 
 def _sanitize_glofas_return_period_rows(rows: list[ReturnPeriodSchema]) -> tuple[list[ReturnPeriodSchema], int]:

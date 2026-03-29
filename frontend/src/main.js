@@ -63,15 +63,49 @@ function getTierForZoom(zoom) {
   return ZOOM_SEVERITY_TIERS[ZOOM_SEVERITY_TIERS.length - 1];
 }
 
+function getCurrentBbox() {
+  if (!map) return null;
+  const b = map.getBounds();
+  return [
+    b.getWest().toFixed(6),
+    b.getSouth().toFixed(6),
+    b.getEast().toFixed(6),
+    b.getNorth().toFixed(6),
+  ].join(',');
+}
+
+function getViewKey(zoom, minSeverity) {
+  const b = map.getBounds();
+  return [
+    Number(zoom.toFixed(2)),
+    minSeverity,
+    Number(b.getWest().toFixed(2)),
+    Number(b.getSouth().toFixed(2)),
+    Number(b.getEast().toFixed(2)),
+    Number(b.getNorth().toFixed(2)),
+  ].join('|');
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 let forecastIndex = {}; // provider_reach_id → { severity_score, return_period_band, ... }
 let currentRunId = null;
 let currentTier = null; // track which tier is loaded to avoid redundant fetches
+let currentViewKey = null; // track viewport key to reload when map view changes
 let map;
 let loadingAbort = null; // AbortController for in-flight requests
 let forecastChart = null; // Chart.js instance
+const PERF_ENABLED = true;
+
+const perfState = {
+  sessionStartedAt: Date.now(),
+  longTasks: [],
+  interactions: [],
+  network: [],
+  featureStateWrites: [],
+  maxForecastIndexSize: 0,
+};
 
 const statusBar = document.getElementById('status-bar');
 const infoPanel = document.getElementById('info-panel');
@@ -81,26 +115,112 @@ function setStatus(msg) {
   statusBar.textContent = msg;
 }
 
+function nowMs() {
+  return performance?.now ? performance.now() : Date.now();
+}
+
+function recordPerf(bucket, payload) {
+  if (!PERF_ENABLED) return;
+  const entry = {
+    t: new Date().toISOString(),
+    ...payload,
+  };
+  if (Array.isArray(perfState[bucket])) perfState[bucket].push(entry);
+}
+
+function emitPerfSnapshot(reason) {
+  if (!PERF_ENABLED) return;
+  const snapshot = {
+    reason,
+    uptime_seconds: Math.round((Date.now() - perfState.sessionStartedAt) / 1000),
+    interactions: perfState.interactions.length,
+    network_calls: perfState.network.length,
+    feature_state_batches: perfState.featureStateWrites.length,
+    long_tasks: perfState.longTasks.length,
+    max_forecast_index_size: perfState.maxForecastIndexSize,
+  };
+  console.info('[perf:snapshot]', snapshot);
+}
+
+window.__geoflowsPerf = perfState;
+
+if (typeof PerformanceObserver !== 'undefined') {
+  try {
+    const longTaskObserver = new PerformanceObserver((list) => {
+      list.getEntries().forEach((entry) => {
+        recordPerf('longTasks', {
+          kind: 'longtask',
+          duration_ms: Number(entry.duration.toFixed(2)),
+          start_ms: Number(entry.startTime.toFixed(2)),
+          name: entry.name || 'longtask',
+        });
+      });
+    });
+    longTaskObserver.observe({ entryTypes: ['longtask'] });
+  } catch {
+    // Ignore if unsupported by browser/runtime.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Forecast API helpers
 // ---------------------------------------------------------------------------
-async function fetchJSON(url, signal) {
-  const res = await fetch(url, signal ? { signal } : undefined);
+async function fetchJSON(url, signal, perfLabel = 'fetch', init = {}) {
+  const started = nowMs();
+  const reqInit = { ...init };
+  if (signal) reqInit.signal = signal;
+  const res = await fetch(url, reqInit);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+  const cloned = res.clone();
+  const text = await cloned.text();
+  const payloadBytes = new TextEncoder().encode(text).length;
+  const elapsed = nowMs() - started;
+  recordPerf('network', {
+    label: perfLabel,
+    url,
+    status: res.status,
+    duration_ms: Number(elapsed.toFixed(2)),
+    payload_bytes: payloadBytes,
+  });
+  return JSON.parse(text);
 }
 
 async function loadRunId() {
+  const started = nowMs();
   const run = await fetchJSON(
-    `${API_BASE}/runs/latest?provider=${PROVIDER}`
+    `${API_BASE}/runs/latest?provider=${PROVIDER}`,
+    undefined,
+    'runs/latest'
   );
   currentRunId = run.run_id;
+  recordPerf('interactions', {
+    kind: 'run_id_load',
+    provider: PROVIDER,
+    run_id: currentRunId,
+    duration_ms: Number((nowMs() - started).toFixed(2)),
+  });
 }
 
 async function loadSeverityMap(minSeverity, limit, signal) {
-  let url = `${API_BASE}/map/severity?provider=${PROVIDER}&run_id=${currentRunId}&min_severity_score=${minSeverity}`;
-  if (limit) url += `&limit=${limit}`;
-  const resp = await fetchJSON(url, signal);
+  const bbox = getCurrentBbox();
+  if (!bbox) return {};
+  const resp = await fetchJSON(
+    `${API_BASE}/map/severity/filter`,
+    signal,
+    'map/severity/filter',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: PROVIDER,
+        run_id: currentRunId,
+        min_severity_score: minSeverity,
+        limit,
+        bbox,
+        reach_ids: [],
+      }),
+    }
+  );
   return resp.severity || {};
 }
 
@@ -108,10 +228,12 @@ async function loadSeverityMap(minSeverity, limit, signal) {
 // Load data for current zoom level
 // ---------------------------------------------------------------------------
 async function loadDataForZoom(zoom) {
+  const started = nowMs();
   const tier = getTierForZoom(zoom);
+  const viewKey = getViewKey(zoom, tier.minSeverity);
 
-  // Skip if we already have this tier (or a more detailed one) loaded
-  if (currentTier && tier.minSeverity >= currentTier.minSeverity) return;
+  // Skip if this exact view/tier was already loaded.
+  if (currentTier && currentViewKey === viewKey) return;
 
   // Cancel any in-flight request
   if (loadingAbort) loadingAbort.abort();
@@ -120,6 +242,10 @@ async function loadDataForZoom(zoom) {
   setStatus(`Loading severity ≥ ${tier.minSeverity} reaches…`);
 
   try {
+    // Clear previous viewport state before loading current view.
+    clearAppliedFeatureStates();
+    forecastIndex = {};
+
     const severityMap = await loadSeverityMap(
       tier.minSeverity,
       tier.limit,
@@ -130,14 +256,29 @@ async function loadDataForZoom(zoom) {
     for (const [reachId, score] of Object.entries(severityMap)) {
       forecastIndex[reachId] = { severity_score: score };
     }
+    perfState.maxForecastIndexSize = Math.max(
+      perfState.maxForecastIndexSize,
+      Object.keys(forecastIndex).length
+    );
 
     currentTier = tier;
+    currentViewKey = viewKey;
     setStatus(
       `Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded (severity ≥ ${tier.minSeverity})`
     );
 
     // Rebuild the highlighted layer
     updateHighlightedLayer();
+    recordPerf('interactions', {
+      kind: 'zoom_data_load',
+      provider: PROVIDER,
+      zoom: Number(zoom.toFixed(2)),
+      min_severity: tier.minSeverity,
+      limit: tier.limit,
+      loaded_reaches: Object.keys(severityMap).length,
+      cached_reaches: Object.keys(forecastIndex).length,
+      duration_ms: Number((nowMs() - started).toFixed(2)),
+    });
   } catch (err) {
     if (err.name === 'AbortError') return; // superseded by a newer request
     console.warn('Could not load forecast summaries:', err);
@@ -233,11 +374,32 @@ async function initMap() {
     // Initial data load for current zoom
     await loadDataForZoom(map.getZoom());
 
-    // Reload on zoom changes (debounced)
-    let zoomTimer = null;
+    // Reload on map movement / zoom changes (debounced)
+    let viewTimer = null;
+    const scheduleViewReload = () => {
+      clearTimeout(viewTimer);
+      viewTimer = setTimeout(() => loadDataForZoom(map.getZoom()), 300);
+    };
     map.on('zoomend', () => {
-      clearTimeout(zoomTimer);
-      zoomTimer = setTimeout(() => loadDataForZoom(map.getZoom()), 300);
+      const zoom = map.getZoom();
+      recordPerf('interactions', {
+        kind: 'zoomend',
+        provider: PROVIDER,
+        zoom: Number(zoom.toFixed(2)),
+      });
+      scheduleViewReload();
+    });
+    map.on('moveend', () => {
+      const c = map.getCenter();
+      recordPerf('interactions', {
+        kind: 'moveend',
+        provider: PROVIDER,
+        zoom: Number(map.getZoom().toFixed(2)),
+        center_lng: Number(c.lng.toFixed(4)),
+        center_lat: Number(c.lat.toFixed(4)),
+      });
+      emitPerfSnapshot('moveend');
+      scheduleViewReload();
     });
 
     // Click handlers
@@ -303,8 +465,23 @@ function addHighlightLayer() {
 
 const appliedFeatureStates = new Set();
 
+function clearAppliedFeatureStates() {
+  if (!map || !map.getSource('rivers')) return;
+  for (const reachId of appliedFeatureStates) {
+    const numId = Number(reachId);
+    if (isNaN(numId)) continue;
+    map.setFeatureState(
+      { source: 'rivers', sourceLayer: 'rivers', id: numId },
+      { severity: 0 }
+    );
+  }
+  appliedFeatureStates.clear();
+}
+
 function updateHighlightedLayer() {
+  const started = nowMs();
   addHighlightLayer();
+  let writes = 0;
 
   // Set feature state for each reach in the forecast index
   for (const [reachId, info] of Object.entries(forecastIndex)) {
@@ -316,7 +493,14 @@ function updateHighlightedLayer() {
       { severity: info.severity_score || 0 }
     );
     appliedFeatureStates.add(reachId);
+    writes += 1;
   }
+  recordPerf('featureStateWrites', {
+    kind: 'apply_feature_state_batch',
+    writes,
+    indexed_reaches: Object.keys(forecastIndex).length,
+    duration_ms: Number((nowMs() - started).toFixed(2)),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +650,7 @@ function buildHydrograph(timeseries, returnPeriods) {
 }
 
 async function onRiverClick(e) {
+  const clickStarted = nowMs();
   if (!e.features || e.features.length === 0) return;
 
   const feature = e.features[0];
@@ -493,7 +678,9 @@ async function onRiverClick(e) {
   if (currentRunId) {
     try {
       const detail = await fetchJSON(
-        `${API_BASE}/reaches/${PROVIDER}/${reachId}?run_id=${currentRunId}&timeseries_limit=500`
+        `${API_BASE}/reaches/${PROVIDER}/${reachId}?run_id=${currentRunId}&timeseries_limit=500`,
+        undefined,
+        'reaches/detail'
       );
       if (detail.summary) {
         const s = detail.summary;
@@ -511,6 +698,13 @@ async function onRiverClick(e) {
 
       // Build hydrograph
       buildHydrograph(detail.timeseries, detail.return_periods);
+      recordPerf('interactions', {
+        kind: 'river_click_detail',
+        provider: PROVIDER,
+        reach_id: reachId,
+        timeseries_points: Array.isArray(detail.timeseries) ? detail.timeseries.length : 0,
+        duration_ms: Number((nowMs() - clickStarted).toFixed(2)),
+      });
     } catch {
       html += '</table>';
       infoContent.innerHTML = html;
@@ -577,6 +771,7 @@ new ResizeObserver(() => {
 // ---------------------------------------------------------------------------
 function switchProvider(newProvider) {
   if (newProvider === PROVIDER) return;
+  const started = nowMs();
   PROVIDER = newProvider;
 
   // Update toggle buttons
@@ -587,19 +782,10 @@ function switchProvider(newProvider) {
   // Clear existing forecast data
   forecastIndex = {};
   currentTier = null;
+  currentViewKey = null;
 
-  // Clear feature states on the map before clearing the tracking set
-  if (map && map.getSource('rivers')) {
-    for (const reachId of appliedFeatureStates) {
-      const numId = Number(reachId);
-      if (isNaN(numId)) continue;
-      map.setFeatureState(
-        { source: 'rivers', sourceLayer: 'rivers', id: numId },
-        { severity: 0 }
-      );
-    }
-  }
-  appliedFeatureStates.clear();
+  // Clear feature states on the map.
+  clearAppliedFeatureStates();
 
   // Close info panel
   infoPanel.classList.add('hidden');
@@ -613,6 +799,12 @@ function switchProvider(newProvider) {
     try {
       await loadRunId();
       await loadDataForZoom(map.getZoom());
+      recordPerf('interactions', {
+        kind: 'switch_provider',
+        provider: newProvider,
+        duration_ms: Number((nowMs() - started).toFixed(2)),
+      });
+      emitPerfSnapshot(`switch:${newProvider}`);
     } catch (err) {
       console.warn(`Could not load ${newProvider} data:`, err);
       setStatus(`${newProvider.toUpperCase()} forecast data unavailable`);
