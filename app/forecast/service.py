@@ -1725,7 +1725,16 @@ class ForecastService:
 
 
 def to_run_schema(row: models.ForecastRun) -> ForecastRunSchema:
-    return ForecastRunSchema.model_validate(row, from_attributes=True)
+    metadata_json = row.metadata_json if isinstance(row.metadata_json, dict) else None
+    return ForecastRunSchema(
+        provider=str(row.provider),
+        run_id=str(row.run_id),
+        run_date_utc=row.run_date_utc,
+        issued_at_utc=row.issued_at_utc,
+        source_type=str(row.source_type),
+        ingest_status=str(row.ingest_status),
+        metadata_json=metadata_json,
+    )
 
 
 def _sanitize_glofas_return_period_rows(rows: list[ReturnPeriodSchema]) -> tuple[list[ReturnPeriodSchema], int]:
