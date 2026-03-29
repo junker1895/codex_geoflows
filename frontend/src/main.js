@@ -300,8 +300,7 @@ async function initMap() {
       glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
     },
     center: [0, 20],
-    zoom: Math.max(2, riversMinZoom),
-    minZoom: riversMinZoom,
+    zoom: 3,
     maxZoom: 18,
   });
 
