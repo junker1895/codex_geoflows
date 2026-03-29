@@ -326,11 +326,9 @@ class ForecastRepository:
             # Only return runs that have at least one summary row
             S = models.ForecastProviderReachSummary
             stmt = stmt.where(
-                exists(
-                    select(S.id).where(
-                        and_(S.provider == models.ForecastRun.provider, S.run_id == models.ForecastRun.run_id)
-                    )
-                )
+                select(S.id)
+                .where(and_(S.provider == models.ForecastRun.provider, S.run_id == models.ForecastRun.run_id))
+                .exists()
             )
         return self.db.execute(
             stmt.order_by(desc(models.ForecastRun.run_date_utc)).limit(1)
