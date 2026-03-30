@@ -61,6 +61,18 @@ def major_opacity(zoom: float) -> float:
     return interp_linear(zoom, [(0, 0.2), (4.5, 0.35), (6, 0.8), (8, 0.9)])
 
 
+def major_min_area(zoom: float) -> float:
+    return interp_linear(zoom, [(0, 120000), (3, 60000), (5, 15000), (6, 0)])
+
+
+def medium_min_area(zoom: float) -> float:
+    return interp_linear(zoom, [(5, 50000), (6, 20000), (7, 5000), (8, 1000), (9, 100), (10, 0)])
+
+
+def minor_min_area(zoom: float) -> float:
+    return interp_linear(zoom, [(8, 10000), (9, 2000), (10, 0)])
+
+
 def visible_tiers(zoom: float) -> list[RiverTier]:
     return [tier for tier in RIVER_TIERS if zoom >= tier.minzoom]
 
@@ -81,7 +93,13 @@ def main() -> None:
         tiers = []
         for tier in visible_tiers(zoom):
             if tier.name == "rivers-major":
-                tiers.append(f"{tier.name} ({tier.strm_order_rule}, opacity~{major_opacity(zoom):.2f})")
+                tiers.append(
+                    f"{tier.name} ({tier.strm_order_rule}, opacity~{major_opacity(zoom):.2f}, DSContArea>={major_min_area(zoom):.0f})"
+                )
+            elif tier.name == "rivers-medium":
+                tiers.append(f"{tier.name} ({tier.strm_order_rule}, DSContArea>={medium_min_area(zoom):.0f})")
+            elif tier.name == "rivers-minor":
+                tiers.append(f"{tier.name} ({tier.strm_order_rule}, DSContArea>={minor_min_area(zoom):.0f})")
             else:
                 tiers.append(f"{tier.name} ({tier.strm_order_rule})")
         print(
