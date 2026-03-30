@@ -397,6 +397,7 @@ async function initMap() {
       url: `pmtiles://${PMTILES_URL}`,
       minzoom: riversMinZoom,
       maxzoom: riversMaxZoom,
+      promoteId: 'reach_id',
     });
 
     // -----------------------------------------------------------------------
@@ -709,11 +710,8 @@ function _applyVisibleFeatureStatesBatch() {
     // Skip if we already wrote this exact state
     if (appliedFeatureStates.has(reachId)) continue;
 
-    const numId = Number(reachId);
-    if (isNaN(numId)) continue;
-
     map.setFeatureState(
-      { source: 'rivers', sourceLayer: 'rivers', id: numId },
+      { source: 'rivers', sourceLayer: 'rivers', id: reachId },
       { severity }
     );
     appliedFeatureStates.add(reachId);
@@ -1021,10 +1019,8 @@ function switchProvider(newProvider) {
   // Clear feature states on the map before clearing the tracking set
   if (map && map.getSource('rivers')) {
     for (const reachId of appliedFeatureStates) {
-      const numId = Number(reachId);
-      if (isNaN(numId)) continue;
       map.setFeatureState(
-        { source: 'rivers', sourceLayer: 'rivers', id: numId },
+        { source: 'rivers', sourceLayer: 'rivers', id: reachId },
         { severity: 0 }
       );
     }
