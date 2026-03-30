@@ -50,9 +50,9 @@ const BAND_LABELS = {
 // Zoom → minimum severity threshold + max reaches to load
 // At global zoom only show the most extreme; as user zooms in, reveal more.
 const ZOOM_SEVERITY_TIERS = [
-  { maxZoom: 3, minSeverity: 4, limit: 5000 },
-  { maxZoom: 5, minSeverity: 3, limit: 20000 },
-  { maxZoom: 7, minSeverity: 2, limit: 50000 },
+  { maxZoom: 3, minSeverity: 4, limit: null },
+  { maxZoom: 5, minSeverity: 3, limit: null },
+  { maxZoom: 7, minSeverity: 2, limit: null },
   { maxZoom: Infinity, minSeverity: 1, limit: null },
 ];
 
