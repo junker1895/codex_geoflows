@@ -340,9 +340,9 @@ async function initMap() {
     //   rivers-query-major, rivers-query-medium, rivers-query-minor
 
     const RIVER_TIERS = [
-      { id: 'rivers-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 0,  width: [2, 2, 5, 2.5, 8, 3, 12, 4], opacity: 0.8 },
-      { id: 'rivers-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 4,  width: [4, 1.2, 6, 1.5, 8, 2, 12, 3], opacity: 0.6 },
-      { id: 'rivers-minor',  filter: ['<', ['get', 'strmOrder'], 4], minzoom: 7,  width: [7, 0.6, 9, 1, 12, 1.5, 14, 2], opacity: 0.5 },
+      { id: 'rivers-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 0,  width: [2, 2.5, 5, 3, 8, 3.5, 12, 4], opacity: 0.9, color: '#08519c' },
+      { id: 'rivers-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 4,  width: [4, 1.5, 6, 2, 8, 2.5, 12, 3], opacity: 0.7, color: '#2171b5' },
+      { id: 'rivers-minor',  filter: ['<', ['get', 'strmOrder'], 4], minzoom: 7,  width: [7, 0.6, 9, 1, 12, 1.5, 14, 2], opacity: 0.5, color: '#4a90d9' },
     ];
 
     for (const tier of RIVER_TIERS) {
@@ -355,7 +355,7 @@ async function initMap() {
         minzoom: tier.minzoom,
         filter: tier.filter,
         paint: {
-          'line-color': '#2171b5',
+          'line-color': tier.color,
           'line-width': ['interpolate', ['linear'], ['zoom'], ...tier.width],
           'line-opacity': tier.opacity,
         },
@@ -379,23 +379,6 @@ async function initMap() {
 
     // All layer IDs for event binding and feature queries
     const RIVER_LAYER_IDS = RIVER_TIERS.flatMap(t => [t.id, `${t.id}-query`]);
-
-    // Debug: log strmOrder distribution and test layer rendering
-    map.once('idle', () => {
-      const feats = map.querySourceFeatures('rivers', { sourceLayer: 'rivers' });
-      const orders = {};
-      feats.forEach(f => {
-        const o = f.properties?.strmOrder ?? 'none';
-        orders[o] = (orders[o] || 0) + 1;
-      });
-      console.info('[rivers] strmOrder distribution at zoom', map.getZoom().toFixed(1), ':', orders, '(total:', feats.length, ')');
-      // Check what's rendered in rivers-major
-      const majorRendered = map.queryRenderedFeatures({ layers: ['rivers-major'] });
-      console.info('[rivers] rivers-major rendered features:', majorRendered.length);
-      // Try queryRenderedFeatures for query layers too
-      const queryRendered = map.queryRenderedFeatures({ layers: ['rivers-major-query'] });
-      console.info('[rivers] rivers-major-query rendered features:', queryRendered.length);
-    });
 
     // Get the run ID first
     try {
