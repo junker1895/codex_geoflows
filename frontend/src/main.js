@@ -106,11 +106,16 @@ function recordPerf(bucket, payload) {
   if (Array.isArray(perfState[bucket])) perfState[bucket].push(entry);
 }
 
+let lastPerfSnapshot = 0;
 function emitPerfSnapshot(reason) {
   if (!PERF_ENABLED) return;
+  const now = Date.now();
+  // Throttle to at most once per 10 seconds (except provider switches)
+  if (reason === 'moveend' && now - lastPerfSnapshot < 10000) return;
+  lastPerfSnapshot = now;
   const snapshot = {
     reason,
-    uptime_seconds: Math.round((Date.now() - perfState.sessionStartedAt) / 1000),
+    uptime_seconds: Math.round((now - perfState.sessionStartedAt) / 1000),
     interactions: perfState.interactions.length,
     network_calls: perfState.network.length,
     feature_state_batches: perfState.featureStateWrites.length,
@@ -354,6 +359,10 @@ async function initMap() {
         'source-layer': 'rivers',
         minzoom: tier.minzoom,
         filter: tier.filter,
+        layout: {
+          'line-cap': 'round',
+          'line-join': 'round',
+        },
         paint: {
           'line-color': tier.color,
           'line-width': ['interpolate', ['linear'], ['zoom'], ...tier.width],
