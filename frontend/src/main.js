@@ -13,7 +13,8 @@ const PMTILES_URL =
   'https://pub-6f1e54035ac14471852f4b7a25bf8354.r2.dev/rivers.pmtiles';
 const NE_RIVERS_URL =
   'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_rivers_lake_centerlines.geojson';
-const NE_PMTILES_CROSSOVER_ZOOM = 6; // NE rivers below this zoom, PMTiles above
+const NE_PMTILES_CROSSOVER_ZOOM = 6; // z6 = crossover where NE fades out and PMTiles takes over
+const DEBUG_RIVERS = new URLSearchParams(window.location.search).get('debugRivers') === '1';
 const API_BASE = '/forecast'; // proxied to backend via Vite
 let PROVIDER = 'geoglows';
 
@@ -91,6 +92,7 @@ const perfState = {
 const statusBar = document.getElementById('status-bar');
 const infoPanel = document.getElementById('info-panel');
 const infoContent = document.getElementById('info-content');
+const riverDebug = document.getElementById('river-debug');
 
 function setStatus(msg) {
   statusBar.textContent = msg;
@@ -200,6 +202,62 @@ async function loadSeverityMap(minSeverity, limit, signal) {
 function bboxKey(bounds, step = 2) {
   const snap = (v) => (Math.round(v / step) * step).toFixed(0);
   return `${snap(bounds.getWest())},${snap(bounds.getSouth())},${snap(bounds.getEast())},${snap(bounds.getNorth())}`;
+}
+
+function interpLinear(zoom, stops) {
+  if (zoom <= stops[0][0]) return stops[0][1];
+  if (zoom >= stops[stops.length - 1][0]) return stops[stops.length - 1][1];
+  for (let i = 0; i < stops.length - 1; i += 1) {
+    const [z0, v0] = stops[i];
+    const [z1, v1] = stops[i + 1];
+    if (zoom >= z0 && zoom <= z1) {
+      const t = (zoom - z0) / (z1 - z0);
+      return v0 + t * (v1 - v0);
+    }
+  }
+  return stops[stops.length - 1][1];
+}
+
+function getRiverDebugState(zoom) {
+  const majorMinArea = interpLinear(zoom, [[0, 120000], [3, 60000], [5, 15000], [6, 0]]);
+  const mediumMinArea = interpLinear(zoom, [[6, 20000], [7, 5000], [8, 1000], [9, 100], [10, 0]]);
+  const minorMinArea = interpLinear(zoom, [[8, 10000], [9, 2000], [10, 0]]);
+  const neActive = zoom < (NE_PMTILES_CROSSOVER_ZOOM + 1);
+  const neOpacity = neActive
+    ? interpLinear(zoom, [[0, 0.75], [5, 0.7], [6, 0.35], [6.6, 0]])
+    : 0;
+  const neScalerank = neActive
+    ? interpLinear(zoom, [[0, 3], [2, 5], [4, 8], [5, 12]])
+    : 0;
+  const majorOpacity = interpLinear(zoom, [[0, 0.2], [4.5, 0.35], [6, 0.8], [8, 0.9]]);
+  return {
+    neActive,
+    neOpacity,
+    neScalerank,
+    major: true,
+    medium: zoom >= 6,
+    minor: zoom >= 8,
+    majorOpacity,
+    majorMinArea,
+    mediumMinArea,
+    minorMinArea,
+  };
+}
+
+function updateRiverDebugPanel() {
+  if (!DEBUG_RIVERS || !map || !riverDebug) return;
+  const z = map.getZoom();
+  const s = getRiverDebugState(z);
+  riverDebug.classList.remove('hidden');
+  riverDebug.innerHTML = `
+    <div><strong>River debug</strong> (URL flag: <code>?debugRivers=1</code>)</div>
+    <div>zoom: <strong>${z.toFixed(2)}</strong></div>
+    <div>NE active: <strong>${s.neActive ? 'yes' : 'no'}</strong>, opacity ~ ${s.neOpacity.toFixed(2)}</div>
+    <div>NE filter: <code>scalerank &lt;= ${s.neScalerank.toFixed(2)}</code></div>
+    <div>PMTiles major: <strong>on</strong>, opacity ~ ${s.majorOpacity.toFixed(2)}, min DSContArea ~ ${Math.round(s.majorMinArea)}</div>
+    <div>PMTiles medium (strmOrder 4–6): <strong>${s.medium ? 'on' : 'off'}</strong>, min DSContArea ~ ${Math.round(s.mediumMinArea)}</div>
+    <div>PMTiles minor (strmOrder &lt; 4): <strong>${s.minor ? 'on' : 'off'}</strong>, min DSContArea ~ ${Math.round(s.minorMinArea)}</div>
+  `;
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +371,10 @@ async function initMap() {
   });
 
   map.addControl(new maplibregl.NavigationControl(), 'top-left');
+  if (DEBUG_RIVERS && riverDebug) {
+    riverDebug.classList.remove('hidden');
+    riverDebug.textContent = 'River debug enabled. Waiting for map...';
+  }
 
   map.on('load', async () => {
     // Add a simple basemap via raster tiles
@@ -350,13 +412,21 @@ async function initMap() {
         id: 'ne-rivers',
         type: 'line',
         source: 'ne-rivers',
-        maxzoom: NE_PMTILES_CROSSOVER_ZOOM,
+        maxzoom: NE_PMTILES_CROSSOVER_ZOOM + 1,
         filter: ['<=', ['get', 'scalerank'], ['interpolate', ['linear'], ['zoom'], 0, 3, 2, 5, 4, 8, 5, 12]],
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
           'line-color': '#08519c',
           'line-width': ['interpolate', ['linear'], ['zoom'], 0, 0.8, 3, 1.5, 5, 2],
-          'line-opacity': 0.7,
+          'line-opacity': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            0, 0.75,
+            NE_PMTILES_CROSSOVER_ZOOM - 1, 0.7,
+            NE_PMTILES_CROSSOVER_ZOOM, 0.35,
+            NE_PMTILES_CROSSOVER_ZOOM + 0.6, 0,
+          ],
         },
       });
       console.info('[ne-rivers] loaded', neData.features?.length, 'features');
@@ -369,14 +439,48 @@ async function initMap() {
     // -----------------------------------------------------------------------
     // Visible base layers:
     //   rivers-major:  strmOrder >= 7, no minzoom (dots at low zoom, lines at high)
-    //   rivers-medium: strmOrder 4–6, visible from z5
+    //   rivers-medium: strmOrder 4–6, visible from z6
     //   rivers-minor:  strmOrder < 4, visible from z8
     // Ghost query layers (invisible, allow queryRenderedFeatures at all zooms)
 
     const RIVER_TIERS = [
-      { id: 'rivers-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 0,  width: [2, 2.5, 5, 3, 8, 3.5, 12, 4], opacity: 0.9, color: '#08519c' },
-      { id: 'rivers-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 5,  width: [5, 1.5, 7, 2, 9, 2.5, 12, 3], opacity: 0.7, color: '#2171b5' },
-      { id: 'rivers-minor',  filter: ['<', ['get', 'strmOrder'], 4], minzoom: 8,  width: [8, 0.6, 10, 1, 12, 1.5, 14, 2], opacity: 0.5, color: '#4a90d9' },
+      {
+        id: 'rivers-major',
+        filter: [
+          'all',
+          ['>=', ['get', 'strmOrder'], 7],
+          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 0, 120000, 3, 60000, 5, 15000, 6, 0]],
+        ],
+        minzoom: 0,
+        width: [2, 2.2, 5, 2.4, 6, 2.8, 8, 3.5, 12, 4],
+        opacity: ['interpolate', ['linear'], ['zoom'], 0, 0.2, 4.5, 0.35, 6, 0.8, 8, 0.9],
+        color: '#08519c',
+      },
+      {
+        id: 'rivers-medium',
+        filter: [
+          'all',
+          ['>=', ['get', 'strmOrder'], 4],
+          ['<', ['get', 'strmOrder'], 7],
+          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
+        ],
+        minzoom: 6,
+        width: [5, 1.3, 7, 1.8, 9, 2.3, 12, 3],
+        opacity: ['interpolate', ['linear'], ['zoom'], 6, 0.45, 7, 0.6, 8, 0.7],
+        color: '#2171b5',
+      },
+      {
+        id: 'rivers-minor',
+        filter: [
+          'all',
+          ['<', ['get', 'strmOrder'], 4],
+          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 8, 10000, 9, 2000, 10, 0]],
+        ],
+        minzoom: 8,
+        width: [8, 0.5, 10, 0.9, 12, 1.3, 14, 1.8],
+        opacity: ['interpolate', ['linear'], ['zoom'], 8, 0.2, 9, 0.35, 10, 0.5, 12, 0.6],
+        color: '#4a90d9',
+      },
     ];
 
     for (const tier of RIVER_TIERS) {
@@ -438,6 +542,7 @@ async function initMap() {
         zoom: Number(map.getZoom().toFixed(2)),
       });
       onViewportChange();
+      updateRiverDebugPanel();
     });
     map.on('moveend', () => {
       const c = map.getCenter();
@@ -452,6 +557,7 @@ async function initMap() {
       onViewportChange();
       // Also apply feature states for newly-visible tiles after pan
       applyVisibleFeatureStates();
+      updateRiverDebugPanel();
     });
 
     // Re-apply feature states as new tiles stream in (pan/zoom)
@@ -464,6 +570,7 @@ async function initMap() {
       map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
     }
   });
+  map.on('idle', updateRiverDebugPanel);
 }
 
 // ---------------------------------------------------------------------------
@@ -503,9 +610,34 @@ function addHighlightLayer() {
 
   // Create a highlight layer for each tier so visibility matches base layers
   const tiers = [
-    { id: 'rivers-highlight-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 0 },
-    { id: 'rivers-highlight-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 5 },
-    { id: 'rivers-highlight-minor',  filter: ['<', ['get', 'strmOrder'], 4], minzoom: 8 },
+    {
+      id: 'rivers-highlight-major',
+      filter: [
+        'all',
+        ['>=', ['get', 'strmOrder'], 7],
+        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 0, 120000, 3, 60000, 5, 15000, 6, 0]],
+      ],
+      minzoom: 0,
+    },
+    {
+      id: 'rivers-highlight-medium',
+      filter: [
+        'all',
+        ['>=', ['get', 'strmOrder'], 4],
+        ['<', ['get', 'strmOrder'], 7],
+        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
+      ],
+      minzoom: 6,
+    },
+    {
+      id: 'rivers-highlight-minor',
+      filter: [
+        'all',
+        ['<', ['get', 'strmOrder'], 4],
+        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 8, 10000, 9, 2000, 10, 0]],
+      ],
+      minzoom: 8,
+    },
   ];
 
   for (const tier of tiers) {
