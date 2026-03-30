@@ -15,6 +15,7 @@ const NE_RIVERS_URL =
   'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_rivers_lake_centerlines.geojson';
 const NE_PMTILES_CROSSOVER_ZOOM = 6; // z6 = crossover where NE fades out and PMTiles takes over
 const DEBUG_RIVERS = new URLSearchParams(window.location.search).get('debugRivers') === '1';
+const FLOW_TUNING_UI = new URLSearchParams(window.location.search).get('flowTuning') !== '0';
 const API_BASE = '/forecast'; // proxied to backend via Vite
 let PROVIDER = 'geoglows';
 
@@ -96,6 +97,16 @@ const infoPanel = document.getElementById('info-panel');
 const infoContent = document.getElementById('info-content');
 const riverDebug = document.getElementById('river-debug');
 const riverFlowCanvas = document.getElementById('river-flow-canvas');
+const flowControls = document.getElementById('flow-controls');
+
+const flowFxConfig = {
+  dashLength: 10,
+  gapLength: 20,
+  speedMult: 1,
+  widthMult: 1,
+  opacityMult: 1,
+  pulseMult: 1,
+};
 
 function setStatus(msg) {
   statusBar.textContent = msg;
@@ -270,6 +281,178 @@ function updateRiverDebugPanel() {
     <div>PMTiles medium (strmOrder 4–6): <strong>${s.medium ? 'on' : 'off'}</strong>, min DSContArea ~ ${Math.round(s.mediumMinArea)}</div>
     <div>PMTiles minor (strmOrder &lt; 4): <strong>${s.minor ? 'on' : 'off'}</strong>, min DSContArea ~ ${Math.round(s.minorMinArea)}</div>
   `;
+}
+
+function initFlowControls() {
+  if (!flowControls || !FLOW_TUNING_UI) return;
+  flowControls.classList.remove('hidden');
+  const controls = [
+    ['dashLength', 'flow-dash-length', 'flow-dash-length-val'],
+    ['gapLength', 'flow-gap-length', 'flow-gap-length-val'],
+    ['speedMult', 'flow-speed-mult', 'flow-speed-mult-val'],
+    ['widthMult', 'flow-width-mult', 'flow-width-mult-val'],
+    ['opacityMult', 'flow-opacity-mult', 'flow-opacity-mult-val'],
+    ['pulseMult', 'flow-pulse-mult', 'flow-pulse-mult-val'],
+  ];
+  for (const [key, inputId, valueId] of controls) {
+    const input = document.getElementById(inputId);
+    const valueEl = document.getElementById(valueId);
+    if (!input || !valueEl) continue;
+    input.value = String(flowFxConfig[key]);
+    valueEl.textContent = input.value;
+    input.addEventListener('input', () => {
+      flowFxConfig[key] = Number(input.value);
+      valueEl.textContent = input.value;
+      riverFlowAnimator?.triggerRefresh();
+    });
+  }
+  document.getElementById('flow-copy-config')?.addEventListener('click', async () => {
+    const snippet = `const FLOW_FX = ${JSON.stringify(flowFxConfig, null, 2)};`;
+    try {
+      await navigator.clipboard.writeText(snippet);
+      setStatus('Flow animation config copied to clipboard');
+    } catch {
+      setStatus(`Copy failed. Use this config: ${snippet}`);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Canvas river flow animation
+// ---------------------------------------------------------------------------
+function severityForFeature(feature) {
+  const reachId = normalizeReachId(feature?.id);
+  const severity = reachId ? Number(forecastIndex[reachId]?.severity_score || 0) : 0;
+  return Number.isFinite(severity) ? Math.max(0, Math.min(6, severity)) : 0;
+}
+
+function flowColorForSeverity(severity) {
+  if (severity >= 5) return '#a50026';
+  if (severity >= 3) return '#f46d43';
+  if (severity >= 1) return '#fdae61';
+  return '#4aa8ff';
+}
+
+function flowWidthForOrder(order, zoom) {
+  const base = order >= 9 ? 4.6
+    : order >= 8 ? 3.8
+    : order >= 7 ? 3.0
+    : order >= 6 ? 2.4
+    : order >= 5 ? 1.9
+    : order >= 4 ? 1.5
+    : 1.1;
+  const zoomScale = Math.max(0.72, Math.min(2.5, zoom / 4.8));
+  return base * zoomScale * flowFxConfig.widthMult;
+}
+
+function getDashConfig(zoom) {
+  const dashLenBase = interpLinear(zoom, [[0, 4], [3, 6], [5, 10], [7, 12], [10, 14]]);
+  const gapLenBase = interpLinear(zoom, [[0, 14], [3, 18], [5, 20], [7, 22], [10, 24]]);
+  const dashLen = dashLenBase * (flowFxConfig.dashLength / 10);
+  const gapLen = gapLenBase * (flowFxConfig.gapLength / 20);
+  return { dashLen, gapLen, period: dashLen + gapLen };
+}
+
+function drawDashedSegment(ctx, points, color, lineW, offsetPx, alpha, dashLen, gapLen) {
+  if (points.length < 2) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], points[0][1]);
+  for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i][0], points[i][1]);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineW;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.globalAlpha = alpha;
+  ctx.setLineDash([dashLen, gapLen]);
+  ctx.lineDashOffset = -offsetPx;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function createRiverFlowAnimator() {
+  if (!riverFlowCanvas) return { triggerRefresh: () => {} };
+  const ctx = riverFlowCanvas.getContext('2d');
+  const pathOffsets = new Map();
+  let cachedPaths = [];
+  let refreshTimer = null;
+
+  function syncCanvasSize() {
+    const mapEl = document.getElementById('map');
+    if (!mapEl) return;
+    if (riverFlowCanvas.width !== mapEl.clientWidth) riverFlowCanvas.width = mapEl.clientWidth;
+    if (riverFlowCanvas.height !== mapEl.clientHeight) riverFlowCanvas.height = mapEl.clientHeight;
+  }
+
+  function triggerRefresh() {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(refreshPaths, 90);
+  }
+
+  function refreshPaths() {
+    if (!map || !map.loaded() || !riverLayerIds.length) return;
+    const zoom = map.getZoom();
+    const features = map.queryRenderedFeatures({
+      layers: riverLayerIds.filter((id) => map.getLayer(id) && !id.endsWith('-query')),
+    });
+    const seen = new Set();
+    cachedPaths = [];
+    for (const feature of features) {
+      const geom = feature.geometry;
+      if (!geom) continue;
+      const order = Number(feature.properties?.strmOrder ?? 5);
+      const severity = severityForFeature(feature);
+      const collect = (coords) => {
+        if (!coords || coords.length < 2) return;
+        const key = `${normalizeReachId(feature.id)}:${coords[0][0].toFixed(3)},${coords[0][1].toFixed(3)}:${coords.length}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        if (!pathOffsets.has(key)) pathOffsets.set(key, Math.random());
+        cachedPaths.push({
+          coords,
+          key,
+          severity,
+          color: flowColorForSeverity(severity),
+          width: flowWidthForOrder(order, zoom),
+        });
+      };
+      if (geom.type === 'LineString') collect(geom.coordinates);
+      if (geom.type === 'MultiLineString') geom.coordinates.forEach(collect);
+    }
+  }
+
+  function animate(ts) {
+    syncCanvasSize();
+    ctx.clearRect(0, 0, riverFlowCanvas.width, riverFlowCanvas.height);
+    if (!map || !map.loaded() || !cachedPaths.length) {
+      requestAnimationFrame(animate);
+      return;
+    }
+    const zoom = map.getZoom();
+    const { dashLen, gapLen, period } = getDashConfig(zoom);
+    const baseSpeed = interpLinear(zoom, [[0, 10], [4, 18], [6, 24], [9, 34], [12, 44]]) * flowFxConfig.speedMult;
+    const fadeWhenHighlighted = Object.keys(forecastIndex).length > 0 ? 0.88 : 1;
+    for (const path of cachedPaths) {
+      const pulse = 0.5 + 0.5 * Math.sin((ts / 1000) * (path.severity >= 3 ? 6 : 3) * Math.max(0.2, flowFxConfig.pulseMult));
+      const speed = baseSpeed + path.severity * 5;
+      const offset = (((pathOffsets.get(path.key) || 0) * period) + (ts / 1000) * speed) % period;
+      const projected = path.coords.map(([lng, lat]) => {
+        const p = map.project([lng, lat]);
+        return [p.x, p.y];
+      });
+      ctx.save();
+      ctx.globalAlpha = fadeWhenHighlighted * flowFxConfig.opacityMult;
+      drawDashedSegment(ctx, projected, path.color, path.width * 1.6, offset, 0.48 + pulse * 0.16 * flowFxConfig.pulseMult, dashLen, gapLen);
+      if (path.severity >= 3) {
+        drawDashedSegment(ctx, projected, path.color, path.width * 2.8, offset, 0.06 + pulse * 0.04 * flowFxConfig.pulseMult, dashLen * 1.2, gapLen);
+      }
+      ctx.restore();
+    }
+    requestAnimationFrame(animate);
+  }
+
+  requestAnimationFrame(animate);
+  return { triggerRefresh };
 }
 
 // ---------------------------------------------------------------------------
@@ -1220,4 +1403,5 @@ document.querySelectorAll('.provider-btn').forEach((btn) => {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
+initFlowControls();
 initMap();
