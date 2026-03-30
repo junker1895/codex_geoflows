@@ -6,7 +6,7 @@ This project uses a hybrid strategy so global zooms stay clean while higher zoom
 | --- | --- |
 | z0–5 | Natural Earth rivers (continuous lines) + PMTiles major reaches (`strmOrder >= 7`) |
 | z6 | Crossover (NE fades out, PMTiles fades in) |
-| z5+ | PMTiles medium reaches (`strmOrder 4–6`) with DSContArea gating at lower zooms |
+| z6+ | PMTiles medium reaches (`strmOrder 4–6`) with DSContArea gating at lower zooms |
 | z8+ | PMTiles minor reaches (`strmOrder < 4`) with DSContArea gating at lower zooms |
 
 ## 1) Build PMTiles from GEOGloWS v2 streams

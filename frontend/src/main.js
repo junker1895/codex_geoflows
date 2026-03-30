@@ -220,7 +220,7 @@ function interpLinear(zoom, stops) {
 
 function getRiverDebugState(zoom) {
   const majorMinArea = interpLinear(zoom, [[0, 120000], [3, 60000], [5, 15000], [6, 0]]);
-  const mediumMinArea = interpLinear(zoom, [[5, 50000], [6, 20000], [7, 5000], [8, 1000], [9, 100], [10, 0]]);
+  const mediumMinArea = interpLinear(zoom, [[6, 20000], [7, 5000], [8, 1000], [9, 100], [10, 0]]);
   const minorMinArea = interpLinear(zoom, [[8, 10000], [9, 2000], [10, 0]]);
   const neActive = zoom < (NE_PMTILES_CROSSOVER_ZOOM + 1);
   const neOpacity = neActive
@@ -235,7 +235,7 @@ function getRiverDebugState(zoom) {
     neOpacity,
     neScalerank,
     major: true,
-    medium: zoom >= 5,
+    medium: zoom >= 6,
     minor: zoom >= 8,
     majorOpacity,
     majorMinArea,
@@ -439,7 +439,7 @@ async function initMap() {
     // -----------------------------------------------------------------------
     // Visible base layers:
     //   rivers-major:  strmOrder >= 7, no minzoom (dots at low zoom, lines at high)
-    //   rivers-medium: strmOrder 4–6, visible from z5
+    //   rivers-medium: strmOrder 4–6, visible from z6
     //   rivers-minor:  strmOrder < 4, visible from z8
     // Ghost query layers (invisible, allow queryRenderedFeatures at all zooms)
 
@@ -462,11 +462,11 @@ async function initMap() {
           'all',
           ['>=', ['get', 'strmOrder'], 4],
           ['<', ['get', 'strmOrder'], 7],
-          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 5, 50000, 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
+          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
         ],
-        minzoom: 5,
+        minzoom: 6,
         width: [5, 1.3, 7, 1.8, 9, 2.3, 12, 3],
-        opacity: ['interpolate', ['linear'], ['zoom'], 5, 0.3, 6, 0.45, 7, 0.6, 8, 0.7],
+        opacity: ['interpolate', ['linear'], ['zoom'], 6, 0.45, 7, 0.6, 8, 0.7],
         color: '#2171b5',
       },
       {
@@ -625,9 +625,9 @@ function addHighlightLayer() {
         'all',
         ['>=', ['get', 'strmOrder'], 4],
         ['<', ['get', 'strmOrder'], 7],
-        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 5, 50000, 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
+        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
       ],
-      minzoom: 5,
+      minzoom: 6,
     },
     {
       id: 'rivers-highlight-minor',

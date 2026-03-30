@@ -24,7 +24,7 @@ class RiverTier:
 
 RIVER_TIERS = [
     RiverTier("rivers-major", 0, "strmOrder >= 7"),
-    RiverTier("rivers-medium", 5, "4 <= strmOrder < 7"),
+    RiverTier("rivers-medium", 6, "4 <= strmOrder < 7"),
     RiverTier("rivers-minor", 8, "strmOrder < 4"),
 ]
 
@@ -66,7 +66,7 @@ def major_min_area(zoom: float) -> float:
 
 
 def medium_min_area(zoom: float) -> float:
-    return interp_linear(zoom, [(5, 50000), (6, 20000), (7, 5000), (8, 1000), (9, 100), (10, 0)])
+    return interp_linear(zoom, [(6, 20000), (7, 5000), (8, 1000), (9, 100), (10, 0)])
 
 
 def minor_min_area(zoom: float) -> float:
