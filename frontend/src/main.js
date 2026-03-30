@@ -100,12 +100,12 @@ const riverFlowCanvas = document.getElementById('river-flow-canvas');
 const flowControls = document.getElementById('flow-controls');
 
 const flowFxConfig = {
-  dashLength: 10,
-  gapLength: 20,
-  speedMult: 1,
+  dashLength: 6,
+  gapLength: 12,
+  speedMult: 0.3,
   widthMult: 1,
-  opacityMult: 1,
-  pulseMult: 1,
+  opacityMult: 0.2,
+  pulseMult: 0,
 };
 
 function setStatus(msg) {
@@ -451,7 +451,7 @@ function createRiverFlowAnimator() {
     for (const path of cachedPaths) {
       const pulse = 0.5 + 0.5 * Math.sin((ts / 1000) * (path.severity >= 3 ? 6 : 3) * Math.max(0.2, flowFxConfig.pulseMult));
       const speed = baseSpeed + path.severity * 5;
-      const offset = (((pathOffsets.get(path.key) || 0) * period) + (ts / 1000) * speed) % period;
+      const offset = (((pathOffsets.get(path.key) || 0) * period) - (ts / 1000) * speed) % period;
       const projected = path.coords.map(([lng, lat]) => {
         const p = map.project([lng, lat]);
         return [p.x, p.y];
