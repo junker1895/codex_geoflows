@@ -219,6 +219,9 @@ function interpLinear(zoom, stops) {
 }
 
 function getRiverDebugState(zoom) {
+  const majorMinArea = interpLinear(zoom, [[0, 120000], [3, 60000], [5, 15000], [6, 0]]);
+  const mediumMinArea = interpLinear(zoom, [[5, 50000], [6, 20000], [7, 5000], [8, 1000], [9, 100], [10, 0]]);
+  const minorMinArea = interpLinear(zoom, [[8, 10000], [9, 2000], [10, 0]]);
   const neActive = zoom < (NE_PMTILES_CROSSOVER_ZOOM + 1);
   const neOpacity = neActive
     ? interpLinear(zoom, [[0, 0.75], [5, 0.7], [6, 0.35], [6.6, 0]])
@@ -235,6 +238,9 @@ function getRiverDebugState(zoom) {
     medium: zoom >= 5,
     minor: zoom >= 8,
     majorOpacity,
+    majorMinArea,
+    mediumMinArea,
+    minorMinArea,
   };
 }
 
@@ -248,9 +254,9 @@ function updateRiverDebugPanel() {
     <div>zoom: <strong>${z.toFixed(2)}</strong></div>
     <div>NE active: <strong>${s.neActive ? 'yes' : 'no'}</strong>, opacity ~ ${s.neOpacity.toFixed(2)}</div>
     <div>NE filter: <code>scalerank &lt;= ${s.neScalerank.toFixed(2)}</code></div>
-    <div>PMTiles major: <strong>on</strong>, opacity ~ ${s.majorOpacity.toFixed(2)}</div>
-    <div>PMTiles medium (strmOrder 4–6): <strong>${s.medium ? 'on' : 'off'}</strong></div>
-    <div>PMTiles minor (strmOrder &lt; 4): <strong>${s.minor ? 'on' : 'off'}</strong></div>
+    <div>PMTiles major: <strong>on</strong>, opacity ~ ${s.majorOpacity.toFixed(2)}, min DSContArea ~ ${Math.round(s.majorMinArea)}</div>
+    <div>PMTiles medium (strmOrder 4–6): <strong>${s.medium ? 'on' : 'off'}</strong>, min DSContArea ~ ${Math.round(s.mediumMinArea)}</div>
+    <div>PMTiles minor (strmOrder &lt; 4): <strong>${s.minor ? 'on' : 'off'}</strong>, min DSContArea ~ ${Math.round(s.minorMinArea)}</div>
   `;
 }
 
@@ -438,9 +444,43 @@ async function initMap() {
     // Ghost query layers (invisible, allow queryRenderedFeatures at all zooms)
 
     const RIVER_TIERS = [
-      { id: 'rivers-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 0,  width: [2, 2.2, 5, 2.4, 6, 2.8, 8, 3.5, 12, 4], opacity: ['interpolate', ['linear'], ['zoom'], 0, 0.2, 4.5, 0.35, 6, 0.8, 8, 0.9], color: '#08519c' },
-      { id: 'rivers-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 5,  width: [5, 1.5, 7, 2, 9, 2.5, 12, 3], opacity: 0.7, color: '#2171b5' },
-      { id: 'rivers-minor',  filter: ['<', ['get', 'strmOrder'], 4], minzoom: 8,  width: [8, 0.6, 10, 1, 12, 1.5, 14, 2], opacity: 0.5, color: '#4a90d9' },
+      {
+        id: 'rivers-major',
+        filter: [
+          'all',
+          ['>=', ['get', 'strmOrder'], 7],
+          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 0, 120000, 3, 60000, 5, 15000, 6, 0]],
+        ],
+        minzoom: 0,
+        width: [2, 2.2, 5, 2.4, 6, 2.8, 8, 3.5, 12, 4],
+        opacity: ['interpolate', ['linear'], ['zoom'], 0, 0.2, 4.5, 0.35, 6, 0.8, 8, 0.9],
+        color: '#08519c',
+      },
+      {
+        id: 'rivers-medium',
+        filter: [
+          'all',
+          ['>=', ['get', 'strmOrder'], 4],
+          ['<', ['get', 'strmOrder'], 7],
+          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 5, 50000, 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
+        ],
+        minzoom: 5,
+        width: [5, 1.3, 7, 1.8, 9, 2.3, 12, 3],
+        opacity: ['interpolate', ['linear'], ['zoom'], 5, 0.3, 6, 0.45, 7, 0.6, 8, 0.7],
+        color: '#2171b5',
+      },
+      {
+        id: 'rivers-minor',
+        filter: [
+          'all',
+          ['<', ['get', 'strmOrder'], 4],
+          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 8, 10000, 9, 2000, 10, 0]],
+        ],
+        minzoom: 8,
+        width: [8, 0.5, 10, 0.9, 12, 1.3, 14, 1.8],
+        opacity: ['interpolate', ['linear'], ['zoom'], 8, 0.2, 9, 0.35, 10, 0.5, 12, 0.6],
+        color: '#4a90d9',
+      },
     ];
 
     for (const tier of RIVER_TIERS) {
@@ -570,9 +610,34 @@ function addHighlightLayer() {
 
   // Create a highlight layer for each tier so visibility matches base layers
   const tiers = [
-    { id: 'rivers-highlight-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 0 },
-    { id: 'rivers-highlight-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 5 },
-    { id: 'rivers-highlight-minor',  filter: ['<', ['get', 'strmOrder'], 4], minzoom: 8 },
+    {
+      id: 'rivers-highlight-major',
+      filter: [
+        'all',
+        ['>=', ['get', 'strmOrder'], 7],
+        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 0, 120000, 3, 60000, 5, 15000, 6, 0]],
+      ],
+      minzoom: 0,
+    },
+    {
+      id: 'rivers-highlight-medium',
+      filter: [
+        'all',
+        ['>=', ['get', 'strmOrder'], 4],
+        ['<', ['get', 'strmOrder'], 7],
+        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 5, 50000, 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
+      ],
+      minzoom: 5,
+    },
+    {
+      id: 'rivers-highlight-minor',
+      filter: [
+        'all',
+        ['<', ['get', 'strmOrder'], 4],
+        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 8, 10000, 9, 2000, 10, 0]],
+      ],
+      minzoom: 8,
+    },
   ];
 
   for (const tier of tiers) {
