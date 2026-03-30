@@ -8,9 +8,20 @@
 </head>
 <body>
   <div id="map"></div>
+  <canvas id="river-flow-canvas" aria-hidden="true"></canvas>
   <div id="provider-toggle">
     <button class="provider-btn active" data-provider="geoglows">GeoGloWS</button>
     <button class="provider-btn" data-provider="glofas">GloFAS</button>
+  </div>
+  <div id="flow-controls" class="hidden">
+    <div id="flow-controls-title">Flow Animation Tuning</div>
+    <label>Length <input id="flow-dash-length" type="range" min="2" max="30" step="1" /><span id="flow-dash-length-val"></span></label>
+    <label>Gap <input id="flow-gap-length" type="range" min="6" max="40" step="1" /><span id="flow-gap-length-val"></span></label>
+    <label>Speed <input id="flow-speed-mult" type="range" min="0.2" max="3" step="0.1" /><span id="flow-speed-mult-val"></span></label>
+    <label>Size <input id="flow-width-mult" type="range" min="0.5" max="3" step="0.1" /><span id="flow-width-mult-val"></span></label>
+    <label>Opacity <input id="flow-opacity-mult" type="range" min="0.2" max="2" step="0.05" /><span id="flow-opacity-mult-val"></span></label>
+    <label>Pulse <input id="flow-pulse-mult" type="range" min="0" max="2" step="0.1" /><span id="flow-pulse-mult-val"></span></label>
+    <button id="flow-copy-config" type="button">Copy config</button>
   </div>
   <div id="legend">
     <h3>Flood Risk</h3>
