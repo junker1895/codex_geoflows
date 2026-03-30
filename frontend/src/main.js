@@ -11,6 +11,9 @@ Chart.register(...registerables);
 // ---------------------------------------------------------------------------
 const PMTILES_URL =
   'https://pub-6f1e54035ac14471852f4b7a25bf8354.r2.dev/rivers.pmtiles';
+const NE_RIVERS_URL =
+  'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_rivers_lake_centerlines.geojson';
+const NE_PMTILES_CROSSOVER_ZOOM = 6; // NE rivers below this zoom, PMTiles above
 const API_BASE = '/forecast'; // proxied to backend via Vite
 let PROVIDER = 'geoglows';
 
@@ -335,18 +338,44 @@ async function initMap() {
     });
 
     // -----------------------------------------------------------------------
-    // River layers – progressive reveal by strmOrder + minzoom
+    // Natural Earth rivers – low-zoom fallback (z0 to crossover)
     // -----------------------------------------------------------------------
-    // Visible base layers (what you see)
-    //   rivers-major:  strmOrder >= 4, always visible
-    //   rivers-medium: strmOrder 2–3, visible from z5
-    //   rivers-minor:  strmOrder 1,   visible from z8
+    // NE rivers provide continuous, clean geometry at global zoom where
+    // PMTiles has only simplified dots. Loaded once, hidden at higher zoom.
+    try {
+      const neResp = await fetch(NE_RIVERS_URL);
+      const neData = await neResp.json();
+      map.addSource('ne-rivers', { type: 'geojson', data: neData });
+      map.addLayer({
+        id: 'ne-rivers',
+        type: 'line',
+        source: 'ne-rivers',
+        maxzoom: NE_PMTILES_CROSSOVER_ZOOM,
+        filter: ['<=', ['get', 'scalerank'], ['interpolate', ['linear'], ['zoom'], 0, 3, 2, 5, 4, 8, 5, 12]],
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#08519c',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 0, 0.8, 3, 1.5, 5, 2],
+          'line-opacity': 0.7,
+        },
+      });
+      console.info('[ne-rivers] loaded', neData.features?.length, 'features');
+    } catch (e) {
+      console.warn('Could not load Natural Earth rivers:', e);
+    }
+
+    // -----------------------------------------------------------------------
+    // PMTiles river layers – progressive reveal by strmOrder + minzoom
+    // -----------------------------------------------------------------------
+    // Visible base layers:
+    //   rivers-major:  strmOrder >= 7, no minzoom (dots at low zoom, lines at high)
+    //   rivers-medium: strmOrder 4–6, visible from z5
+    //   rivers-minor:  strmOrder < 4, visible from z8
     // Ghost query layers (invisible, allow queryRenderedFeatures at all zooms)
-    //   rivers-query-major, rivers-query-medium, rivers-query-minor
 
     const RIVER_TIERS = [
-      { id: 'rivers-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 5,  width: [5, 2.5, 7, 3, 9, 3.5, 12, 4], opacity: 0.9, color: '#08519c' },
-      { id: 'rivers-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 6,  width: [6, 1.5, 8, 2, 10, 2.5, 12, 3], opacity: 0.7, color: '#2171b5' },
+      { id: 'rivers-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 0,  width: [2, 2.5, 5, 3, 8, 3.5, 12, 4], opacity: 0.9, color: '#08519c' },
+      { id: 'rivers-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 5,  width: [5, 1.5, 7, 2, 9, 2.5, 12, 3], opacity: 0.7, color: '#2171b5' },
       { id: 'rivers-minor',  filter: ['<', ['get', 'strmOrder'], 4], minzoom: 8,  width: [8, 0.6, 10, 1, 12, 1.5, 14, 2], opacity: 0.5, color: '#4a90d9' },
     ];
 
@@ -474,8 +503,8 @@ function addHighlightLayer() {
 
   // Create a highlight layer for each tier so visibility matches base layers
   const tiers = [
-    { id: 'rivers-highlight-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 5 },
-    { id: 'rivers-highlight-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 6 },
+    { id: 'rivers-highlight-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 0 },
+    { id: 'rivers-highlight-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 5 },
     { id: 'rivers-highlight-minor',  filter: ['<', ['get', 'strmOrder'], 4], minzoom: 8 },
   ];
 
