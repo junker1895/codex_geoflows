@@ -339,12 +339,10 @@ async function initMap() {
     // Ghost query layers (invisible, allow queryRenderedFeatures at all zooms)
     //   rivers-query-major, rivers-query-medium, rivers-query-minor
 
-    // Use to-number coercion since strmOrder may be encoded as string in tiles
-    const strmNum = ['to-number', ['get', 'strmOrder'], 0];
     const RIVER_TIERS = [
-      { id: 'rivers-major',  filter: ['>=', strmNum, 4], minzoom: 0,  width: [2, 1.5, 5, 2, 8, 2.5, 12, 3.5] },
-      { id: 'rivers-medium', filter: ['all', ['>=', strmNum, 2], ['<', strmNum, 4]], minzoom: 5,  width: [5, 0.8, 8, 1.2, 12, 2] },
-      { id: 'rivers-minor',  filter: ['<', strmNum, 2], minzoom: 8,  width: [8, 0.5, 10, 0.8, 12, 1.2, 14, 1.8] },
+      { id: 'rivers-major',  filter: ['>=', ['get', 'strmOrder'], 4], minzoom: 0,  width: [2, 1.5, 5, 2, 8, 2.5, 12, 3.5] },
+      { id: 'rivers-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 2], ['<', ['get', 'strmOrder'], 4]], minzoom: 5,  width: [5, 0.8, 8, 1.2, 12, 2] },
+      { id: 'rivers-minor',  filter: ['<', ['get', 'strmOrder'], 2], minzoom: 8,  width: [8, 0.5, 10, 0.8, 12, 1.2, 14, 1.8] },
     ];
 
     for (const tier of RIVER_TIERS) {
@@ -382,7 +380,7 @@ async function initMap() {
     // All layer IDs for event binding and feature queries
     const RIVER_LAYER_IDS = RIVER_TIERS.flatMap(t => [t.id, `${t.id}-query`]);
 
-    // Debug: log strmOrder distribution once tiles load
+    // Debug: log strmOrder distribution and test layer rendering
     map.once('idle', () => {
       const feats = map.querySourceFeatures('rivers', { sourceLayer: 'rivers' });
       const orders = {};
@@ -391,9 +389,12 @@ async function initMap() {
         orders[o] = (orders[o] || 0) + 1;
       });
       console.info('[rivers] strmOrder distribution at zoom', map.getZoom().toFixed(1), ':', orders, '(total:', feats.length, ')');
-      // Check type of strmOrder
-      const sample = feats[0]?.properties?.strmOrder;
-      console.info('[rivers] strmOrder type:', typeof sample, 'value:', sample);
+      // Check what's rendered in rivers-major
+      const majorRendered = map.queryRenderedFeatures({ layers: ['rivers-major'] });
+      console.info('[rivers] rivers-major rendered features:', majorRendered.length);
+      // Try queryRenderedFeatures for query layers too
+      const queryRendered = map.queryRenderedFeatures({ layers: ['rivers-major-query'] });
+      console.info('[rivers] rivers-major-query rendered features:', queryRendered.length);
     });
 
     // Get the run ID first
@@ -480,11 +481,10 @@ function addHighlightLayer() {
   if (highlightLayersAdded) return;
 
   // Create a highlight layer for each tier so visibility matches base layers
-  const sn = ['to-number', ['get', 'strmOrder'], 0];
   const tiers = [
-    { id: 'rivers-highlight-major',  filter: ['>=', sn, 4], minzoom: 0 },
-    { id: 'rivers-highlight-medium', filter: ['all', ['>=', sn, 2], ['<', sn, 4]], minzoom: 5 },
-    { id: 'rivers-highlight-minor',  filter: ['<', sn, 2], minzoom: 8 },
+    { id: 'rivers-highlight-major',  filter: ['>=', ['get', 'strmOrder'], 4], minzoom: 0 },
+    { id: 'rivers-highlight-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 2], ['<', ['get', 'strmOrder'], 4]], minzoom: 5 },
+    { id: 'rivers-highlight-minor',  filter: ['<', ['get', 'strmOrder'], 2], minzoom: 8 },
   ];
 
   for (const tier of tiers) {
