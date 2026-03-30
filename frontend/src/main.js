@@ -98,6 +98,15 @@ function setStatus(msg) {
   statusBar.textContent = msg;
 }
 
+function normalizeReachId(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return '';
+  // Provider payloads can occasionally serialize integral IDs as floats (e.g. "760021611.0").
+  // Normalize these so forecast index keys match PMTiles reach_id values.
+  if (/^\d+\.0+$/.test(s)) return s.replace(/\.0+$/, '');
+  return s;
+}
+
 function nowMs() {
   return performance?.now ? performance.now() : Date.now();
 }
@@ -288,7 +297,9 @@ async function loadDataForZoom(zoom) {
     );
 
     // Merge new reaches into existing index (don't lose higher-severity data)
-    for (const [reachId, score] of Object.entries(severityMap)) {
+    for (const [rawReachId, score] of Object.entries(severityMap)) {
+      const reachId = normalizeReachId(rawReachId);
+      if (!reachId) continue;
       forecastIndex[reachId] = { severity_score: score };
     }
     perfState.maxForecastIndexSize = Math.max(
@@ -397,6 +408,7 @@ async function initMap() {
       url: `pmtiles://${PMTILES_URL}`,
       minzoom: riversMinZoom,
       maxzoom: riversMaxZoom,
+      promoteId: 'reach_id',
     });
 
     // -----------------------------------------------------------------------
@@ -452,8 +464,10 @@ async function initMap() {
           ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 0, 120000, 3, 60000, 5, 15000, 6, 0]],
         ],
         minzoom: 0,
-        width: [2, 2.2, 5, 2.4, 6, 2.8, 8, 3.5, 12, 4],
-        opacity: ['interpolate', ['linear'], ['zoom'], 0, 0.2, 4.5, 0.35, 6, 0.8, 8, 0.9],
+        // Keep low-zoom major PMTiles visually close to Natural Earth stroke
+        // so crossover zooms don't show a jarring double-thickness effect.
+        width: [0, 0.8, 3, 1.4, 5, 2.0, 6, 2.5, 8, 3.3, 12, 4.0],
+        opacity: ['interpolate', ['linear'], ['zoom'], 0, 0.12, 3, 0.22, 4.5, 0.3, 6, 0.8, 8, 0.9],
         color: '#08519c',
       },
       {
@@ -696,7 +710,7 @@ function _applyVisibleFeatureStatesBatch() {
   const seen = new Set();
 
   for (const feature of visibleFeatures) {
-    const reachId = String(feature.id ?? '');
+    const reachId = normalizeReachId(feature.id);
     if (!reachId || seen.has(reachId)) continue;
     seen.add(reachId);
 
@@ -709,11 +723,8 @@ function _applyVisibleFeatureStatesBatch() {
     // Skip if we already wrote this exact state
     if (appliedFeatureStates.has(reachId)) continue;
 
-    const numId = Number(reachId);
-    if (isNaN(numId)) continue;
-
     map.setFeatureState(
-      { source: 'rivers', sourceLayer: 'rivers', id: numId },
+      { source: 'rivers', sourceLayer: 'rivers', id: reachId },
       { severity }
     );
     appliedFeatureStates.add(reachId);
@@ -888,7 +899,7 @@ async function onRiverClick(e) {
   if (!e.features || e.features.length === 0) return;
 
   const feature = e.features[0];
-  const reachId = String(feature.id || '');
+  const reachId = normalizeReachId(feature.id);
   const info = forecastIndex[reachId];
 
   let html = `<h4>Reach ${reachId}</h4><table>`;
@@ -1021,10 +1032,8 @@ function switchProvider(newProvider) {
   // Clear feature states on the map before clearing the tracking set
   if (map && map.getSource('rivers')) {
     for (const reachId of appliedFeatureStates) {
-      const numId = Number(reachId);
-      if (isNaN(numId)) continue;
       map.setFeatureState(
-        { source: 'rivers', sourceLayer: 'rivers', id: numId },
+        { source: 'rivers', sourceLayer: 'rivers', id: reachId },
         { severity: 0 }
       );
     }
