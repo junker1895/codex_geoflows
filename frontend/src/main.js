@@ -340,9 +340,9 @@ async function initMap() {
     //   rivers-query-major, rivers-query-medium, rivers-query-minor
 
     const RIVER_TIERS = [
-      { id: 'rivers-major',  filter: ['>=', ['get', 'strmOrder'], 4], minzoom: 0,  width: [2, 1.5, 5, 2, 8, 2.5, 12, 3.5] },
-      { id: 'rivers-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 2], ['<', ['get', 'strmOrder'], 4]], minzoom: 5,  width: [5, 0.8, 8, 1.2, 12, 2] },
-      { id: 'rivers-minor',  filter: ['<', ['get', 'strmOrder'], 2], minzoom: 8,  width: [8, 0.5, 10, 0.8, 12, 1.2, 14, 1.8] },
+      { id: 'rivers-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 0,  width: [2, 2, 5, 2.5, 8, 3, 12, 4], opacity: 0.8 },
+      { id: 'rivers-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 4,  width: [4, 1.2, 6, 1.5, 8, 2, 12, 3], opacity: 0.6 },
+      { id: 'rivers-minor',  filter: ['<', ['get', 'strmOrder'], 4], minzoom: 7,  width: [7, 0.6, 9, 1, 12, 1.5, 14, 2], opacity: 0.5 },
     ];
 
     for (const tier of RIVER_TIERS) {
@@ -355,9 +355,9 @@ async function initMap() {
         minzoom: tier.minzoom,
         filter: tier.filter,
         paint: {
-          'line-color': '#4a90d9',
+          'line-color': '#2171b5',
           'line-width': ['interpolate', ['linear'], ['zoom'], ...tier.width],
-          'line-opacity': 0.5,
+          'line-opacity': tier.opacity,
         },
       });
 
@@ -482,9 +482,9 @@ function addHighlightLayer() {
 
   // Create a highlight layer for each tier so visibility matches base layers
   const tiers = [
-    { id: 'rivers-highlight-major',  filter: ['>=', ['get', 'strmOrder'], 4], minzoom: 0 },
-    { id: 'rivers-highlight-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 2], ['<', ['get', 'strmOrder'], 4]], minzoom: 5 },
-    { id: 'rivers-highlight-minor',  filter: ['<', ['get', 'strmOrder'], 2], minzoom: 8 },
+    { id: 'rivers-highlight-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 0 },
+    { id: 'rivers-highlight-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 4 },
+    { id: 'rivers-highlight-minor',  filter: ['<', ['get', 'strmOrder'], 4], minzoom: 7 },
   ];
 
   for (const tier of tiers) {
