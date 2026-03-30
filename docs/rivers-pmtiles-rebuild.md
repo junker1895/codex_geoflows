@@ -59,3 +59,40 @@ At each zoom, check:
 4. **z10+:** minor tributaries fill in progressively.
 
 If you still see sparse dots at low zoom, verify that NE rivers loaded successfully in the browser console and that PMTiles line opacity remains low below z6.
+
+## 5) Test zoom/filter behavior *before* rebuilding PMTiles
+
+You can validate the intended zoom gates without generating tiles:
+
+```bash
+python scripts/check_river_zoom_filters.py --min-zoom 0 --max-zoom 12 --step 0.5
+```
+
+This prints, per zoom:
+- whether NE is active and its expected opacity,
+- NE `scalerank` cutoff,
+- which PMTiles tiers should render (`major`, `medium`, `minor`).
+
+You can also verify live in the app with a visual overlay:
+
+```text
+http://localhost:4173/?debugRivers=1
+```
+
+The overlay shows current zoom plus expected NE/PMTiles visibility and filter thresholds.
+
+## 6) QGIS workflow (yes, this helps)
+
+QGIS is useful for preflight checks on source geometry and the `strmOrder` rules:
+
+1. Add GEOGloWS streams (`.fgb` or GeoParquet converted to layer) as a vector layer.
+2. Open **Layer Properties → Symbology → Rule-based**.
+3. Add these rules:
+   - `strmOrder >= 7` (major)
+   - `strmOrder >= 4 AND strmOrder < 7` (medium)
+   - `strmOrder < 4` (minor)
+4. Style each rule with increasing line width for major streams.
+5. Zoom to global, continental, and local extents and check continuity of major rivers.
+6. Optional: run **Processing → Geometry by expression** and compare `length($geometry)` distributions by `strmOrder` to detect over-fragmented linework before tiling.
+
+QGIS cannot perfectly emulate MapLibre zoom styling, but it is very good for verifying that source geometry and `strmOrder` classes are coherent before running Tippecanoe.

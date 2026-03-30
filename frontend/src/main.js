@@ -14,6 +14,7 @@ const PMTILES_URL =
 const NE_RIVERS_URL =
   'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_rivers_lake_centerlines.geojson';
 const NE_PMTILES_CROSSOVER_ZOOM = 6; // z6 = crossover where NE fades out and PMTiles takes over
+const DEBUG_RIVERS = new URLSearchParams(window.location.search).get('debugRivers') === '1';
 const API_BASE = '/forecast'; // proxied to backend via Vite
 let PROVIDER = 'geoglows';
 
@@ -91,6 +92,7 @@ const perfState = {
 const statusBar = document.getElementById('status-bar');
 const infoPanel = document.getElementById('info-panel');
 const infoContent = document.getElementById('info-content');
+const riverDebug = document.getElementById('river-debug');
 
 function setStatus(msg) {
   statusBar.textContent = msg;
@@ -200,6 +202,56 @@ async function loadSeverityMap(minSeverity, limit, signal) {
 function bboxKey(bounds, step = 2) {
   const snap = (v) => (Math.round(v / step) * step).toFixed(0);
   return `${snap(bounds.getWest())},${snap(bounds.getSouth())},${snap(bounds.getEast())},${snap(bounds.getNorth())}`;
+}
+
+function interpLinear(zoom, stops) {
+  if (zoom <= stops[0][0]) return stops[0][1];
+  if (zoom >= stops[stops.length - 1][0]) return stops[stops.length - 1][1];
+  for (let i = 0; i < stops.length - 1; i += 1) {
+    const [z0, v0] = stops[i];
+    const [z1, v1] = stops[i + 1];
+    if (zoom >= z0 && zoom <= z1) {
+      const t = (zoom - z0) / (z1 - z0);
+      return v0 + t * (v1 - v0);
+    }
+  }
+  return stops[stops.length - 1][1];
+}
+
+function getRiverDebugState(zoom) {
+  const neActive = zoom < (NE_PMTILES_CROSSOVER_ZOOM + 1);
+  const neOpacity = neActive
+    ? interpLinear(zoom, [[0, 0.75], [5, 0.7], [6, 0.35], [6.6, 0]])
+    : 0;
+  const neScalerank = neActive
+    ? interpLinear(zoom, [[0, 3], [2, 5], [4, 8], [5, 12]])
+    : 0;
+  const majorOpacity = interpLinear(zoom, [[0, 0.2], [4.5, 0.35], [6, 0.8], [8, 0.9]]);
+  return {
+    neActive,
+    neOpacity,
+    neScalerank,
+    major: true,
+    medium: zoom >= 5,
+    minor: zoom >= 8,
+    majorOpacity,
+  };
+}
+
+function updateRiverDebugPanel() {
+  if (!DEBUG_RIVERS || !map || !riverDebug) return;
+  const z = map.getZoom();
+  const s = getRiverDebugState(z);
+  riverDebug.classList.remove('hidden');
+  riverDebug.innerHTML = `
+    <div><strong>River debug</strong> (URL flag: <code>?debugRivers=1</code>)</div>
+    <div>zoom: <strong>${z.toFixed(2)}</strong></div>
+    <div>NE active: <strong>${s.neActive ? 'yes' : 'no'}</strong>, opacity ~ ${s.neOpacity.toFixed(2)}</div>
+    <div>NE filter: <code>scalerank &lt;= ${s.neScalerank.toFixed(2)}</code></div>
+    <div>PMTiles major: <strong>on</strong>, opacity ~ ${s.majorOpacity.toFixed(2)}</div>
+    <div>PMTiles medium (strmOrder 4–6): <strong>${s.medium ? 'on' : 'off'}</strong></div>
+    <div>PMTiles minor (strmOrder &lt; 4): <strong>${s.minor ? 'on' : 'off'}</strong></div>
+  `;
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +365,10 @@ async function initMap() {
   });
 
   map.addControl(new maplibregl.NavigationControl(), 'top-left');
+  if (DEBUG_RIVERS && riverDebug) {
+    riverDebug.classList.remove('hidden');
+    riverDebug.textContent = 'River debug enabled. Waiting for map...';
+  }
 
   map.on('load', async () => {
     // Add a simple basemap via raster tiles
@@ -446,6 +502,7 @@ async function initMap() {
         zoom: Number(map.getZoom().toFixed(2)),
       });
       onViewportChange();
+      updateRiverDebugPanel();
     });
     map.on('moveend', () => {
       const c = map.getCenter();
@@ -460,6 +517,7 @@ async function initMap() {
       onViewportChange();
       // Also apply feature states for newly-visible tiles after pan
       applyVisibleFeatureStates();
+      updateRiverDebugPanel();
     });
 
     // Re-apply feature states as new tiles stream in (pan/zoom)
@@ -472,6 +530,7 @@ async function initMap() {
       map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
     }
   });
+  map.on('idle', updateRiverDebugPanel);
 }
 
 // ---------------------------------------------------------------------------
