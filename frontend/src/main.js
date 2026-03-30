@@ -13,7 +13,7 @@ const PMTILES_URL =
   'https://pub-6f1e54035ac14471852f4b7a25bf8354.r2.dev/rivers.pmtiles';
 const NE_RIVERS_URL =
   'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_rivers_lake_centerlines.geojson';
-const NE_PMTILES_CROSSOVER_ZOOM = 6; // NE rivers below this zoom, PMTiles above
+const NE_PMTILES_CROSSOVER_ZOOM = 6; // z6 = crossover where NE fades out and PMTiles takes over
 const API_BASE = '/forecast'; // proxied to backend via Vite
 let PROVIDER = 'geoglows';
 
@@ -350,13 +350,21 @@ async function initMap() {
         id: 'ne-rivers',
         type: 'line',
         source: 'ne-rivers',
-        maxzoom: NE_PMTILES_CROSSOVER_ZOOM,
+        maxzoom: NE_PMTILES_CROSSOVER_ZOOM + 1,
         filter: ['<=', ['get', 'scalerank'], ['interpolate', ['linear'], ['zoom'], 0, 3, 2, 5, 4, 8, 5, 12]],
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
           'line-color': '#08519c',
           'line-width': ['interpolate', ['linear'], ['zoom'], 0, 0.8, 3, 1.5, 5, 2],
-          'line-opacity': 0.7,
+          'line-opacity': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            0, 0.75,
+            NE_PMTILES_CROSSOVER_ZOOM - 1, 0.7,
+            NE_PMTILES_CROSSOVER_ZOOM, 0.35,
+            NE_PMTILES_CROSSOVER_ZOOM + 0.6, 0,
+          ],
         },
       });
       console.info('[ne-rivers] loaded', neData.features?.length, 'features');
@@ -374,7 +382,7 @@ async function initMap() {
     // Ghost query layers (invisible, allow queryRenderedFeatures at all zooms)
 
     const RIVER_TIERS = [
-      { id: 'rivers-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 0,  width: [2, 2.5, 5, 3, 8, 3.5, 12, 4], opacity: 0.9, color: '#08519c' },
+      { id: 'rivers-major',  filter: ['>=', ['get', 'strmOrder'], 7], minzoom: 0,  width: [2, 2.2, 5, 2.4, 6, 2.8, 8, 3.5, 12, 4], opacity: ['interpolate', ['linear'], ['zoom'], 0, 0.2, 4.5, 0.35, 6, 0.8, 8, 0.9], color: '#08519c' },
       { id: 'rivers-medium', filter: ['all', ['>=', ['get', 'strmOrder'], 4], ['<', ['get', 'strmOrder'], 7]], minzoom: 5,  width: [5, 1.5, 7, 2, 9, 2.5, 12, 3], opacity: 0.7, color: '#2171b5' },
       { id: 'rivers-minor',  filter: ['<', ['get', 'strmOrder'], 4], minzoom: 8,  width: [8, 0.6, 10, 1, 12, 1.5, 14, 2], opacity: 0.5, color: '#4a90d9' },
     ];
