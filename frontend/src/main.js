@@ -464,8 +464,10 @@ async function initMap() {
           ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 0, 120000, 3, 60000, 5, 15000, 6, 0]],
         ],
         minzoom: 0,
-        width: [2, 2.2, 5, 2.4, 6, 2.8, 8, 3.5, 12, 4],
-        opacity: ['interpolate', ['linear'], ['zoom'], 0, 0.2, 4.5, 0.35, 6, 0.8, 8, 0.9],
+        // Keep low-zoom major PMTiles visually close to Natural Earth stroke
+        // so crossover zooms don't show a jarring double-thickness effect.
+        width: [0, 0.8, 3, 1.4, 5, 2.0, 6, 2.5, 8, 3.3, 12, 4.0],
+        opacity: ['interpolate', ['linear'], ['zoom'], 0, 0.12, 3, 0.22, 4.5, 0.3, 6, 0.8, 8, 0.9],
         color: '#08519c',
       },
       {
