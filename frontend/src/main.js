@@ -198,18 +198,37 @@ function _applyVisibleFeatureStatesBatch() {
   try { visibleFeatures = map.querySourceFeatures('rivers', { sourceLayer: 'rivers' }); } catch { return; }
 
   let writes = 0;
-  const seen = new Set();
+  const seenStateIds = new Set();
   for (const feature of visibleFeatures) {
-    const reachId = normalizeReachId(feature.id);
-    if (!reachId || seen.has(reachId)) continue;
-    seen.add(reachId);
-    const info = forecastIndex[reachId];
-    if (!info || appliedFeatureStates.has(reachId)) continue;
-    map.setFeatureState({ source: 'rivers', sourceLayer: 'rivers', id: reachId }, { severity: info.severity_score || 0 });
-    appliedFeatureStates.add(reachId);
+    const stateId = feature.id;
+    if (stateId == null) continue;
+    const stateKey = String(stateId);
+    if (seenStateIds.has(stateKey)) continue;
+    seenStateIds.add(stateKey);
+
+    const props = feature.properties || {};
+    const candidates = [
+      normalizeReachId(feature.id),
+      normalizeReachId(props.reach_id),
+      normalizeReachId(props.provider_reach_id),
+      normalizeReachId(props.LINKNO),
+    ].filter(Boolean);
+
+    let info = null;
+    for (const candidate of candidates) {
+      if (forecastIndex[candidate]) {
+        info = forecastIndex[candidate];
+        break;
+      }
+    }
+    if (!info || appliedFeatureStates.has(stateKey)) continue;
+
+    map.setFeatureState({ source: 'rivers', sourceLayer: 'rivers', id: stateId }, { severity: info.severity_score || 0 });
+    appliedFeatureStates.add(stateKey);
     writes += 1;
   }
   recordPerf('featureStateWrites', { kind: 'visible_batch', writes, visible_features: visibleFeatures.length });
+  if (writes > 0) setStatus(`Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded · styled ${writes} visible`);
 }
 
 function onSourceData(e) {
@@ -452,8 +471,10 @@ function switchProvider(newProvider) {
   lastBboxKey = null;
 
   if (map && map.getSource('rivers')) {
-    for (const reachId of appliedFeatureStates) {
-      map.setFeatureState({ source: 'rivers', sourceLayer: 'rivers', id: reachId }, { severity: 0 });
+    for (const stateKey of appliedFeatureStates) {
+      const numeric = Number(stateKey);
+      const targetId = Number.isFinite(numeric) ? numeric : stateKey;
+      map.setFeatureState({ source: 'rivers', sourceLayer: 'rivers', id: targetId }, { severity: 0 });
     }
   }
   appliedFeatureStates.clear();
