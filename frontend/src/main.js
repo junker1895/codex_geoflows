@@ -310,6 +310,7 @@ async function initMap() {
       type: 'line',
       source: 'rivers',
       'source-layer': 'rivers',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
         'line-color': '#2f7de1',
         'line-width': ['interpolate', ['linear'], ['zoom'], 2, 0.5, 8, 1.3, 14, 2.2],
