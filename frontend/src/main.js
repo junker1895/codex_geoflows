@@ -72,6 +72,8 @@ let currentTier = null; // track which tier is loaded to avoid redundant fetches
 let map;
 let loadingAbort = null; // AbortController for in-flight requests
 let forecastChart = null; // Chart.js instance
+let riverAnimationFrame = null;
+let riverAnimationStart = 0;
 
 const statusBar = document.getElementById('status-bar');
 const infoPanel = document.getElementById('info-panel');
@@ -79,6 +81,33 @@ const infoContent = document.getElementById('info-content');
 
 function setStatus(msg) {
   statusBar.textContent = msg;
+}
+
+function stopRiverAnimation() {
+  if (riverAnimationFrame) {
+    cancelAnimationFrame(riverAnimationFrame);
+    riverAnimationFrame = null;
+  }
+}
+
+function startRiverAnimation() {
+  stopRiverAnimation();
+  riverAnimationStart = performance.now();
+
+  const animate = (ts) => {
+    if (!map || !map.getLayer('rivers-flow-a') || !map.getLayer('rivers-flow-b')) return;
+    const t = (ts - riverAnimationStart) / 1000;
+    const pulse = (Math.sin(t * 2.3) + 1) * 0.5;
+
+    map.setPaintProperty('rivers-flow-a', 'line-opacity', 0.32 + pulse * 0.24);
+    map.setPaintProperty('rivers-flow-b', 'line-opacity', 0.18 + (1 - pulse) * 0.26);
+    map.setPaintProperty('rivers-flow-a', 'line-dasharray', [1.0 + pulse * 1.6, 2.4, 0.4, 2.1]);
+    map.setPaintProperty('rivers-flow-b', 'line-dasharray', [0.4, 2.1, 1.0 + (1 - pulse) * 1.6, 2.4]);
+
+    riverAnimationFrame = requestAnimationFrame(animate);
+  };
+
+  riverAnimationFrame = requestAnimationFrame(animate);
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +236,7 @@ async function initMap() {
       type: 'line',
       source: 'rivers',
       'source-layer': 'rivers',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: {
         'line-color': '#4a90d9',
         'line-width': [
@@ -220,6 +250,49 @@ async function initMap() {
         'line-opacity': 0.5,
       },
     });
+
+    map.addLayer({
+      id: 'rivers-flow-a',
+      type: 'line',
+      source: 'rivers',
+      'source-layer': 'rivers',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': '#2f7de1',
+        'line-width': [
+          'interpolate',
+          ['linear'],
+          ['zoom'],
+          2, 0.5,
+          8, 1.3,
+          14, 2.2,
+        ],
+        'line-opacity': 0.42,
+        'line-dasharray': [1.3, 2.4, 0.4, 2.1],
+      },
+    });
+
+    map.addLayer({
+      id: 'rivers-flow-b',
+      type: 'line',
+      source: 'rivers',
+      'source-layer': 'rivers',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: {
+        'line-color': '#8cc9ff',
+        'line-width': [
+          'interpolate',
+          ['linear'],
+          ['zoom'],
+          2, 0.25,
+          8, 0.9,
+          14, 1.5,
+        ],
+        'line-opacity': 0.22,
+        'line-dasharray': [0.4, 2.1, 1.3, 2.4],
+      },
+    });
+    startRiverAnimation();
 
     // Get the run ID first
     try {
@@ -256,6 +329,8 @@ async function initMap() {
       map.getCanvas().style.cursor = '';
     });
   });
+
+  map.on('remove', stopRiverAnimation);
 }
 
 // ---------------------------------------------------------------------------
