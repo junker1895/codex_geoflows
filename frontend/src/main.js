@@ -1,5 +1,6 @@
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import './style.css';
 import * as pmtiles from 'pmtiles';
 import { Chart, registerables } from 'chart.js';
 import 'chartjs-adapter-date-fns';
