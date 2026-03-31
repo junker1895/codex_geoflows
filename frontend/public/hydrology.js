@@ -3,7 +3,7 @@ const DEFAULT_TTL_MS=30000;
 const DEFAULT_FORECAST_PROVIDER='geoglows';
 function serializeBbox(b){return [b.minLon,b.minLat,b.maxLon,b.maxLat].map(Number).join(',');}
 function buildUrl(base,path,params={}){const u=new URL(path,base);Object.entries(params).forEach(([k,v])=>{if(v!==undefined&&v!==null&&v!=='')u.searchParams.set(k,String(v));});return u.toString();}
-async function fetchJson(url,{signal}={}){const r=await fetch(url,{signal});if(!r.ok)throw new Error(`Hydrology API ${r.status}`);return r.json();}
+async function fetchJson(url,{signal,allow404Empty=false,emptyValue=null}={}){const r=await fetch(url,{signal});if(!r.ok){if(allow404Empty&&r.status===404)return emptyValue;throw new Error(`Hydrology API ${r.status}`);}return r.json();}
 function getFreshnessLabel(v){return v||'status unavailable';}
 function formatObservationValue(row){if(row?.value_canonical!=null&&row?.unit_canonical)return `${Number(row.value_canonical).toFixed(2)} ${row.unit_canonical}`;if(row?.value_native!=null&&row?.unit_native)return `${Number(row.value_native).toFixed(2)} ${row.unit_native}`;return '—';}
 function getStationBadges(r){return ['is_forecast','is_provisional','is_estimated','is_missing','is_flagged'].filter(k=>r&&r[k]).map(k=>k.replace('is_',''));}
@@ -83,16 +83,17 @@ function createForecastState(currentForecastProvider=DEFAULT_FORECAST_PROVIDER){
  };
 }
 
-function createClient(baseUrl,{ttlMs=DEFAULT_TTL_MS}={}){const cache=new Map();
- const call=(path,params={},signal,parser=parseEnvelope)=>{const key=`${path}?${JSON.stringify(params)}`;const now=Date.now();const old=cache.get(key);if(old&&now-old.ts<ttlMs)return old.value;const p=fetchJson(buildUrl(baseUrl,path,params),{signal}).then(parser);cache.set(key,{ts:now,value:p});return p;};
+function createClient(baseUrl,{ttlMs=DEFAULT_TTL_MS,tolerateMissingV1=true}={}){const cache=new Map();
+ const emptyEnvelope={data:[],meta:{missing_endpoint:true}};
+ const call=(path,params={},signal,parser=parseEnvelope,opts={})=>{const key=`${path}?${JSON.stringify(params)}`;const now=Date.now();const old=cache.get(key);if(old&&now-old.ts<ttlMs)return old.value;const p=fetchJson(buildUrl(baseUrl,path,params),{signal,allow404Empty:!!opts.allow404Empty,emptyValue:opts.emptyValue??emptyEnvelope}).then(v=>v===null?emptyEnvelope:parser(v));cache.set(key,{ts:now,value:p});return p;};
  return {
-  fetchStationsMap:(params={},signal)=>call('/v1/stations/map',params,signal),
-  fetchReachesMap:(params={},signal)=>call('/v1/reaches/map',params,signal),
-  fetchActiveWarnings:(params={},signal)=>call('/v1/warnings/active',params,signal),
-  fetchStationTimeseries:(stationId,params={},signal)=>call(`/v1/stations/${encodeURIComponent(stationId)}/timeseries`,params,signal),
-  fetchReachTimeseries:(reachId,params={},signal)=>call(`/v1/reaches/${encodeURIComponent(reachId)}/timeseries`,params,signal),
-  fetchStationThresholds:(stationId,params={},signal)=>call(`/v1/stations/${encodeURIComponent(stationId)}/thresholds`,params,signal),
-  fetchReachThresholds:(reachId,params={},signal)=>call(`/v1/reaches/${encodeURIComponent(reachId)}/thresholds`,params,signal),
+  fetchStationsMap:(params={},signal)=>call('/v1/stations/map',params,signal,parseEnvelope,{allow404Empty:tolerateMissingV1}),
+  fetchReachesMap:(params={},signal)=>call('/v1/reaches/map',params,signal,parseEnvelope,{allow404Empty:tolerateMissingV1}),
+  fetchActiveWarnings:(params={},signal)=>call('/v1/warnings/active',params,signal,parseEnvelope,{allow404Empty:tolerateMissingV1}),
+  fetchStationTimeseries:(stationId,params={},signal)=>call(`/v1/stations/${encodeURIComponent(stationId)}/timeseries`,params,signal,parseEnvelope,{allow404Empty:tolerateMissingV1}),
+  fetchReachTimeseries:(reachId,params={},signal)=>call(`/v1/reaches/${encodeURIComponent(reachId)}/timeseries`,params,signal,parseEnvelope,{allow404Empty:tolerateMissingV1}),
+  fetchStationThresholds:(stationId,params={},signal)=>call(`/v1/stations/${encodeURIComponent(stationId)}/thresholds`,params,signal,parseEnvelope,{allow404Empty:tolerateMissingV1}),
+  fetchReachThresholds:(reachId,params={},signal)=>call(`/v1/reaches/${encodeURIComponent(reachId)}/thresholds`,params,signal,parseEnvelope,{allow404Empty:tolerateMissingV1}),
   fetchForecastHealth:(params={},signal)=>call('/forecast/health',{provider:DEFAULT_FORECAST_PROVIDER,...params},signal),
   fetchForecastMap:(params={},signal)=>call('/forecast/map/reaches',params,signal,parseForecastMapEnvelope),
   fetchForecastReachDetail:(provider,reachId,params={},signal)=>call(`/forecast/reaches/${encodeURIComponent(provider||DEFAULT_FORECAST_PROVIDER)}/${encodeURIComponent(reachId)}`,params,signal)
