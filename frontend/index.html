@@ -147,6 +147,23 @@ nav {
 
 
 .nav-right { display:flex; align-items:center; gap:10px; flex-shrink:0; }
+.provider-toggle {
+  display:flex; align-items:center;
+  border:1px solid rgba(74,168,255,.2);
+  border-radius:8px; overflow:hidden;
+  background:rgba(11,18,32,.85);
+}
+.provider-toggle-btn {
+  border:none; background:transparent;
+  color:var(--muted);
+  font-family:'JetBrains Mono',monospace;
+  font-size:9px; letter-spacing:.4px;
+  padding:4px 8px; cursor:pointer;
+}
+.provider-toggle-btn.active {
+  color:var(--blue);
+  background:rgba(74,168,255,.12);
+}
 .live-badge {
   display:flex; align-items:center; gap:5px;
   font-family:'JetBrains Mono',monospace; font-size:9.5px;
@@ -654,6 +671,10 @@ canvas#spark { width:100%; height:52px; display:block; margin-top:8px; }
     <div class="search-results" id="searchResults"></div>
   </div>
   <div class="nav-right">
+    <div class="provider-toggle" id="providerToggle">
+      <button class="provider-toggle-btn active" data-provider="geoglows">GEOGLOWS</button>
+      <button class="provider-toggle-btn" data-provider="glofas">GLOFAS</button>
+    </div>
     <div class="clock" id="clock">--:--</div>
     <div class="live-badge">LIVE</div>
   </div>
@@ -3497,6 +3518,33 @@ const HYDROLOGY_API_BASE_URL = window.VITE_HYDROLOGY_API_BASE_URL || window.HYDR
 const hydrologyClient = Hydrology.createClient(HYDROLOGY_API_BASE_URL, { ttlMs: 30000 });
 const hydrologyState = { stations: [], reaches: [], warnings: [], selectedFeature: null, selectedStationId: null, hoveredStationId: null, activePopup: null, lastUpdatedAt: null, fetchTimer: null, inflight: null, lastKey: '', forecastOverlayEnabled: true, forecastProvider: 'geoglows', forecastByReachId: new Map(), forecastSelectedReachId: null, forecastMeta: null, forecastFetchTimer: null, forecastInflight: null, forecastSeq: 0, forecastActiveSeq: 0, forecastLastFetchAt: 0, forecastJoinProperty: null, forecastJoinWarningLogged: false, forecastHealthChecked: false, forecastHealth: null, forecastDetailError: '' };
 
+function syncProviderToggle() {
+  document.querySelectorAll('.provider-toggle-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.provider === hydrologyState.forecastProvider);
+  });
+}
+
+function switchForecastProvider(provider) {
+  const next = String(provider || '').trim().toLowerCase();
+  if (!next || next === hydrologyState.forecastProvider) return;
+  hydrologyState.forecastProvider = next;
+  hydrologyState.forecastHealthChecked = false;
+  hydrologyState.forecastHealth = null;
+  hydrologyState.forecastDetailError = '';
+  hydrologyState.forecastSelectedReachId = null;
+  hydrologyState.forecastLastFetchAt = 0;
+  clearForecastOverlay();
+  syncProviderToggle();
+  renderSelectedFeatureCard();
+  renderLiveStatusStrip();
+  scheduleForecastFetch(true);
+}
+
+document.querySelectorAll('.provider-toggle-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchForecastProvider(btn.dataset.provider));
+});
+syncProviderToggle();
+
 function toMapBbox() {
   const b = map.getBounds();
   return { minLon: b.getWest(), minLat: b.getSouth(), maxLon: b.getEast(), maxLat: b.getNorth() };
@@ -3510,46 +3558,7 @@ const FORECAST_RIVER_QUERY_LAYERS = ['rivers-query-major','rivers-query-large','
 const FORECAST_STYLING_DISABLED_WARNING = 'Forecast styling disabled: frontend river geometry ids do not match backend GEOGLOWS provider_reach_id values.';
 
 function resolveForecastJoinSupport() {
-  if (hydrologyState.forecastJoinProperty !== null) {
-    return { enabled: !!hydrologyState.forecastJoinProperty, joinProperty: hydrologyState.forecastJoinProperty };
-  }
-
-  const layers = FORECAST_RIVER_QUERY_LAYERS.filter(id => map.getLayer(id));
-  if (!layers.length) {
-    // Layers not yet added — don't cache, try again on next call
-    return { enabled: false, joinProperty: null };
-  }
-  const feats = map.queryRenderedFeatures({ layers }).slice(0, 100);
-
-  // No features rendered yet — tiles may still be loading, don't cache failure
-  if (!feats.length) {
-    return { enabled: false, joinProperty: null };
-  }
-
-  // GEOGLOWS V2: LINKNO is baked as feature.id via --use-attribute-for-id=LINKNO
-  const hasFeatureIdJoin = feats.some(f => {
-    const n = Number(f?.id);
-    return Number.isFinite(n) && n > 0;
-  });
-
-  if (hasFeatureIdJoin) {
-    hydrologyState.forecastJoinProperty = '__id__';
-    return { enabled: true, joinProperty: '__id__' };
-  }
-
-  const fallbackJoinProperty = 'provider_reach_id';
-  const hasFallbackJoin = feats.some(f => (f.properties || {})[fallbackJoinProperty] != null);
-  if (hasFallbackJoin) {
-    hydrologyState.forecastJoinProperty = fallbackJoinProperty;
-    return { enabled: true, joinProperty: hydrologyState.forecastJoinProperty };
-  }
-
-  hydrologyState.forecastJoinProperty = null;
-  if (!hydrologyState.forecastJoinWarningLogged) {
-    hydrologyState.forecastJoinWarningLogged = true;
-    console.warn(FORECAST_STYLING_DISABLED_WARNING);
-  }
-  return { enabled: false, joinProperty: null };
+  return { enabled: true, joinProperty: '__smart__' };
 }
 
 function clearForecastFeatureState() {
@@ -3569,8 +3578,6 @@ function clearForecastFeatureState() {
 }
 
 function applyForecastFeatureState() {
-  const joinSupport = resolveForecastJoinSupport();
-  if (!joinSupport.enabled || !joinSupport.joinProperty) return;
   const sourceLayer = 'rivers';
   const layers = FORECAST_RIVER_QUERY_LAYERS.filter(id => map.getLayer(id));
   if (!layers.length) return;
@@ -3578,15 +3585,23 @@ function applyForecastFeatureState() {
   const seen = new Set();
   for (const feature of features) {
     const props = feature.properties || {};
-    const rawRid = joinSupport.joinProperty === '__id__' ? feature.id : props[joinSupport.joinProperty];
-    const ridNum = Number(rawRid);
-    if (!Number.isFinite(ridNum)) continue;
-    const rid = String(ridNum);
-    const stateId = Number(feature.id);
-    if (!Number.isFinite(stateId)) continue;
+    const candidates = [
+      String(feature.id ?? '').trim(),
+      String(props.provider_reach_id ?? '').trim(),
+      String(props.reach_id ?? '').trim(),
+      String(props.LINKNO ?? '').trim(),
+    ].map(v => v.replace(/\\.0+$/, '')).filter(Boolean);
+    let summary = null;
+    for (const rid of candidates) {
+      if (hydrologyState.forecastByReachId.has(rid)) {
+        summary = hydrologyState.forecastByReachId.get(rid);
+        break;
+      }
+    }
+    const stateId = feature.id;
+    if (stateId == null) continue;
     if (seen.has(stateId)) continue;
     seen.add(stateId);
-    const summary = hydrologyState.forecastByReachId.get(rid) || null;
     const severity = summary ? Number(summary.severity_score ?? 0) : null;
     try {
       map.setFeatureState({ source: 'rivers', sourceLayer, id: stateId }, {
@@ -3689,15 +3704,15 @@ async function selectForecastReach(reachId) {
 function onForecastRiverClick(e) {
   const feature = e?.features?.[0];
   if (!feature) return;
-  const joinSupport = resolveForecastJoinSupport();
-  if (!joinSupport.enabled || !joinSupport.joinProperty) return;
-  const rawRid = joinSupport.joinProperty === '__id__'
-    ? feature.id
-    : (feature.properties || {})[joinSupport.joinProperty];
-  const ridNum = Number(rawRid);
-  if (!Number.isFinite(ridNum)) return;
-  const rid = String(ridNum);
-  if (!hydrologyState.forecastByReachId.has(rid)) return;
+  const props = feature.properties || {};
+  const candidates = [
+    String(feature.id ?? '').trim(),
+    String(props.provider_reach_id ?? '').trim(),
+    String(props.reach_id ?? '').trim(),
+    String(props.LINKNO ?? '').trim(),
+  ].map(v => v.replace(/\\.0+$/, '')).filter(Boolean);
+  const rid = candidates.find(c => hydrologyState.forecastByReachId.has(c));
+  if (!rid) return;
   selectForecastReach(rid);
 }
 
@@ -3924,7 +3939,8 @@ function renderSelectedFeatureCard() {
         return;
       }
       const rpLines = Hydrology.formatReturnPeriods(rp).join('<br>');
-      el.innerHTML = `<div class="sf-kicker">SELECTED FORECAST REACH</div><div class="gr-name">Reach ${textOrFallback(p.provider_reach_id, 'unknown')}</div><div class="gr-sub">Provider: GEOGLOWS · Run ${run}</div><div class="gr-sub">Peak time: ${textOrFallback(summary?.peak_time_utc, 'Unavailable')}</div><div class="gr-sub">Peak mean: ${summary?.peak_mean_cms != null ? `${Number(summary.peak_mean_cms).toFixed(2)} m³/s` : 'Unavailable'}</div><div class="gr-sub">Peak max: ${summary?.peak_max_cms != null ? `${Number(summary.peak_max_cms).toFixed(2)} m³/s` : 'Unavailable'}</div><div class="gr-sub">Return period band: ${textOrFallback(summary?.return_period_band, 'Unavailable')} · Severity ${summary?.severity_score ?? 'n/a'} · ${summary?.is_flagged ? 'Flagged' : 'Not flagged'}</div><div class="gr-sub">${rpLines || 'Return period thresholds unavailable'}</div><div class="gr-sub">Timeseries (${ts.length} pts)</div>${forecastSparkline(ts) || '<div class="gr-sub">No timeseries points available.</div>'}`;
+      const providerLabel = formatProviderLabel(hydrologyState.forecastProvider);
+      el.innerHTML = `<div class="sf-kicker">SELECTED FORECAST REACH</div><div class="gr-name">Reach ${textOrFallback(p.provider_reach_id, 'unknown')}</div><div class="gr-sub">Provider: ${providerLabel} · Run ${run}</div><div class="gr-sub">Peak time: ${textOrFallback(summary?.peak_time_utc, 'Unavailable')}</div><div class="gr-sub">Peak mean: ${summary?.peak_mean_cms != null ? `${Number(summary.peak_mean_cms).toFixed(2)} m³/s` : 'Unavailable'}</div><div class="gr-sub">Peak max: ${summary?.peak_max_cms != null ? `${Number(summary.peak_max_cms).toFixed(2)} m³/s` : 'Unavailable'}</div><div class="gr-sub">Return period band: ${textOrFallback(summary?.return_period_band, 'Unavailable')} · Severity ${summary?.severity_score ?? 'n/a'} · ${summary?.is_flagged ? 'Flagged' : 'Not flagged'}</div><div class="gr-sub">${rpLines || 'Return period thresholds unavailable'}</div><div class="gr-sub">Timeseries (${ts.length} pts)</div>${forecastSparkline(ts) || '<div class="gr-sub">No timeseries points available.</div>'}`;
       return;
     }
     el.innerHTML = `<div class="sf-kicker">SELECTED REACH</div><div class="gr-name">${textOrFallback(p.name || p.reach_id, 'Selected reach')}</div><div class="gr-sub">${formatProviderLabel(p.provider_id)}</div><div class="gr-sub">${textOrFallback(p.value_label, 'No live reading')} · ${normalizeFreshnessLabel(p.freshness_status)}</div><div class="gr-sub">${textOrFallback(p.observed_at || p.forecast_at, 'Time unavailable')}</div>`;
