@@ -11,6 +11,11 @@ Chart.register(...registerables);
 // ---------------------------------------------------------------------------
 const PMTILES_URL =
   'https://pub-6f1e54035ac14471852f4b7a25bf8354.r2.dev/rivers.pmtiles';
+const NE_RIVERS_URL =
+  'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_rivers_lake_centerlines.geojson';
+const NE_PMTILES_CROSSOVER_ZOOM = 6; // z6 = crossover where NE fades out and PMTiles takes over
+const DEBUG_RIVERS = new URLSearchParams(window.location.search).get('debugRivers') === '1';
+const FLOW_TUNING_UI = new URLSearchParams(window.location.search).get('flowTuning') !== '0';
 const API_BASE = '/forecast'; // proxied to backend via Vite
 let PROVIDER = 'geoglows';
 
@@ -26,13 +31,13 @@ const SEVERITY_COLORS = {
 };
 
 const SEVERITY_WIDTHS = {
-  0: 1,
-  1: 2,
-  2: 2.5,
-  3: 3,
-  4: 3.5,
-  5: 4,
-  6: 5,
+  0: 1.5,
+  1: 3,
+  2: 3.5,
+  3: 4,
+  4: 5,
+  5: 5.5,
+  6: 6.5,
 };
 
 // Band labels for info panel
@@ -50,9 +55,9 @@ const BAND_LABELS = {
 // Zoom → minimum severity threshold + max reaches to load
 // At global zoom only show the most extreme; as user zooms in, reveal more.
 const ZOOM_SEVERITY_TIERS = [
-  { maxZoom: 3, minSeverity: 4, limit: 5000 },
-  { maxZoom: 5, minSeverity: 3, limit: 20000 },
-  { maxZoom: 7, minSeverity: 2, limit: 50000 },
+  { maxZoom: 3, minSeverity: 4, limit: null },
+  { maxZoom: 5, minSeverity: 3, limit: null },
+  { maxZoom: 7, minSeverity: 2, limit: null },
   { maxZoom: Infinity, minSeverity: 1, limit: null },
 ];
 
@@ -69,49 +74,417 @@ function getTierForZoom(zoom) {
 let forecastIndex = {}; // provider_reach_id → { severity_score, return_period_band, ... }
 let currentRunId = null;
 let currentTier = null; // track which tier is loaded to avoid redundant fetches
+let lastBboxKey = null; // track viewport to detect meaningful pans
 let map;
 let loadingAbort = null; // AbortController for in-flight requests
 let forecastChart = null; // Chart.js instance
+let viewportTimer = null; // unified debounce for zoom+pan
+let riverLayerIds = [];
+let riverFlowAnimator = null;
+const PERF_ENABLED = true;
+
+const perfState = {
+  sessionStartedAt: Date.now(),
+  longTasks: [],
+  interactions: [],
+  network: [],
+  featureStateWrites: [],
+  maxForecastIndexSize: 0,
+};
 
 const statusBar = document.getElementById('status-bar');
 const infoPanel = document.getElementById('info-panel');
 const infoContent = document.getElementById('info-content');
+const riverDebug = document.getElementById('river-debug');
+const riverFlowCanvas = document.getElementById('river-flow-canvas');
+const flowControls = document.getElementById('flow-controls');
+
+const flowFxConfig = {
+  dashLength: 6,
+  gapLength: 12,
+  speedMult: 0.3,
+  widthMult: 1,
+  opacityMult: 0.2,
+  pulseMult: 0,
+};
 
 function setStatus(msg) {
   statusBar.textContent = msg;
 }
 
+function normalizeReachId(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return '';
+  // Provider payloads can occasionally serialize integral IDs as floats (e.g. "760021611.0").
+  // Normalize these so forecast index keys match PMTiles reach_id values.
+  if (/^\d+\.0+$/.test(s)) return s.replace(/\.0+$/, '');
+  return s;
+}
+
+function nowMs() {
+  return performance?.now ? performance.now() : Date.now();
+}
+
+function recordPerf(bucket, payload) {
+  if (!PERF_ENABLED) return;
+  const entry = {
+    t: new Date().toISOString(),
+    ...payload,
+  };
+  if (Array.isArray(perfState[bucket])) perfState[bucket].push(entry);
+}
+
+let lastPerfSnapshot = 0;
+function emitPerfSnapshot(reason) {
+  if (!PERF_ENABLED) return;
+  const now = Date.now();
+  // Throttle to at most once per 10 seconds (except provider switches)
+  if (reason === 'moveend' && now - lastPerfSnapshot < 10000) return;
+  lastPerfSnapshot = now;
+  const snapshot = {
+    reason,
+    uptime_seconds: Math.round((now - perfState.sessionStartedAt) / 1000),
+    interactions: perfState.interactions.length,
+    network_calls: perfState.network.length,
+    feature_state_batches: perfState.featureStateWrites.length,
+    long_tasks: perfState.longTasks.length,
+    max_forecast_index_size: perfState.maxForecastIndexSize,
+  };
+  console.info('[perf:snapshot]', snapshot);
+}
+
+window.__geoflowsPerf = perfState;
+
+if (typeof PerformanceObserver !== 'undefined') {
+  try {
+    const longTaskObserver = new PerformanceObserver((list) => {
+      list.getEntries().forEach((entry) => {
+        recordPerf('longTasks', {
+          kind: 'longtask',
+          duration_ms: Number(entry.duration.toFixed(2)),
+          start_ms: Number(entry.startTime.toFixed(2)),
+          name: entry.name || 'longtask',
+        });
+      });
+    });
+    longTaskObserver.observe({ entryTypes: ['longtask'] });
+  } catch {
+    // Ignore if unsupported by browser/runtime.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Forecast API helpers
 // ---------------------------------------------------------------------------
-async function fetchJSON(url, signal) {
+async function fetchJSON(url, signal, perfLabel = 'fetch') {
+  const started = nowMs();
   const res = await fetch(url, signal ? { signal } : undefined);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+  const cloned = res.clone();
+  const text = await cloned.text();
+  const payloadBytes = new TextEncoder().encode(text).length;
+  const elapsed = nowMs() - started;
+  recordPerf('network', {
+    label: perfLabel,
+    url,
+    status: res.status,
+    duration_ms: Number(elapsed.toFixed(2)),
+    payload_bytes: payloadBytes,
+  });
+  return JSON.parse(text);
 }
 
 async function loadRunId() {
+  const started = nowMs();
   const run = await fetchJSON(
-    `${API_BASE}/runs/latest?provider=${PROVIDER}`
+    `${API_BASE}/runs/latest?provider=${PROVIDER}`,
+    undefined,
+    'runs/latest'
   );
   currentRunId = run.run_id;
+  recordPerf('interactions', {
+    kind: 'run_id_load',
+    provider: PROVIDER,
+    run_id: currentRunId,
+    duration_ms: Number((nowMs() - started).toFixed(2)),
+  });
 }
 
 async function loadSeverityMap(minSeverity, limit, signal) {
   let url = `${API_BASE}/map/severity?provider=${PROVIDER}&run_id=${currentRunId}&min_severity_score=${minSeverity}`;
   if (limit) url += `&limit=${limit}`;
-  const resp = await fetchJSON(url, signal);
+  const resp = await fetchJSON(url, signal, 'map/severity');
   return resp.severity || {};
+}
+
+// ---------------------------------------------------------------------------
+// Viewport helpers
+// ---------------------------------------------------------------------------
+
+/** Quantise a bounding box to a grid so small pans don't trigger reloads. */
+function bboxKey(bounds, step = 2) {
+  const snap = (v) => (Math.round(v / step) * step).toFixed(0);
+  return `${snap(bounds.getWest())},${snap(bounds.getSouth())},${snap(bounds.getEast())},${snap(bounds.getNorth())}`;
+}
+
+function interpLinear(zoom, stops) {
+  if (zoom <= stops[0][0]) return stops[0][1];
+  if (zoom >= stops[stops.length - 1][0]) return stops[stops.length - 1][1];
+  for (let i = 0; i < stops.length - 1; i += 1) {
+    const [z0, v0] = stops[i];
+    const [z1, v1] = stops[i + 1];
+    if (zoom >= z0 && zoom <= z1) {
+      const t = (zoom - z0) / (z1 - z0);
+      return v0 + t * (v1 - v0);
+    }
+  }
+  return stops[stops.length - 1][1];
+}
+
+function getRiverDebugState(zoom) {
+  const majorMinArea = interpLinear(zoom, [[0, 120000], [3, 60000], [5, 15000], [6, 0]]);
+  const mediumMinArea = interpLinear(zoom, [[6, 20000], [7, 5000], [8, 1000], [9, 100], [10, 0]]);
+  const minorMinArea = interpLinear(zoom, [[8, 10000], [9, 2000], [10, 0]]);
+  const neActive = zoom < (NE_PMTILES_CROSSOVER_ZOOM + 1);
+  const neOpacity = neActive
+    ? interpLinear(zoom, [[0, 0.75], [5, 0.7], [6, 0.35], [6.6, 0]])
+    : 0;
+  const neScalerank = neActive
+    ? interpLinear(zoom, [[0, 3], [2, 5], [4, 8], [5, 12]])
+    : 0;
+  const majorOpacity = interpLinear(zoom, [[0, 0.2], [4.5, 0.35], [6, 0.8], [8, 0.9]]);
+  return {
+    neActive,
+    neOpacity,
+    neScalerank,
+    major: true,
+    medium: zoom >= 6,
+    minor: zoom >= 8,
+    majorOpacity,
+    majorMinArea,
+    mediumMinArea,
+    minorMinArea,
+  };
+}
+
+function updateRiverDebugPanel() {
+  if (!DEBUG_RIVERS || !map || !riverDebug) return;
+  const z = map.getZoom();
+  const s = getRiverDebugState(z);
+  riverDebug.classList.remove('hidden');
+  riverDebug.innerHTML = `
+    <div><strong>River debug</strong> (URL flag: <code>?debugRivers=1</code>)</div>
+    <div>zoom: <strong>${z.toFixed(2)}</strong></div>
+    <div>NE active: <strong>${s.neActive ? 'yes' : 'no'}</strong>, opacity ~ ${s.neOpacity.toFixed(2)}</div>
+    <div>NE filter: <code>scalerank &lt;= ${s.neScalerank.toFixed(2)}</code></div>
+    <div>PMTiles major: <strong>on</strong>, opacity ~ ${s.majorOpacity.toFixed(2)}, min DSContArea ~ ${Math.round(s.majorMinArea)}</div>
+    <div>PMTiles medium (strmOrder 4–6): <strong>${s.medium ? 'on' : 'off'}</strong>, min DSContArea ~ ${Math.round(s.mediumMinArea)}</div>
+    <div>PMTiles minor (strmOrder &lt; 4): <strong>${s.minor ? 'on' : 'off'}</strong>, min DSContArea ~ ${Math.round(s.minorMinArea)}</div>
+  `;
+}
+
+function initFlowControls() {
+  if (!flowControls || !FLOW_TUNING_UI) return;
+  flowControls.classList.remove('hidden');
+  const controls = [
+    ['dashLength', 'flow-dash-length', 'flow-dash-length-val'],
+    ['gapLength', 'flow-gap-length', 'flow-gap-length-val'],
+    ['speedMult', 'flow-speed-mult', 'flow-speed-mult-val'],
+    ['widthMult', 'flow-width-mult', 'flow-width-mult-val'],
+    ['opacityMult', 'flow-opacity-mult', 'flow-opacity-mult-val'],
+    ['pulseMult', 'flow-pulse-mult', 'flow-pulse-mult-val'],
+  ];
+  for (const [key, inputId, valueId] of controls) {
+    const input = document.getElementById(inputId);
+    const valueEl = document.getElementById(valueId);
+    if (!input || !valueEl) continue;
+    input.value = String(flowFxConfig[key]);
+    valueEl.textContent = input.value;
+    input.addEventListener('input', () => {
+      flowFxConfig[key] = Number(input.value);
+      valueEl.textContent = input.value;
+      riverFlowAnimator?.triggerRefresh();
+    });
+  }
+  document.getElementById('flow-copy-config')?.addEventListener('click', async () => {
+    const snippet = `const FLOW_FX = ${JSON.stringify(flowFxConfig, null, 2)};`;
+    try {
+      await navigator.clipboard.writeText(snippet);
+      setStatus('Flow animation config copied to clipboard');
+    } catch {
+      setStatus(`Copy failed. Use this config: ${snippet}`);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Canvas river flow animation
+// ---------------------------------------------------------------------------
+function severityForFeature(feature) {
+  const reachId = normalizeReachId(feature?.id);
+  const severity = reachId ? Number(forecastIndex[reachId]?.severity_score || 0) : 0;
+  return Number.isFinite(severity) ? Math.max(0, Math.min(6, severity)) : 0;
+}
+
+function flowColorForSeverity(severity) {
+  if (severity >= 5) return '#a50026';
+  if (severity >= 3) return '#f46d43';
+  if (severity >= 1) return '#fdae61';
+  return '#4aa8ff';
+}
+
+function flowWidthForOrder(order, zoom) {
+  const base = order >= 9 ? 4.6
+    : order >= 8 ? 3.8
+    : order >= 7 ? 3.0
+    : order >= 6 ? 2.4
+    : order >= 5 ? 1.9
+    : order >= 4 ? 1.5
+    : 1.1;
+  const zoomScale = Math.max(0.72, Math.min(2.5, zoom / 4.8));
+  return base * zoomScale * flowFxConfig.widthMult;
+}
+
+function getDashConfig(zoom) {
+  const dashLenBase = interpLinear(zoom, [[0, 4], [3, 6], [5, 10], [7, 12], [10, 14]]);
+  const gapLenBase = interpLinear(zoom, [[0, 14], [3, 18], [5, 20], [7, 22], [10, 24]]);
+  const dashLen = dashLenBase * (flowFxConfig.dashLength / 10);
+  const gapLen = gapLenBase * (flowFxConfig.gapLength / 20);
+  return { dashLen, gapLen, period: dashLen + gapLen };
+}
+
+function drawDashedSegment(ctx, points, color, lineW, offsetPx, alpha, dashLen, gapLen) {
+  if (points.length < 2) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], points[0][1]);
+  for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i][0], points[i][1]);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineW;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.globalAlpha = alpha;
+  ctx.setLineDash([dashLen, gapLen]);
+  ctx.lineDashOffset = -offsetPx;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function createRiverFlowAnimator() {
+  if (!riverFlowCanvas) return { triggerRefresh: () => {} };
+  const ctx = riverFlowCanvas.getContext('2d');
+  const pathOffsets = new Map();
+  let cachedPaths = [];
+  let refreshTimer = null;
+
+  function syncCanvasSize() {
+    const mapEl = document.getElementById('map');
+    if (!mapEl) return;
+    if (riverFlowCanvas.width !== mapEl.clientWidth) riverFlowCanvas.width = mapEl.clientWidth;
+    if (riverFlowCanvas.height !== mapEl.clientHeight) riverFlowCanvas.height = mapEl.clientHeight;
+  }
+
+  function triggerRefresh() {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(refreshPaths, 90);
+  }
+
+  function refreshPaths() {
+    if (!map || !map.loaded() || !riverLayerIds.length) return;
+    const zoom = map.getZoom();
+    let features = [];
+    try {
+      features = map.querySourceFeatures('rivers', { sourceLayer: 'rivers' });
+    } catch {
+      features = [];
+    }
+    const bounds = map.getBounds();
+    const minAreaMajor = interpLinear(zoom, [[0, 120000], [3, 60000], [5, 15000], [6, 0]]);
+    const minAreaMedium = interpLinear(zoom, [[6, 20000], [7, 5000], [8, 1000], [9, 100], [10, 0]]);
+    const minAreaMinor = interpLinear(zoom, [[8, 10000], [9, 2000], [10, 0]]);
+    const drawCap = zoom < 4 ? 1400 : zoom < 6 ? 2600 : zoom < 8 ? 4200 : 6500;
+    const seen = new Set();
+    cachedPaths = [];
+    for (const feature of features) {
+      const geom = feature.geometry;
+      if (!geom) continue;
+      const order = Number(feature.properties?.strmOrder ?? 5);
+      const dsArea = Number(feature.properties?.DSContArea ?? 0);
+      const include = (order >= 7 && dsArea >= minAreaMajor)
+        || (zoom >= 6 && order >= 4 && order < 7 && dsArea >= minAreaMedium)
+        || (zoom >= 8 && order < 4 && dsArea >= minAreaMinor);
+      if (!include) continue;
+      const severity = severityForFeature(feature);
+      const collect = (coords) => {
+        if (!coords || coords.length < 2) return;
+        const mid = coords[Math.floor(coords.length / 2)];
+        if (!mid || !bounds.contains([mid[0], mid[1]])) return;
+        const key = `${normalizeReachId(feature.id)}:${coords[0][0].toFixed(3)},${coords[0][1].toFixed(3)}:${coords.length}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        if (!pathOffsets.has(key)) pathOffsets.set(key, Math.random());
+        cachedPaths.push({
+          coords,
+          key,
+          severity,
+          color: flowColorForSeverity(severity),
+          width: flowWidthForOrder(order, zoom),
+        });
+      };
+      if (geom.type === 'LineString') collect(geom.coordinates);
+      if (geom.type === 'MultiLineString') geom.coordinates.forEach(collect);
+      if (cachedPaths.length >= drawCap) break;
+    }
+  }
+
+  function animate(ts) {
+    syncCanvasSize();
+    ctx.clearRect(0, 0, riverFlowCanvas.width, riverFlowCanvas.height);
+    if (!map || !map.loaded() || !cachedPaths.length) {
+      requestAnimationFrame(animate);
+      return;
+    }
+    const zoom = map.getZoom();
+    const { dashLen, gapLen, period } = getDashConfig(zoom);
+    const baseSpeed = interpLinear(zoom, [[0, 10], [4, 18], [6, 24], [9, 34], [12, 44]]) * flowFxConfig.speedMult;
+    const fadeWhenHighlighted = Object.keys(forecastIndex).length > 0 ? 0.88 : 1;
+    for (const path of cachedPaths) {
+      const pulse = 0.5 + 0.5 * Math.sin((ts / 1000) * (path.severity >= 3 ? 6 : 3) * Math.max(0.2, flowFxConfig.pulseMult));
+      const speed = baseSpeed + path.severity * 5;
+      const offset = (((pathOffsets.get(path.key) || 0) * period) - (ts / 1000) * speed) % period;
+      const projected = path.coords.map(([lng, lat]) => {
+        const p = map.project([lng, lat]);
+        return [p.x, p.y];
+      });
+      ctx.save();
+      ctx.globalAlpha = fadeWhenHighlighted * flowFxConfig.opacityMult;
+      drawDashedSegment(ctx, projected, path.color, path.width * 1.1, 0, 0.16, dashLen * 2.5, gapLen);
+      drawDashedSegment(ctx, projected, path.color, path.width * 1.7, offset, 0.62 + pulse * 0.2 * flowFxConfig.pulseMult, dashLen, gapLen);
+      if (path.severity >= 3) {
+        drawDashedSegment(ctx, projected, path.color, path.width * 3.1, offset, 0.12 + pulse * 0.08 * flowFxConfig.pulseMult, dashLen * 1.2, gapLen);
+      }
+      ctx.restore();
+    }
+    requestAnimationFrame(animate);
+  }
+
+  requestAnimationFrame(animate);
+  return { triggerRefresh };
 }
 
 // ---------------------------------------------------------------------------
 // Load data for current zoom level
 // ---------------------------------------------------------------------------
 async function loadDataForZoom(zoom) {
+  const started = nowMs();
   const tier = getTierForZoom(zoom);
 
-  // Skip if we already have this tier (or a more detailed one) loaded
-  if (currentTier && tier.minSeverity >= currentTier.minSeverity) return;
+  // Skip if same tier AND viewport hasn't moved significantly
+  const newBboxKey = bboxKey(map.getBounds());
+  const tierChanged = !currentTier || tier.minSeverity < currentTier.minSeverity;
+  const viewportChanged = newBboxKey !== lastBboxKey;
+
+  if (!tierChanged && !viewportChanged) return;
 
   // Cancel any in-flight request
   if (loadingAbort) loadingAbort.abort();
@@ -127,22 +500,48 @@ async function loadDataForZoom(zoom) {
     );
 
     // Merge new reaches into existing index (don't lose higher-severity data)
-    for (const [reachId, score] of Object.entries(severityMap)) {
+    for (const [rawReachId, score] of Object.entries(severityMap)) {
+      const reachId = normalizeReachId(rawReachId);
+      if (!reachId) continue;
       forecastIndex[reachId] = { severity_score: score };
     }
+    perfState.maxForecastIndexSize = Math.max(
+      perfState.maxForecastIndexSize,
+      Object.keys(forecastIndex).length
+    );
 
     currentTier = tier;
+    lastBboxKey = newBboxKey;
     setStatus(
       `Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded (severity ≥ ${tier.minSeverity})`
     );
 
-    // Rebuild the highlighted layer
-    updateHighlightedLayer();
+    // Apply feature states only to visible features
+    applyVisibleFeatureStates();
+    recordPerf('interactions', {
+      kind: 'zoom_data_load',
+      provider: PROVIDER,
+      zoom: Number(zoom.toFixed(2)),
+      min_severity: tier.minSeverity,
+      limit: tier.limit,
+      loaded_reaches: Object.keys(severityMap).length,
+      cached_reaches: Object.keys(forecastIndex).length,
+      duration_ms: Number((nowMs() - started).toFixed(2)),
+    });
   } catch (err) {
     if (err.name === 'AbortError') return; // superseded by a newer request
     console.warn('Could not load forecast summaries:', err);
     setStatus('Error loading forecast data');
   }
+}
+
+/** Unified handler for zoom + pan: debounce then load data + apply states. */
+function onViewportChange() {
+  clearTimeout(viewportTimer);
+  viewportTimer = setTimeout(() => {
+    if (!currentRunId) return;
+    loadDataForZoom(map.getZoom());
+  }, 300);
 }
 
 // ---------------------------------------------------------------------------
@@ -153,14 +552,17 @@ async function initMap() {
   const protocol = new pmtiles.Protocol();
   maplibregl.addProtocol('pmtiles', protocol.tile);
 
-  // Read PMTiles header for maxzoom
+  // Read PMTiles header for zoom range
   let riversMaxZoom = 14;
+  let riversMinZoom = 0;
   try {
     const archive = new pmtiles.PMTiles(PMTILES_URL);
     const header = await archive.getHeader();
     riversMaxZoom = header.maxZoom || 14;
+    riversMinZoom = header.minZoom || 0;
+    console.info('[pmtiles] header:', { minZoom: riversMinZoom, maxZoom: riversMaxZoom });
   } catch (e) {
-    console.warn('Could not read PMTiles header, using default maxzoom=14');
+    console.warn('Could not read PMTiles header, using defaults');
   }
 
   map = new maplibregl.Map({
@@ -178,11 +580,15 @@ async function initMap() {
       glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
     },
     center: [0, 20],
-    zoom: 2,
+    zoom: 3,
     maxZoom: 18,
   });
 
   map.addControl(new maplibregl.NavigationControl(), 'top-left');
+  if (DEBUG_RIVERS && riverDebug) {
+    riverDebug.classList.remove('hidden');
+    riverDebug.textContent = 'River debug enabled. Waiting for map...';
+  }
 
   map.on('load', async () => {
     // Add a simple basemap via raster tiles
@@ -192,34 +598,149 @@ async function initMap() {
       tileSize: 256,
       attribution: '&copy; OpenStreetMap contributors',
     });
-    map.addLayer({ id: 'osm-tiles', type: 'raster', source: 'osm' });
+    map.addLayer({
+      id: 'osm-tiles',
+      type: 'raster',
+      source: 'osm',
+      paint: { 'raster-fade-duration': 0 },
+    });
 
-    // Add rivers PMTiles source
+    // Add rivers PMTiles source (IDs are already baked into the tileset)
     map.addSource('rivers', {
       type: 'vector',
       url: `pmtiles://${PMTILES_URL}`,
+      minzoom: riversMinZoom,
       maxzoom: riversMaxZoom,
+      promoteId: 'reach_id',
     });
 
-    // Base river layer (all rivers, muted colour)
-    map.addLayer({
-      id: 'rivers-base',
-      type: 'line',
-      source: 'rivers',
-      'source-layer': 'rivers',
-      paint: {
-        'line-color': '#4a90d9',
-        'line-width': [
-          'interpolate',
-          ['linear'],
-          ['zoom'],
-          2, 0.3,
-          8, 1,
-          14, 1.5,
+    // -----------------------------------------------------------------------
+    // Natural Earth rivers – low-zoom fallback (z0 to crossover)
+    // -----------------------------------------------------------------------
+    // NE rivers provide continuous, clean geometry at global zoom where
+    // PMTiles has only simplified dots. Loaded once, hidden at higher zoom.
+    try {
+      const neResp = await fetch(NE_RIVERS_URL);
+      const neData = await neResp.json();
+      map.addSource('ne-rivers', { type: 'geojson', data: neData });
+      map.addLayer({
+        id: 'ne-rivers',
+        type: 'line',
+        source: 'ne-rivers',
+        maxzoom: NE_PMTILES_CROSSOVER_ZOOM + 1,
+        filter: ['<=', ['get', 'scalerank'], ['interpolate', ['linear'], ['zoom'], 0, 3, 2, 5, 4, 8, 5, 12]],
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#08519c',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 0, 0.8, 3, 1.5, 5, 2],
+          'line-opacity': [
+            'interpolate',
+            ['linear'],
+            ['zoom'],
+            0, 0.75,
+            NE_PMTILES_CROSSOVER_ZOOM - 1, 0.7,
+            NE_PMTILES_CROSSOVER_ZOOM, 0.35,
+            NE_PMTILES_CROSSOVER_ZOOM + 0.6, 0,
+          ],
+        },
+      });
+      console.info('[ne-rivers] loaded', neData.features?.length, 'features');
+    } catch (e) {
+      console.warn('Could not load Natural Earth rivers:', e);
+    }
+
+    // -----------------------------------------------------------------------
+    // PMTiles river layers – progressive reveal by strmOrder + minzoom
+    // -----------------------------------------------------------------------
+    // Visible base layers:
+    //   rivers-major:  strmOrder >= 7, no minzoom (dots at low zoom, lines at high)
+    //   rivers-medium: strmOrder 4–6, visible from z6
+    //   rivers-minor:  strmOrder < 4, visible from z8
+    // Ghost query layers (invisible, allow queryRenderedFeatures at all zooms)
+
+    const RIVER_TIERS = [
+      {
+        id: 'rivers-major',
+        filter: [
+          'all',
+          ['>=', ['get', 'strmOrder'], 7],
+          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 0, 120000, 3, 60000, 5, 15000, 6, 0]],
         ],
-        'line-opacity': 0.5,
+        minzoom: 0,
+        // Keep low-zoom major PMTiles visually close to Natural Earth stroke
+        // so crossover zooms don't show a jarring double-thickness effect.
+        width: [0, 0.8, 3, 1.4, 5, 2.0, 6, 2.5, 8, 3.3, 12, 4.0],
+        opacity: ['interpolate', ['linear'], ['zoom'], 0, 0.12, 3, 0.22, 4.5, 0.3, 6, 0.8, 8, 0.9],
+        color: '#08519c',
       },
-    });
+      {
+        id: 'rivers-medium',
+        filter: [
+          'all',
+          ['>=', ['get', 'strmOrder'], 4],
+          ['<', ['get', 'strmOrder'], 7],
+          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
+        ],
+        minzoom: 6,
+        width: [5, 1.3, 7, 1.8, 9, 2.3, 12, 3],
+        opacity: ['interpolate', ['linear'], ['zoom'], 6, 0.45, 7, 0.6, 8, 0.7],
+        color: '#2171b5',
+      },
+      {
+        id: 'rivers-minor',
+        filter: [
+          'all',
+          ['<', ['get', 'strmOrder'], 4],
+          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 8, 10000, 9, 2000, 10, 0]],
+        ],
+        minzoom: 8,
+        width: [8, 0.5, 10, 0.9, 12, 1.3, 14, 1.8],
+        opacity: ['interpolate', ['linear'], ['zoom'], 8, 0.2, 9, 0.35, 10, 0.5, 12, 0.6],
+        color: '#4a90d9',
+      },
+    ];
+
+    for (const tier of RIVER_TIERS) {
+      // Visible layer
+      map.addLayer({
+        id: tier.id,
+        type: 'line',
+        source: 'rivers',
+        'source-layer': 'rivers',
+        minzoom: tier.minzoom,
+        filter: tier.filter,
+        layout: {
+          'line-cap': 'round',
+          'line-join': 'round',
+        },
+        paint: {
+          'line-color': tier.color,
+          'line-width': ['interpolate', ['linear'], ['zoom'], ...tier.width],
+          'line-opacity': tier.opacity,
+        },
+      });
+
+      // Ghost query layer – transparent, no minzoom, for click/query at all zooms
+      map.addLayer({
+        id: `${tier.id}-query`,
+        type: 'line',
+        source: 'rivers',
+        'source-layer': 'rivers',
+        minzoom: 0,
+        filter: tier.filter,
+        paint: {
+          'line-color': 'transparent',
+          'line-width': 6, // generous hit area
+          'line-opacity': 0,
+        },
+      });
+    }
+
+    // All layer IDs for event binding and feature queries
+    const RIVER_LAYER_IDS = RIVER_TIERS.flatMap(t => [t.id, `${t.id}-query`]);
+    riverLayerIds = RIVER_LAYER_IDS;
+    riverFlowAnimator = createRiverFlowAnimator();
+    riverFlowAnimator.triggerRefresh();
 
     // Get the run ID first
     try {
@@ -232,90 +753,209 @@ async function initMap() {
 
     // Initial data load for current zoom
     await loadDataForZoom(map.getZoom());
+    riverFlowAnimator.triggerRefresh();
 
-    // Reload on zoom changes (debounced)
-    let zoomTimer = null;
+    // Unified viewport handler – fires on both zoom and pan
     map.on('zoomend', () => {
-      clearTimeout(zoomTimer);
-      zoomTimer = setTimeout(() => loadDataForZoom(map.getZoom()), 300);
+      recordPerf('interactions', {
+        kind: 'zoomend',
+        provider: PROVIDER,
+        zoom: Number(map.getZoom().toFixed(2)),
+      });
+      onViewportChange();
+      updateRiverDebugPanel();
+      riverFlowAnimator.triggerRefresh();
+    });
+    map.on('moveend', () => {
+      const c = map.getCenter();
+      recordPerf('interactions', {
+        kind: 'moveend',
+        provider: PROVIDER,
+        zoom: Number(map.getZoom().toFixed(2)),
+        center_lng: Number(c.lng.toFixed(4)),
+        center_lat: Number(c.lat.toFixed(4)),
+      });
+      emitPerfSnapshot('moveend');
+      onViewportChange();
+      // Also apply feature states for newly-visible tiles after pan
+      applyVisibleFeatureStates();
+      updateRiverDebugPanel();
+      riverFlowAnimator.triggerRefresh();
     });
 
-    // Click handlers
-    map.on('click', 'rivers-highlighted', onRiverClick);
-    map.on('click', 'rivers-base', onRiverClick);
-    map.on('mouseenter', 'rivers-highlighted', () => {
-      map.getCanvas().style.cursor = 'pointer';
-    });
-    map.on('mouseleave', 'rivers-highlighted', () => {
-      map.getCanvas().style.cursor = '';
-    });
-    map.on('mouseenter', 'rivers-base', () => {
-      map.getCanvas().style.cursor = 'pointer';
-    });
-    map.on('mouseleave', 'rivers-base', () => {
-      map.getCanvas().style.cursor = '';
-    });
+    // Re-apply feature states as new tiles stream in (pan/zoom)
+    map.on('sourcedata', onSourceData);
+    map.on('idle', () => riverFlowAnimator?.triggerRefresh());
+
+    // Click / cursor handlers for all river layers (highlight layers bound later in addHighlightLayer)
+    for (const layerId of RIVER_LAYER_IDS) {
+      map.on('click', layerId, onRiverClick);
+      map.on('mouseenter', layerId, () => { map.getCanvas().style.cursor = 'pointer'; });
+      map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
+    }
   });
+  map.on('idle', updateRiverDebugPanel);
 }
 
 // ---------------------------------------------------------------------------
-// River highlight layer – uses feature-state for scalable styling
+// River highlight layers – one per tier, feature-state driven styling
 // ---------------------------------------------------------------------------
-let highlightLayerAdded = false;
+const HIGHLIGHT_LAYER_IDS = [];
+let highlightLayersAdded = false;
+
+const HIGHLIGHT_PAINT = {
+  'line-color': [
+    'match',
+    ['coalesce', ['feature-state', 'severity'], 0],
+    1, SEVERITY_COLORS[1],
+    2, SEVERITY_COLORS[2],
+    3, SEVERITY_COLORS[3],
+    4, SEVERITY_COLORS[4],
+    5, SEVERITY_COLORS[5],
+    6, SEVERITY_COLORS[6],
+    'transparent',
+  ],
+  'line-width': [
+    'match',
+    ['coalesce', ['feature-state', 'severity'], 0],
+    1, SEVERITY_WIDTHS[1],
+    2, SEVERITY_WIDTHS[2],
+    3, SEVERITY_WIDTHS[3],
+    4, SEVERITY_WIDTHS[4],
+    5, SEVERITY_WIDTHS[5],
+    6, SEVERITY_WIDTHS[6],
+    0,
+  ],
+  'line-opacity': 1,
+};
 
 function addHighlightLayer() {
-  if (highlightLayerAdded) return;
+  if (highlightLayersAdded) return;
 
-  // Use feature-state driven styling – works with any number of features
-  map.addLayer({
-    id: 'rivers-highlighted',
-    type: 'line',
-    source: 'rivers',
-    'source-layer': 'rivers',
-    paint: {
-      'line-color': [
-        'match',
-        ['coalesce', ['feature-state', 'severity'], 0],
-        1, SEVERITY_COLORS[1],
-        2, SEVERITY_COLORS[2],
-        3, SEVERITY_COLORS[3],
-        4, SEVERITY_COLORS[4],
-        5, SEVERITY_COLORS[5],
-        6, SEVERITY_COLORS[6],
-        'transparent',
+  // Create a highlight layer for each tier so visibility matches base layers
+  const tiers = [
+    {
+      id: 'rivers-highlight-major',
+      filter: [
+        'all',
+        ['>=', ['get', 'strmOrder'], 7],
+        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 0, 120000, 3, 60000, 5, 15000, 6, 0]],
       ],
-      'line-width': [
-        'match',
-        ['coalesce', ['feature-state', 'severity'], 0],
-        1, SEVERITY_WIDTHS[1],
-        2, SEVERITY_WIDTHS[2],
-        3, SEVERITY_WIDTHS[3],
-        4, SEVERITY_WIDTHS[4],
-        5, SEVERITY_WIDTHS[5],
-        6, SEVERITY_WIDTHS[6],
-        0,
-      ],
-      'line-opacity': 1,
+      minzoom: 0,
     },
-  });
-  highlightLayerAdded = true;
+    {
+      id: 'rivers-highlight-medium',
+      filter: [
+        'all',
+        ['>=', ['get', 'strmOrder'], 4],
+        ['<', ['get', 'strmOrder'], 7],
+        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
+      ],
+      minzoom: 6,
+    },
+    {
+      id: 'rivers-highlight-minor',
+      filter: [
+        'all',
+        ['<', ['get', 'strmOrder'], 4],
+        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 8, 10000, 9, 2000, 10, 0]],
+      ],
+      minzoom: 8,
+    },
+  ];
+
+  for (const tier of tiers) {
+    map.addLayer({
+      id: tier.id,
+      type: 'line',
+      source: 'rivers',
+      'source-layer': 'rivers',
+      minzoom: tier.minzoom,
+      filter: tier.filter,
+      paint: HIGHLIGHT_PAINT,
+    });
+    HIGHLIGHT_LAYER_IDS.push(tier.id);
+    // Bind click/cursor handlers
+    map.on('click', tier.id, onRiverClick);
+    map.on('mouseenter', tier.id, () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', tier.id, () => { map.getCanvas().style.cursor = ''; });
+  }
+  highlightLayersAdded = true;
 }
 
 const appliedFeatureStates = new Set();
+let rafPending = false;
 
-function updateHighlightedLayer() {
+/**
+ * Apply feature states only to reaches currently rendered in the viewport.
+ * Uses querySourceFeatures to get the IDs of tiles loaded by MapLibre,
+ * then sets severity only for those – avoiding thousands of wasted writes
+ * for off-screen features.
+ */
+function applyVisibleFeatureStates() {
+  if (rafPending) return;
+  rafPending = true;
+  requestAnimationFrame(() => {
+    rafPending = false;
+    _applyVisibleFeatureStatesBatch();
+  });
+}
+
+function _applyVisibleFeatureStatesBatch() {
+  const started = nowMs();
   addHighlightLayer();
 
-  // Set feature state for each reach in the forecast index
-  for (const [reachId, info] of Object.entries(forecastIndex)) {
+  // Get all river features currently loaded in visible tiles
+  let visibleFeatures;
+  try {
+    visibleFeatures = map.querySourceFeatures('rivers', {
+      sourceLayer: 'rivers',
+    });
+  } catch {
+    // Source not loaded yet
+    return;
+  }
+
+  let writes = 0;
+  const seen = new Set();
+
+  for (const feature of visibleFeatures) {
+    const reachId = normalizeReachId(feature.id);
+    if (!reachId || seen.has(reachId)) continue;
+    seen.add(reachId);
+
+    const info = forecastIndex[reachId];
+    if (!info) continue; // no forecast data for this reach – skip
+
+    const severity = info.severity_score || 0;
+    if (severity === 0) continue;
+
+    // Skip if we already wrote this exact state
     if (appliedFeatureStates.has(reachId)) continue;
-    const numId = Number(reachId);
-    if (isNaN(numId)) continue;
+
     map.setFeatureState(
-      { source: 'rivers', sourceLayer: 'rivers', id: numId },
-      { severity: info.severity_score || 0 }
+      { source: 'rivers', sourceLayer: 'rivers', id: reachId },
+      { severity }
     );
     appliedFeatureStates.add(reachId);
+    writes += 1;
+  }
+
+  recordPerf('featureStateWrites', {
+    kind: 'apply_visible_feature_state_batch',
+    writes,
+    visible_features: visibleFeatures.length,
+    unique_visible: seen.size,
+    indexed_reaches: Object.keys(forecastIndex).length,
+    duration_ms: Number((nowMs() - started).toFixed(2)),
+  });
+  riverFlowAnimator?.triggerRefresh();
+}
+
+/** Re-apply states when new tiles finish loading (e.g. after pan/zoom). */
+function onSourceData(e) {
+  if (e.sourceId === 'rivers' && e.isSourceLoaded) {
+    applyVisibleFeatureStates();
   }
 }
 
@@ -466,10 +1106,11 @@ function buildHydrograph(timeseries, returnPeriods) {
 }
 
 async function onRiverClick(e) {
+  const clickStarted = nowMs();
   if (!e.features || e.features.length === 0) return;
 
   const feature = e.features[0];
-  const reachId = String(feature.id || '');
+  const reachId = normalizeReachId(feature.id);
   const info = forecastIndex[reachId];
 
   let html = `<h4>Reach ${reachId}</h4><table>`;
@@ -493,7 +1134,9 @@ async function onRiverClick(e) {
   if (currentRunId) {
     try {
       const detail = await fetchJSON(
-        `${API_BASE}/reaches/${PROVIDER}/${reachId}?run_id=${currentRunId}&timeseries_limit=500`
+        `${API_BASE}/reaches/${PROVIDER}/${reachId}?run_id=${currentRunId}&timeseries_limit=500`,
+        undefined,
+        'reaches/detail'
       );
       if (detail.summary) {
         const s = detail.summary;
@@ -511,6 +1154,13 @@ async function onRiverClick(e) {
 
       // Build hydrograph
       buildHydrograph(detail.timeseries, detail.return_periods);
+      recordPerf('interactions', {
+        kind: 'river_click_detail',
+        provider: PROVIDER,
+        reach_id: reachId,
+        timeseries_points: Array.isArray(detail.timeseries) ? detail.timeseries.length : 0,
+        duration_ms: Number((nowMs() - clickStarted).toFixed(2)),
+      });
     } catch {
       html += '</table>';
       infoContent.innerHTML = html;
@@ -577,6 +1227,7 @@ new ResizeObserver(() => {
 // ---------------------------------------------------------------------------
 function switchProvider(newProvider) {
   if (newProvider === PROVIDER) return;
+  const started = nowMs();
   PROVIDER = newProvider;
 
   // Update toggle buttons
@@ -587,14 +1238,13 @@ function switchProvider(newProvider) {
   // Clear existing forecast data
   forecastIndex = {};
   currentTier = null;
+  lastBboxKey = null;
 
   // Clear feature states on the map before clearing the tracking set
   if (map && map.getSource('rivers')) {
     for (const reachId of appliedFeatureStates) {
-      const numId = Number(reachId);
-      if (isNaN(numId)) continue;
       map.setFeatureState(
-        { source: 'rivers', sourceLayer: 'rivers', id: numId },
+        { source: 'rivers', sourceLayer: 'rivers', id: reachId },
         { severity: 0 }
       );
     }
@@ -613,6 +1263,13 @@ function switchProvider(newProvider) {
     try {
       await loadRunId();
       await loadDataForZoom(map.getZoom());
+      riverFlowAnimator?.triggerRefresh();
+      recordPerf('interactions', {
+        kind: 'switch_provider',
+        provider: newProvider,
+        duration_ms: Number((nowMs() - started).toFixed(2)),
+      });
+      emitPerfSnapshot(`switch:${newProvider}`);
     } catch (err) {
       console.warn(`Could not load ${newProvider} data:`, err);
       setStatus(`${newProvider.toUpperCase()} forecast data unavailable`);
@@ -627,4 +1284,5 @@ document.querySelectorAll('.provider-btn').forEach((btn) => {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
+initFlowControls();
 initMap();
