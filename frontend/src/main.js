@@ -17,6 +17,9 @@ const NE_PMTILES_CROSSOVER_ZOOM = 6; // z6 = crossover where NE fades out and PM
 const DEBUG_RIVERS = new URLSearchParams(window.location.search).get('debugRivers') === '1';
 const FLOW_TUNING_UI = new URLSearchParams(window.location.search).get('flowTuning') !== '0';
 const API_BASE = '/forecast'; // proxied to backend via Vite
+const GAUGE_LAYER_URL =
+  'https://services9.arcgis.com/RHVPKKiFTONKtxq3/ArcGIS/rest/services/Live_Stream_Gauges_v1/FeatureServer/0/query';
+const GAUGE_REFRESH_MS = 5 * 60 * 1000;
 let PROVIDER = 'geoglows';
 
 // Severity → colour mapping (matches legend)
@@ -52,6 +55,16 @@ const BAND_LABELS = {
   '100': '100-year',
 };
 
+const GAUGE_STATUS_COLORS = {
+  'Major Flood': '#b50000',
+  'Moderate Flood': '#f73500',
+  'Minor Flood': '#ff8b00',
+  'Action Stage': '#f2ca00',
+  'Low Flow': '#c1976f',
+  'No Flooding': '#ffffff',
+  Unknown: '#72d2e8',
+};
+
 // Zoom → minimum severity threshold + max reaches to load
 // At global zoom only show the most extreme; as user zooms in, reveal more.
 const ZOOM_SEVERITY_TIERS = [
@@ -81,6 +94,9 @@ let forecastChart = null; // Chart.js instance
 let viewportTimer = null; // unified debounce for zoom+pan
 let riverLayerIds = [];
 let riverFlowAnimator = null;
+let gaugesVisible = true;
+let gaugesRefreshTimer = null;
+let gaugesLoadedOnce = false;
 const PERF_ENABLED = true;
 
 const perfState = {
@@ -98,6 +114,7 @@ const infoContent = document.getElementById('info-content');
 const riverDebug = document.getElementById('river-debug');
 const riverFlowCanvas = document.getElementById('river-flow-canvas');
 const flowControls = document.getElementById('flow-controls');
+const gaugeToggle = document.getElementById('gauge-toggle');
 
 const flowFxConfig = {
   dashLength: 6,
@@ -265,6 +282,151 @@ function getRiverDebugState(zoom) {
     mediumMinArea,
     minorMinArea,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Live stream gauges (ArcGIS FeatureServer layer 0)
+// ---------------------------------------------------------------------------
+function gaugeColorExpression() {
+  return [
+    'match',
+    ['coalesce', ['get', 'status'], 'Unknown'],
+    'Major Flood', GAUGE_STATUS_COLORS['Major Flood'],
+    'Moderate Flood', GAUGE_STATUS_COLORS['Moderate Flood'],
+    'Minor Flood', GAUGE_STATUS_COLORS['Minor Flood'],
+    'Action Stage', GAUGE_STATUS_COLORS['Action Stage'],
+    'Low Flow', GAUGE_STATUS_COLORS['Low Flow'],
+    'No Flooding', GAUGE_STATUS_COLORS['No Flooding'],
+    GAUGE_STATUS_COLORS.Unknown,
+  ];
+}
+
+function gaugeRadiusExpression() {
+  const byStatus = [
+    'match',
+    ['coalesce', ['get', 'status'], 'Unknown'],
+    'Major Flood', 7.5,
+    'Moderate Flood', 6,
+    'Minor Flood', 5.25,
+    'Action Stage', 4.5,
+    'Low Flow', 4.5,
+    'No Flooding', 2.25,
+    2.25,
+  ];
+  return ['interpolate', ['linear'], ['zoom'], 2, byStatus, 6, ['+', byStatus, 2], 10, ['+', byStatus, 5]];
+}
+
+function gaugeQueryUrl(offset = 0, pageSize = 2000) {
+  const params = new URLSearchParams({
+    f: 'geojson',
+    where: '1=1',
+    outFields: '*',
+    returnGeometry: 'true',
+    outSR: '4326',
+    resultOffset: String(offset),
+    resultRecordCount: String(pageSize),
+    orderByFields: 'OBJECTID ASC',
+  });
+  return `${GAUGE_LAYER_URL}?${params.toString()}`;
+}
+
+async function fetchAllGaugeFeatures(signal) {
+  const pageSize = 2000;
+  const merged = [];
+  let offset = 0;
+  for (let page = 0; page < 50; page += 1) {
+    const pageData = await fetchJSON(gaugeQueryUrl(offset, pageSize), signal, 'gauges/query');
+    const features = Array.isArray(pageData?.features) ? pageData.features : [];
+    merged.push(...features);
+    if (features.length < pageSize) break;
+    offset += pageSize;
+  }
+  return {
+    type: 'FeatureCollection',
+    features: merged,
+  };
+}
+
+function addGaugeLayers() {
+  if (!map || map.getSource('stream-gauges')) return;
+  map.addSource('stream-gauges', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
+
+  map.addLayer({
+    id: 'stream-gauges',
+    type: 'circle',
+    source: 'stream-gauges',
+    paint: {
+      'circle-color': gaugeColorExpression(),
+      'circle-radius': gaugeRadiusExpression(),
+      'circle-stroke-color': 'rgba(30,30,30,0.45)',
+      'circle-stroke-width': [
+        'match',
+        ['coalesce', ['get', 'status'], 'Unknown'],
+        'No Flooding', 1,
+        2,
+      ],
+      'circle-opacity': 0.9,
+    },
+  });
+
+  map.on('click', 'stream-gauges', onGaugeClick);
+  map.on('mouseenter', 'stream-gauges', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'stream-gauges', () => { map.getCanvas().style.cursor = ''; });
+}
+
+function setGaugeLayerVisibility(visible) {
+  if (!map || !map.getLayer('stream-gauges')) return;
+  map.setLayoutProperty('stream-gauges', 'visibility', visible ? 'visible' : 'none');
+}
+
+function formatGaugeValue(value, key) {
+  if (value === null || value === undefined || value === '') return '—';
+  if (key === 'lastupdate') {
+    const ts = Number(value);
+    if (Number.isFinite(ts)) return new Date(ts).toUTCString();
+  }
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2);
+  return String(value);
+}
+
+function onGaugeClick(e) {
+  if (!e.features?.length) return;
+  const props = e.features[0].properties || {};
+  const rows = Object.entries(props).map(([key, value]) => {
+    const display = formatGaugeValue(value, key);
+    if (/url$/i.test(key) && display !== '—') {
+      return `<tr><td>${key}</td><td><a href="${display}" target="_blank" rel="noopener noreferrer">open</a></td></tr>`;
+    }
+    return `<tr><td>${key}</td><td>${display}</td></tr>`;
+  });
+  const html = `<h4>${props.name || 'Flood Gauge'}</h4><table>${rows.join('')}</table>`;
+  new maplibregl.Popup({ closeButton: true, maxWidth: '420px' })
+    .setLngLat(e.lngLat)
+    .setHTML(html)
+    .addTo(map);
+}
+
+async function refreshGaugeData({ silent = false } = {}) {
+  if (!map || !map.getSource('stream-gauges')) return;
+  try {
+    const fc = await fetchAllGaugeFeatures();
+    map.getSource('stream-gauges').setData(fc);
+    gaugesLoadedOnce = true;
+    if (!silent) {
+      setStatus(`Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded • ${fc.features.length} live gauges`);
+    }
+  } catch (err) {
+    console.warn('Could not load live stream gauges:', err);
+    if (!gaugesLoadedOnce) {
+      setGaugeLayerVisibility(false);
+      if (gaugeToggle) gaugeToggle.checked = false;
+      gaugesVisible = false;
+      setStatus('Live stream gauges unavailable (warning) – forecast layer still active');
+    }
+  }
 }
 
 function updateRiverDebugPanel() {
@@ -741,6 +903,14 @@ async function initMap() {
     riverLayerIds = RIVER_LAYER_IDS;
     riverFlowAnimator = createRiverFlowAnimator();
     riverFlowAnimator.triggerRefresh();
+    addGaugeLayers();
+    setGaugeLayerVisibility(gaugesVisible);
+    await refreshGaugeData({ silent: true });
+    if (gaugesRefreshTimer) clearInterval(gaugesRefreshTimer);
+    gaugesRefreshTimer = setInterval(() => {
+      if (!gaugesVisible) return;
+      refreshGaugeData({ silent: true });
+    }, GAUGE_REFRESH_MS);
 
     // Get the run ID first
     try {
@@ -1280,6 +1450,15 @@ function switchProvider(newProvider) {
 document.querySelectorAll('.provider-btn').forEach((btn) => {
   btn.addEventListener('click', () => switchProvider(btn.dataset.provider));
 });
+
+if (gaugeToggle) {
+  gaugeToggle.checked = gaugesVisible;
+  gaugeToggle.addEventListener('change', async (e) => {
+    gaugesVisible = e.target.checked;
+    setGaugeLayerVisibility(gaugesVisible);
+    if (gaugesVisible) await refreshGaugeData({ silent: true });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Boot
