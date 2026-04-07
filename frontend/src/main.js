@@ -101,6 +101,7 @@ let gaugesRefreshTimer = null;
 let gaugesLoadedOnce = false;
 let floodTileDate = null;
 let floodTileLayer = 'flood';
+let floodTilesReady = false;
 const PERF_ENABLED = true;
 
 const perfState = {
@@ -121,6 +122,7 @@ const flowControls = document.getElementById('flow-controls');
 const gaugeToggle = document.getElementById('gauge-toggle');
 const floodDateSelect = document.getElementById('flood-date-select');
 const floodLayerSelect = document.getElementById('flood-layer-select');
+setFloodControlsEnabled(false);
 
 const flowFxConfig = {
   dashLength: 6,
@@ -139,28 +141,71 @@ function buildFloodTileUrlTemplate(date = floodTileDate, layer = floodTileLayer)
   return `${FLOOD_TILE_BUCKET_BASE}/${date}/${layer}/{z}/{x}/{y}.png`;
 }
 
+function parseDateCandidate(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (/^\d{8}$/.test(s)) return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+  return null;
+}
+
 function setFloodTileSource(date = floodTileDate, layer = floodTileLayer) {
   if (!map || !date || !map.getSource('flood-tiles')) return;
   const source = map.getSource('flood-tiles');
   source.setTiles([buildFloodTileUrlTemplate(date, layer)]);
 }
 
-function parseFloodTileDates(metadata) {
-  if (!metadata || typeof metadata !== 'object') return [];
-  if (Array.isArray(metadata.dates)) return metadata.dates;
-  if (Array.isArray(metadata.available_dates)) return metadata.available_dates;
-  if (Array.isArray(metadata.runs)) return metadata.runs;
-  return [];
+function parseFloodTileDates(metadata, out = new Set()) {
+  if (metadata == null) return out;
+  if (Array.isArray(metadata)) {
+    for (const item of metadata) parseFloodTileDates(item, out);
+    return out;
+  }
+  if (typeof metadata === 'object') {
+    for (const [key, value] of Object.entries(metadata)) {
+      const keyLc = key.toLowerCase();
+      if (keyLc.includes('date') || keyLc.includes('run')) {
+        const maybe = parseDateCandidate(value);
+        if (maybe) out.add(maybe);
+      }
+      parseFloodTileDates(value, out);
+    }
+    return out;
+  }
+  const maybe = parseDateCandidate(metadata);
+  if (maybe) out.add(maybe);
+  return out;
+}
+
+function setFloodControlsEnabled(enabled) {
+  if (floodDateSelect) floodDateSelect.disabled = !enabled;
+  if (floodLayerSelect) floodLayerSelect.disabled = !enabled;
+}
+
+function ensureFloodTilesLayer() {
+  if (!map || !floodTileDate || map.getSource('flood-tiles')) return;
+  map.addSource('flood-tiles', {
+    type: 'raster',
+    tiles: [buildFloodTileUrlTemplate(floodTileDate, floodTileLayer)],
+    tileSize: 256,
+  });
+  map.addLayer({
+    id: 'flood-tiles',
+    type: 'raster',
+    source: 'flood-tiles',
+    paint: {
+      'raster-opacity': 0.55,
+      'raster-fade-duration': 0,
+    },
+  });
+  floodTilesReady = true;
 }
 
 async function loadFloodTileMetadata() {
   try {
     const metadata = await fetchJSON(FLOOD_TILE_METADATA_URL, undefined, 'tiles/metadata');
-    const dates = parseFloodTileDates(metadata)
-      .map((d) => String(d || '').trim())
-      .filter(Boolean)
-      .sort((a, b) => b.localeCompare(a));
-    if (dates.length === 0) return;
+    const dates = [...parseFloodTileDates(metadata)].sort((a, b) => b.localeCompare(a));
+    if (dates.length === 0) throw new Error('metadata.json contained no parseable dates');
     floodTileDate = dates[0];
     if (floodDateSelect) {
       floodDateSelect.innerHTML = dates
@@ -168,9 +213,16 @@ async function loadFloodTileMetadata() {
         .join('');
       floodDateSelect.value = floodTileDate;
     }
+    ensureFloodTilesLayer();
     setFloodTileSource(floodTileDate, floodTileLayer);
+    setFloodControlsEnabled(true);
   } catch (err) {
     console.warn('Could not load flood tile metadata:', err);
+    if (floodDateSelect) {
+      floodDateSelect.innerHTML = '<option value=\"\">Metadata unavailable</option>';
+      floodDateSelect.value = '';
+    }
+    setFloodControlsEnabled(false);
   }
 }
 
@@ -810,25 +862,6 @@ async function initMap() {
       type: 'raster',
       source: 'osm',
       paint: { 'raster-fade-duration': 0 },
-    });
-    map.addSource('flood-tiles', {
-      type: 'raster',
-      tiles: [
-        buildFloodTileUrlTemplate(
-          floodTileDate || 'latest',
-          floodTileLayer
-        ),
-      ],
-      tileSize: 256,
-    });
-    map.addLayer({
-      id: 'flood-tiles',
-      type: 'raster',
-      source: 'flood-tiles',
-      paint: {
-        'raster-opacity': 0.55,
-        'raster-fade-duration': 0,
-      },
     });
     await loadFloodTileMetadata();
 
@@ -1528,6 +1561,7 @@ if (gaugeToggle) {
 if (floodDateSelect) {
   floodDateSelect.addEventListener('change', (e) => {
     floodTileDate = e.target.value;
+    if (!floodTilesReady) ensureFloodTilesLayer();
     setFloodTileSource(floodTileDate, floodTileLayer);
   });
 }
@@ -1536,6 +1570,7 @@ if (floodLayerSelect) {
   floodLayerSelect.value = floodTileLayer;
   floodLayerSelect.addEventListener('change', (e) => {
     floodTileLayer = e.target.value || 'flood';
+    if (!floodTilesReady) ensureFloodTilesLayer();
     setFloodTileSource(floodTileDate, floodTileLayer);
   });
 }
