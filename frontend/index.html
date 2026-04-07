@@ -19,6 +19,15 @@
       Flood Gauges
     </label>
   </div>
+  <div id="flood-tiles-controls">
+    <label for="flood-date-select">Flood tiles date</label>
+    <select id="flood-date-select"></select>
+    <label for="flood-layer-select">Flood tiles layer</label>
+    <select id="flood-layer-select">
+      <option value="flood">Flood only</option>
+      <option value="all">All (incl. recurring)</option>
+    </select>
+  </div>
   <div id="flow-controls" class="hidden">
     <div id="flow-controls-title">Flow Animation Tuning</div>
     <label>Length <input id="flow-dash-length" type="range" min="2" max="30" step="1" /><span id="flow-dash-length-val"></span></label>
