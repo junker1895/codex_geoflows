@@ -1,6 +1,7 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body, html { width: 100%; height: 100%; font-family: system-ui, sans-serif; }
+.hidden { display: none !important; }
 
 #map { width: 100%; height: 100%; }
 #river-flow-canvas {
@@ -71,6 +72,49 @@ body, html { width: 100%; height: 100%; font-family: system-ui, sans-serif; }
 .provider-btn.active {
   background: #1565c0;
   color: #fff;
+}
+#gauge-toggle-wrap {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  background: rgba(255,255,255,0.92);
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.25);
+  padding: 6px 10px;
+}
+#gauge-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #333;
+  cursor: pointer;
+}
+#gauge-toggle { cursor: pointer; }
+#flood-tiles-controls {
+  position: absolute;
+  top: 88px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 6px 8px;
+  align-items: center;
+  background: rgba(255,255,255,0.92);
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.25);
+  padding: 6px 10px;
+  font-size: 12px;
+}
+#flood-tiles-controls select {
+  min-width: 120px;
+  border: 1px solid #d4d4d4;
+  border-radius: 4px;
+  padding: 2px 4px;
+  font-size: 12px;
 }
 
 /* Legend */
