@@ -17,6 +17,8 @@ const NE_PMTILES_CROSSOVER_ZOOM = 6; // z6 = crossover where NE fades out and PM
 const DEBUG_RIVERS = new URLSearchParams(window.location.search).get('debugRivers') === '1';
 const FLOW_TUNING_UI = new URLSearchParams(window.location.search).get('flowTuning') !== '0';
 const API_BASE = '/forecast'; // proxied to backend via Vite
+const FLOOD_TILE_BUCKET_BASE = 'https://pub-ca427796d1e2457685016e82ce231ce3.r2.dev/tiles';
+const FLOOD_TILE_METADATA_URL = `${FLOOD_TILE_BUCKET_BASE}/metadata.json`;
 const GAUGE_LAYER_URL =
   'https://services9.arcgis.com/RHVPKKiFTONKtxq3/ArcGIS/rest/services/Live_Stream_Gauges_v1/FeatureServer/0/query';
 const GAUGE_REFRESH_MS = 5 * 60 * 1000;
@@ -97,6 +99,8 @@ let riverFlowAnimator = null;
 let gaugesVisible = true;
 let gaugesRefreshTimer = null;
 let gaugesLoadedOnce = false;
+let floodTileDate = null;
+let floodTileLayer = 'flood';
 const PERF_ENABLED = true;
 
 const perfState = {
@@ -115,6 +119,8 @@ const riverDebug = document.getElementById('river-debug');
 const riverFlowCanvas = document.getElementById('river-flow-canvas');
 const flowControls = document.getElementById('flow-controls');
 const gaugeToggle = document.getElementById('gauge-toggle');
+const floodDateSelect = document.getElementById('flood-date-select');
+const floodLayerSelect = document.getElementById('flood-layer-select');
 
 const flowFxConfig = {
   dashLength: 6,
@@ -127,6 +133,45 @@ const flowFxConfig = {
 
 function setStatus(msg) {
   statusBar.textContent = msg;
+}
+
+function buildFloodTileUrlTemplate(date = floodTileDate, layer = floodTileLayer) {
+  return `${FLOOD_TILE_BUCKET_BASE}/${date}/${layer}/{z}/{x}/{y}.png`;
+}
+
+function setFloodTileSource(date = floodTileDate, layer = floodTileLayer) {
+  if (!map || !date || !map.getSource('flood-tiles')) return;
+  const source = map.getSource('flood-tiles');
+  source.setTiles([buildFloodTileUrlTemplate(date, layer)]);
+}
+
+function parseFloodTileDates(metadata) {
+  if (!metadata || typeof metadata !== 'object') return [];
+  if (Array.isArray(metadata.dates)) return metadata.dates;
+  if (Array.isArray(metadata.available_dates)) return metadata.available_dates;
+  if (Array.isArray(metadata.runs)) return metadata.runs;
+  return [];
+}
+
+async function loadFloodTileMetadata() {
+  try {
+    const metadata = await fetchJSON(FLOOD_TILE_METADATA_URL, undefined, 'tiles/metadata');
+    const dates = parseFloodTileDates(metadata)
+      .map((d) => String(d || '').trim())
+      .filter(Boolean)
+      .sort((a, b) => b.localeCompare(a));
+    if (dates.length === 0) return;
+    floodTileDate = dates[0];
+    if (floodDateSelect) {
+      floodDateSelect.innerHTML = dates
+        .map((d) => `<option value="${d}">${d}</option>`)
+        .join('');
+      floodDateSelect.value = floodTileDate;
+    }
+    setFloodTileSource(floodTileDate, floodTileLayer);
+  } catch (err) {
+    console.warn('Could not load flood tile metadata:', err);
+  }
 }
 
 function normalizeReachId(value) {
@@ -766,6 +811,26 @@ async function initMap() {
       source: 'osm',
       paint: { 'raster-fade-duration': 0 },
     });
+    map.addSource('flood-tiles', {
+      type: 'raster',
+      tiles: [
+        buildFloodTileUrlTemplate(
+          floodTileDate || 'latest',
+          floodTileLayer
+        ),
+      ],
+      tileSize: 256,
+    });
+    map.addLayer({
+      id: 'flood-tiles',
+      type: 'raster',
+      source: 'flood-tiles',
+      paint: {
+        'raster-opacity': 0.55,
+        'raster-fade-duration': 0,
+      },
+    });
+    await loadFloodTileMetadata();
 
     // Add rivers PMTiles source (IDs are already baked into the tileset)
     map.addSource('rivers', {
@@ -1457,6 +1522,21 @@ if (gaugeToggle) {
     gaugesVisible = e.target.checked;
     setGaugeLayerVisibility(gaugesVisible);
     if (gaugesVisible) await refreshGaugeData({ silent: true });
+  });
+}
+
+if (floodDateSelect) {
+  floodDateSelect.addEventListener('change', (e) => {
+    floodTileDate = e.target.value;
+    setFloodTileSource(floodTileDate, floodTileLayer);
+  });
+}
+
+if (floodLayerSelect) {
+  floodLayerSelect.value = floodTileLayer;
+  floodLayerSelect.addEventListener('change', (e) => {
+    floodTileLayer = e.target.value || 'flood';
+    setFloodTileSource(floodTileDate, floodTileLayer);
   });
 }
 
