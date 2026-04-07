@@ -67,6 +67,22 @@ const GAUGE_STATUS_COLORS = {
   Unknown: '#72d2e8',
 };
 
+const GAUGE_STATUS_PRIORITY = {
+  'Major Flood': 'high',
+  'Moderate Flood': 'high',
+  'Minor Flood': 'high',
+  'Action Stage': 'high',
+  'Low Flow': 'medium',
+  'No Flooding': 'low',
+  Unknown: 'low',
+};
+
+const GAUGE_ZOOM_VISIBILITY_POLICY = [
+  { maxZoom: 5.5, priorities: ['high'] },
+  { maxZoom: 8, priorities: ['high', 'medium'] },
+  { maxZoom: Infinity, priorities: ['high', 'medium', 'low'] },
+];
+
 // Zoom → minimum severity threshold + max reaches to load
 // At global zoom only show the most extreme; as user zooms in, reveal more.
 const ZOOM_SEVERITY_TIERS = [
@@ -81,6 +97,13 @@ function getTierForZoom(zoom) {
     if (zoom <= tier.maxZoom) return tier;
   }
   return ZOOM_SEVERITY_TIERS[ZOOM_SEVERITY_TIERS.length - 1];
+}
+
+function getGaugeVisibilityPolicyForZoom(zoom) {
+  for (const policy of GAUGE_ZOOM_VISIBILITY_POLICY) {
+    if (zoom <= policy.maxZoom) return policy;
+  }
+  return GAUGE_ZOOM_VISIBILITY_POLICY[GAUGE_ZOOM_VISIBILITY_POLICY.length - 1];
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +436,14 @@ function gaugeRadiusExpression() {
   return ['interpolate', ['linear'], ['zoom'], 2, byStatus, 6, ['+', byStatus, 2], 10, ['+', byStatus, 5]];
 }
 
+function gaugeFilterExpressionByZoom(zoom) {
+  const policy = getGaugeVisibilityPolicyForZoom(zoom);
+  const allowedStatuses = Object.entries(GAUGE_STATUS_PRIORITY)
+    .filter(([, priority]) => policy.priorities.includes(priority))
+    .map(([status]) => status);
+  return ['in', ['coalesce', ['get', 'status'], 'Unknown'], ['literal', allowedStatuses]];
+}
+
 function gaugeQueryUrl(offset = 0, pageSize = 2000) {
   const params = new URLSearchParams({
     f: 'geojson',
@@ -477,6 +508,11 @@ function addGaugeLayers() {
 function setGaugeLayerVisibility(visible) {
   if (!map || !map.getLayer('stream-gauges')) return;
   map.setLayoutProperty('stream-gauges', 'visibility', visible ? 'visible' : 'none');
+}
+
+function applyGaugeVisibilityPolicy() {
+  if (!map || !map.getLayer('stream-gauges')) return;
+  map.setFilter('stream-gauges', gaugeFilterExpressionByZoom(map.getZoom()));
 }
 
 function formatGaugeValue(value, key) {
@@ -1003,6 +1039,7 @@ async function initMap() {
     riverFlowAnimator.triggerRefresh();
     addGaugeLayers();
     setGaugeLayerVisibility(gaugesVisible);
+    applyGaugeVisibilityPolicy();
     await refreshGaugeData({ silent: true });
     if (gaugesRefreshTimer) clearInterval(gaugesRefreshTimer);
     gaugesRefreshTimer = setInterval(() => {
@@ -1033,6 +1070,7 @@ async function initMap() {
       onViewportChange();
       updateRiverDebugPanel();
       riverFlowAnimator.triggerRefresh();
+      applyGaugeVisibilityPolicy();
     });
     map.on('moveend', () => {
       const c = map.getCenter();
