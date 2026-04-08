@@ -22,6 +22,19 @@ const FLOOD_TILE_METADATA_URL = `${FLOOD_TILE_BUCKET_BASE}/metadata.json`;
 const GAUGE_LAYER_URL =
   'https://services9.arcgis.com/RHVPKKiFTONKtxq3/ArcGIS/rest/services/Live_Stream_Gauges_v1/FeatureServer/0/query';
 const GAUGE_REFRESH_MS = 5 * 60 * 1000;
+const GAUGE_VIEWPORT_BUFFER_DEG = 0.5;
+const GAUGE_PAGE_SIZE = 1500;
+const GAUGE_MAX_PAGES = 25;
+const GAUGE_OUT_FIELDS = [
+  'OBJECTID',
+  'name',
+  'status',
+  'location',
+  'stage',
+  'flow',
+  'lastupdate',
+  'url',
+];
 let PROVIDER = 'geoglows';
 
 // Severity → colour mapping (matches legend)
@@ -122,6 +135,8 @@ let riverFlowAnimator = null;
 let gaugesVisible = true;
 let gaugesRefreshTimer = null;
 let gaugesLoadedOnce = false;
+let gaugesAbort = null;
+let lastGaugeBboxKey = null;
 let floodTileDate = null;
 let floodTileLayer = 'flood';
 let floodTilesReady = false;
@@ -444,13 +459,26 @@ function gaugeFilterExpressionByZoom(zoom) {
   return ['in', ['coalesce', ['get', 'status'], 'Unknown'], ['literal', allowedStatuses]];
 }
 
-function gaugeQueryUrl(offset = 0, pageSize = 2000) {
+function expandBounds(bounds, bufferDeg = GAUGE_VIEWPORT_BUFFER_DEG) {
+  return {
+    west: Math.max(-180, bounds.getWest() - bufferDeg),
+    south: Math.max(-90, bounds.getSouth() - bufferDeg),
+    east: Math.min(180, bounds.getEast() + bufferDeg),
+    north: Math.min(90, bounds.getNorth() + bufferDeg),
+  };
+}
+
+function gaugeQueryUrl(bounds, offset = 0, pageSize = GAUGE_PAGE_SIZE) {
+  const envelope = expandBounds(bounds);
   const params = new URLSearchParams({
     f: 'geojson',
     where: '1=1',
-    outFields: '*',
+    outFields: GAUGE_OUT_FIELDS.join(','),
     returnGeometry: 'true',
     outSR: '4326',
+    geometry: `${envelope.west},${envelope.south},${envelope.east},${envelope.north}`,
+    geometryType: 'esriGeometryEnvelope',
+    spatialRel: 'esriSpatialRelIntersects',
     resultOffset: String(offset),
     resultRecordCount: String(pageSize),
     orderByFields: 'OBJECTID ASC',
@@ -458,12 +486,15 @@ function gaugeQueryUrl(offset = 0, pageSize = 2000) {
   return `${GAUGE_LAYER_URL}?${params.toString()}`;
 }
 
-async function fetchAllGaugeFeatures(signal) {
-  const pageSize = 2000;
+async function fetchGaugeFeaturesForViewport(bounds, signal) {
+  const pageSize = GAUGE_PAGE_SIZE;
   const merged = [];
   let offset = 0;
-  for (let page = 0; page < 50; page += 1) {
-    const pageData = await fetchJSON(gaugeQueryUrl(offset, pageSize), signal, 'gauges/query');
+  for (let page = 0; page < GAUGE_MAX_PAGES; page += 1) {
+    const pageData = await fetchJSON(gaugeQueryUrl(bounds, offset, pageSize), signal, 'gauges/query');
+    if (pageData?.error) {
+      throw new Error(`Gauge query error: ${pageData.error.message || 'unknown'} (${pageData.error.code || 'n/a'})`);
+    }
     const features = Array.isArray(pageData?.features) ? pageData.features : [];
     merged.push(...features);
     if (features.length < pageSize) break;
@@ -542,16 +573,30 @@ function onGaugeClick(e) {
     .addTo(map);
 }
 
-async function refreshGaugeData({ silent = false } = {}) {
+async function refreshGaugeData({ silent = false, force = false } = {}) {
   if (!map || !map.getSource('stream-gauges')) return;
+  const started = nowMs();
+  const gaugeBboxKey = bboxKey(map.getBounds(), 1);
+  if (silent && !force && gaugeBboxKey === lastGaugeBboxKey) return;
+  if (gaugesAbort) gaugesAbort.abort();
+  gaugesAbort = new AbortController();
   try {
-    const fc = await fetchAllGaugeFeatures();
+    const fc = await fetchGaugeFeaturesForViewport(map.getBounds(), gaugesAbort.signal);
+    lastGaugeBboxKey = gaugeBboxKey;
     map.getSource('stream-gauges').setData(fc);
     gaugesLoadedOnce = true;
+    recordPerf('network', {
+      kind: 'gauges/query',
+      provider: PROVIDER,
+      bbox_key: gaugeBboxKey,
+      features_raw: fc.features.length,
+      duration_ms: Number((nowMs() - started).toFixed(2)),
+    });
     if (!silent) {
       setStatus(`Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded • ${fc.features.length} live gauges`);
     }
   } catch (err) {
+    if (err.name === 'AbortError') return;
     console.warn('Could not load live stream gauges:', err);
     if (!gaugesLoadedOnce) {
       setGaugeLayerVisibility(false);
@@ -836,6 +881,7 @@ function onViewportChange() {
   viewportTimer = setTimeout(() => {
     if (!currentRunId) return;
     loadDataForZoom(map.getZoom());
+    if (gaugesVisible) refreshGaugeData({ silent: true });
   }, 300);
 }
 
@@ -1044,7 +1090,7 @@ async function initMap() {
     if (gaugesRefreshTimer) clearInterval(gaugesRefreshTimer);
     gaugesRefreshTimer = setInterval(() => {
       if (!gaugesVisible) return;
-      refreshGaugeData({ silent: true });
+      refreshGaugeData({ silent: true, force: true });
     }, GAUGE_REFRESH_MS);
 
     // Get the run ID first
@@ -1592,7 +1638,7 @@ if (gaugeToggle) {
   gaugeToggle.addEventListener('change', async (e) => {
     gaugesVisible = e.target.checked;
     setGaugeLayerVisibility(gaugesVisible);
-    if (gaugesVisible) await refreshGaugeData({ silent: true });
+    if (gaugesVisible) await refreshGaugeData({ silent: true, force: true });
   });
 }
 
