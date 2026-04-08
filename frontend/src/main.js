@@ -22,6 +22,9 @@ const FLOOD_TILE_METADATA_URL = `${FLOOD_TILE_BUCKET_BASE}/metadata.json`;
 const GAUGE_LAYER_URL =
   'https://services9.arcgis.com/RHVPKKiFTONKtxq3/ArcGIS/rest/services/Live_Stream_Gauges_v1/FeatureServer/0/query';
 const GAUGE_REFRESH_MS = 5 * 60 * 1000;
+const GAUGE_QUERY_FIELDS = ['objectid', 'name', 'status', 'location', 'waterbody', 'state', 'stage', 'flow', 'latitude', 'longitude', 'lastupdate', 'url'];
+const GAUGE_VIEWPORT_BUFFER_PCT = 0.1;
+const GAUGE_CLUSTER_MAX_ZOOM = 6;
 let PROVIDER = 'geoglows';
 
 // Severity → colour mapping (matches legend)
@@ -67,6 +70,22 @@ const GAUGE_STATUS_COLORS = {
   Unknown: '#72d2e8',
 };
 
+const GAUGE_STATUS_PRIORITY = {
+  'Major Flood': 'high',
+  'Moderate Flood': 'high',
+  'Minor Flood': 'high',
+  'Action Stage': 'high',
+  'Low Flow': 'medium',
+  'No Flooding': 'low',
+  Unknown: 'low',
+};
+
+const GAUGE_ZOOM_VISIBILITY_POLICY = [
+  { maxZoom: 5.5, priorities: ['high'] },
+  { maxZoom: 8, priorities: ['high', 'medium'] },
+  { maxZoom: Infinity, priorities: ['high', 'medium', 'low'] },
+];
+
 // Zoom → minimum severity threshold + max reaches to load
 // At global zoom only show the most extreme; as user zooms in, reveal more.
 const ZOOM_SEVERITY_TIERS = [
@@ -81,6 +100,13 @@ function getTierForZoom(zoom) {
     if (zoom <= tier.maxZoom) return tier;
   }
   return ZOOM_SEVERITY_TIERS[ZOOM_SEVERITY_TIERS.length - 1];
+}
+
+function getGaugeVisibilityPolicyForZoom(zoom) {
+  for (const policy of GAUGE_ZOOM_VISIBILITY_POLICY) {
+    if (zoom <= policy.maxZoom) return policy;
+  }
+  return GAUGE_ZOOM_VISIBILITY_POLICY[GAUGE_ZOOM_VISIBILITY_POLICY.length - 1];
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +125,9 @@ let riverFlowAnimator = null;
 let gaugesVisible = true;
 let gaugesRefreshTimer = null;
 let gaugesLoadedOnce = false;
+let gaugesAbort = null;
+let gaugesRawFeatures = [];
+let lastGaugeViewportKey = null;
 let floodTileDate = null;
 let floodTileLayer = 'flood';
 let floodTilesReady = false;
@@ -413,13 +442,41 @@ function gaugeRadiusExpression() {
   return ['interpolate', ['linear'], ['zoom'], 2, byStatus, 6, ['+', byStatus, 2], 10, ['+', byStatus, 5]];
 }
 
-function gaugeQueryUrl(offset = 0, pageSize = 2000) {
+function normalizedStatus(status) {
+  const value = String(status ?? '').trim();
+  return value || 'Unknown';
+}
+
+function withViewportBuffer(bounds, pct = GAUGE_VIEWPORT_BUFFER_PCT) {
+  const west = bounds.getWest();
+  const east = bounds.getEast();
+  const south = bounds.getSouth();
+  const north = bounds.getNorth();
+  const lngSpan = Math.max(0.1, Math.abs(east - west));
+  const latSpan = Math.max(0.1, Math.abs(north - south));
+  const lngPad = lngSpan * pct;
+  const latPad = latSpan * pct;
+  return {
+    west: west - lngPad,
+    south: Math.max(-85, south - latPad),
+    east: east + lngPad,
+    north: Math.min(85, north + latPad),
+  };
+}
+
+function gaugeQueryUrlForViewport(bounds, offset = 0, pageSize = 1500, outFields = GAUGE_QUERY_FIELDS.join(',')) {
+  const buffered = withViewportBuffer(bounds);
+  const geometry = `${buffered.west},${buffered.south},${buffered.east},${buffered.north}`;
   const params = new URLSearchParams({
     f: 'geojson',
     where: '1=1',
-    outFields: '*',
+    outFields,
     returnGeometry: 'true',
     outSR: '4326',
+    geometry,
+    geometryType: 'esriGeometryEnvelope',
+    inSR: '4326',
+    spatialRel: 'esriSpatialRelIntersects',
     resultOffset: String(offset),
     resultRecordCount: String(pageSize),
     orderByFields: 'OBJECTID ASC',
@@ -427,21 +484,72 @@ function gaugeQueryUrl(offset = 0, pageSize = 2000) {
   return `${GAUGE_LAYER_URL}?${params.toString()}`;
 }
 
-async function fetchAllGaugeFeatures(signal) {
-  const pageSize = 2000;
+function filterGaugeFeaturesByZoom(features, zoom) {
+  const policy = getGaugeVisibilityPolicyForZoom(zoom);
+  const allowedPriorities = new Set(policy.priorities);
+  const filtered = features.filter((feature) => {
+    const status = normalizedStatus(feature?.properties?.status);
+    const priority = GAUGE_STATUS_PRIORITY[status] ?? 'low';
+    return allowedPriorities.has(priority);
+  });
+  // Fallback: if status values are unexpected and everything gets filtered out,
+  // show fetched gauges instead of rendering nothing.
+  if (features.length > 0 && filtered.length === 0) return features;
+  return filtered;
+}
+
+function applyGaugeDataForCurrentZoom() {
+  if (!map || !map.getSource('stream-gauges')) return 0;
+  const visibleFeatures = filterGaugeFeaturesByZoom(gaugesRawFeatures, map.getZoom());
+  map.getSource('stream-gauges').setData({
+    type: 'FeatureCollection',
+    features: visibleFeatures,
+  });
+  return visibleFeatures.length;
+}
+
+async function fetchViewportGaugeFeatures(bounds, signal) {
+  const pageSize = 1000;
   const merged = [];
   let offset = 0;
-  for (let page = 0; page < 50; page += 1) {
-    const pageData = await fetchJSON(gaugeQueryUrl(offset, pageSize), signal, 'gauges/query');
+  for (let page = 0; page < 6; page += 1) {
+    const pageData = await fetchJSON(gaugeQueryUrlForViewport(bounds, offset, pageSize), signal, 'gauges/query');
     const features = Array.isArray(pageData?.features) ? pageData.features : [];
     merged.push(...features);
     if (features.length < pageSize) break;
     offset += pageSize;
   }
-  return {
-    type: 'FeatureCollection',
-    features: merged,
-  };
+  return merged;
+}
+
+async function fetchViewportGaugeFeaturesWithFallback(bounds, signal) {
+  try {
+    return await fetchViewportGaugeFeatures(bounds, signal);
+  } catch (err) {
+    const message = String(err?.message ?? '');
+    if (!/400|outfields/i.test(message)) throw err;
+    const pageData = await fetchJSON(
+      gaugeQueryUrlForViewport(bounds, 0, 2000, '*'),
+      signal,
+      'gauges/query/fallback'
+    );
+    return Array.isArray(pageData?.features) ? pageData.features : [];
+  }
+}
+
+function gaugeViewportKey() {
+  if (!map) return '';
+  return `${bboxKey(map.getBounds(), 1)}@${Math.round(map.getZoom() * 2) / 2}`;
+}
+
+function shouldRefreshGauges(force = false) {
+  if (!map || !gaugesVisible) return false;
+  const key = gaugeViewportKey();
+  if (force || !gaugesLoadedOnce || key !== lastGaugeViewportKey) {
+    lastGaugeViewportKey = key;
+    return true;
+  }
+  return false;
 }
 
 function addGaugeLayers() {
@@ -449,12 +557,45 @@ function addGaugeLayers() {
   map.addSource('stream-gauges', {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: [] },
+    cluster: true,
+    clusterRadius: 48,
+    clusterMaxZoom: GAUGE_CLUSTER_MAX_ZOOM,
+  });
+
+  map.addLayer({
+    id: 'stream-gauge-clusters',
+    type: 'circle',
+    source: 'stream-gauges',
+    filter: ['has', 'point_count'],
+    paint: {
+      'circle-color': '#2f6ecf',
+      'circle-radius': ['interpolate', ['linear'], ['get', 'point_count'], 2, 14, 25, 20, 100, 28],
+      'circle-opacity': 0.8,
+      'circle-stroke-color': 'rgba(20,30,50,0.55)',
+      'circle-stroke-width': 1.5,
+    },
+  });
+
+  map.addLayer({
+    id: 'stream-gauge-cluster-count',
+    type: 'symbol',
+    source: 'stream-gauges',
+    filter: ['has', 'point_count'],
+    layout: {
+      'text-field': ['get', 'point_count_abbreviated'],
+      'text-size': 11,
+      'text-font': ['Open Sans Semibold', 'Arial Unicode MS Bold'],
+    },
+    paint: {
+      'text-color': '#ffffff',
+    },
   });
 
   map.addLayer({
     id: 'stream-gauges',
     type: 'circle',
     source: 'stream-gauges',
+    filter: ['!', ['has', 'point_count']],
     paint: {
       'circle-color': gaugeColorExpression(),
       'circle-radius': gaugeRadiusExpression(),
@@ -469,14 +610,30 @@ function addGaugeLayers() {
     },
   });
 
+  map.on('click', 'stream-gauge-clusters', (e) => {
+    const feature = e.features?.[0];
+    if (!feature) return;
+    const clusterId = feature.properties?.cluster_id;
+    if (clusterId === undefined || clusterId === null) return;
+    map.getSource('stream-gauges').getClusterExpansionZoom(clusterId, (err, zoom) => {
+      if (err) return;
+      map.easeTo({ center: feature.geometry.coordinates, zoom });
+    });
+  });
+  map.on('mouseenter', 'stream-gauge-clusters', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'stream-gauge-clusters', () => { map.getCanvas().style.cursor = ''; });
   map.on('click', 'stream-gauges', onGaugeClick);
   map.on('mouseenter', 'stream-gauges', () => { map.getCanvas().style.cursor = 'pointer'; });
   map.on('mouseleave', 'stream-gauges', () => { map.getCanvas().style.cursor = ''; });
 }
 
 function setGaugeLayerVisibility(visible) {
-  if (!map || !map.getLayer('stream-gauges')) return;
-  map.setLayoutProperty('stream-gauges', 'visibility', visible ? 'visible' : 'none');
+  if (!map) return;
+  const visibility = visible ? 'visible' : 'none';
+  for (const layerId of ['stream-gauge-clusters', 'stream-gauge-cluster-count', 'stream-gauges']) {
+    if (!map.getLayer(layerId)) continue;
+    map.setLayoutProperty(layerId, 'visibility', visibility);
+  }
 }
 
 function formatGaugeValue(value, key) {
@@ -506,16 +663,22 @@ function onGaugeClick(e) {
     .addTo(map);
 }
 
-async function refreshGaugeData({ silent = false } = {}) {
-  if (!map || !map.getSource('stream-gauges')) return;
+async function refreshGaugeData({ silent = false, force = false } = {}) {
+  if (!map || !map.getSource('stream-gauges') || !gaugesVisible) return;
+  if (!shouldRefreshGauges(force)) {
+    return;
+  }
+  if (gaugesAbort) gaugesAbort.abort();
+  gaugesAbort = new AbortController();
   try {
-    const fc = await fetchAllGaugeFeatures();
-    map.getSource('stream-gauges').setData(fc);
+    gaugesRawFeatures = await fetchViewportGaugeFeaturesWithFallback(map.getBounds(), gaugesAbort.signal);
+    const visibleCount = applyGaugeDataForCurrentZoom();
     gaugesLoadedOnce = true;
     if (!silent) {
-      setStatus(`Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded • ${fc.features.length} live gauges`);
+      setStatus(`Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded • ${visibleCount} visible gauges`);
     }
   } catch (err) {
+    if (err.name === 'AbortError') return;
     console.warn('Could not load live stream gauges:', err);
     if (!gaugesLoadedOnce) {
       setGaugeLayerVisibility(false);
@@ -800,6 +963,7 @@ function onViewportChange() {
   viewportTimer = setTimeout(() => {
     if (!currentRunId) return;
     loadDataForZoom(map.getZoom());
+    refreshGaugeData({ silent: true });
   }, 300);
 }
 
@@ -1003,11 +1167,11 @@ async function initMap() {
     riverFlowAnimator.triggerRefresh();
     addGaugeLayers();
     setGaugeLayerVisibility(gaugesVisible);
-    await refreshGaugeData({ silent: true });
+    await refreshGaugeData({ silent: true, force: true });
     if (gaugesRefreshTimer) clearInterval(gaugesRefreshTimer);
     gaugesRefreshTimer = setInterval(() => {
       if (!gaugesVisible) return;
-      refreshGaugeData({ silent: true });
+      refreshGaugeData({ silent: true, force: true });
     }, GAUGE_REFRESH_MS);
 
     // Get the run ID first
@@ -1554,7 +1718,7 @@ if (gaugeToggle) {
   gaugeToggle.addEventListener('change', async (e) => {
     gaugesVisible = e.target.checked;
     setGaugeLayerVisibility(gaugesVisible);
-    if (gaugesVisible) await refreshGaugeData({ silent: true });
+    if (gaugesVisible) await refreshGaugeData({ silent: true, force: true });
   });
 }
 
