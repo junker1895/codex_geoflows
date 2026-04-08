@@ -27,6 +27,8 @@ const GAUGE_REFRESH_MS = 5 * 60 * 1000;
 const GAUGE_VIEWPORT_BUFFER_DEG = 0.5;
 const GAUGE_PAGE_SIZE = 1500;
 const GAUGE_MAX_PAGES = 25;
+const GAUGE_CLUSTER_RADIUS = 60;
+const GAUGE_CLUSTER_MAX_ZOOM = 7;
 const GAUGE_OUT_FIELDS = [
   'OBJECTID',
   'name',
@@ -550,12 +552,47 @@ function addGaugeLayers() {
   map.addSource('stream-gauges', {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: [] },
+    cluster: true,
+    clusterRadius: GAUGE_CLUSTER_RADIUS,
+    clusterMaxZoom: GAUGE_CLUSTER_MAX_ZOOM,
+  });
+
+  map.addLayer({
+    id: 'stream-gauge-clusters',
+    type: 'circle',
+    source: 'stream-gauges',
+    filter: ['has', 'point_count'],
+    paint: {
+      'circle-color': '#2d5f9a',
+      'circle-radius': ['interpolate', ['linear'], ['get', 'point_count'], 2, 13, 25, 18, 100, 24, 500, 30],
+      'circle-stroke-color': '#ffffff',
+      'circle-stroke-width': 1.5,
+      'circle-opacity': 0.9,
+    },
+  });
+
+  map.addLayer({
+    id: 'stream-gauge-cluster-count',
+    type: 'symbol',
+    source: 'stream-gauges',
+    filter: ['has', 'point_count'],
+    layout: {
+      'text-field': ['get', 'point_count_abbreviated'],
+      'text-size': 12,
+      'text-font': ['Open Sans Bold'],
+    },
+    paint: {
+      'text-color': '#ffffff',
+      'text-halo-color': 'rgba(0,0,0,0.25)',
+      'text-halo-width': 1,
+    },
   });
 
   map.addLayer({
     id: 'stream-gauges',
     type: 'circle',
     source: 'stream-gauges',
+    filter: ['!', ['has', 'point_count']],
     paint: {
       'circle-color': gaugeColorExpression(),
       'circle-radius': gaugeRadiusExpression(),
@@ -570,19 +607,41 @@ function addGaugeLayers() {
     },
   });
 
+  map.on('click', 'stream-gauge-clusters', (e) => {
+    const feature = e.features?.[0];
+    const clusterId = feature?.properties?.cluster_id;
+    if (clusterId === undefined || clusterId === null) return;
+    map.getSource('stream-gauges').getClusterExpansionZoom(clusterId, (err, zoom) => {
+      if (err || typeof zoom !== 'number') return;
+      map.easeTo({
+        center: feature.geometry.coordinates,
+        zoom,
+        duration: 300,
+      });
+    });
+  });
   map.on('click', 'stream-gauges', onGaugeClick);
+  map.on('mouseenter', 'stream-gauge-clusters', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'stream-gauge-clusters', () => { map.getCanvas().style.cursor = ''; });
   map.on('mouseenter', 'stream-gauges', () => { map.getCanvas().style.cursor = 'pointer'; });
   map.on('mouseleave', 'stream-gauges', () => { map.getCanvas().style.cursor = ''; });
 }
 
 function setGaugeLayerVisibility(visible) {
-  if (!map || !map.getLayer('stream-gauges')) return;
-  map.setLayoutProperty('stream-gauges', 'visibility', visible ? 'visible' : 'none');
+  if (!map) return;
+  const visibility = visible ? 'visible' : 'none';
+  ['stream-gauge-clusters', 'stream-gauge-cluster-count', 'stream-gauges'].forEach((layerId) => {
+    if (map.getLayer(layerId)) map.setLayoutProperty(layerId, 'visibility', visibility);
+  });
 }
 
 function applyGaugeVisibilityPolicy() {
   if (!map || !map.getLayer('stream-gauges')) return;
-  map.setFilter('stream-gauges', gaugeFilterExpressionByZoom(map.getZoom()));
+  map.setFilter('stream-gauges', [
+    'all',
+    ['!', ['has', 'point_count']],
+    gaugeFilterExpressionByZoom(map.getZoom()),
+  ]);
 }
 
 function formatGaugeValue(value, key) {
@@ -622,17 +681,31 @@ async function refreshGaugeData({ silent = false, force = false } = {}) {
   try {
     const fc = await fetchGaugeFeaturesForViewport(map.getBounds(), gaugesAbort.signal);
     lastGaugeBboxKey = gaugeBboxKey;
-    map.getSource('stream-gauges').setData(fc);
+    const policy = getGaugeVisibilityPolicyForZoom(map.getZoom());
+    const allowedStatuses = new Set(
+      Object.entries(GAUGE_STATUS_PRIORITY)
+        .filter(([, priority]) => policy.priorities.includes(priority))
+        .map(([status]) => status)
+    );
+    const filteredFeatures = fc.features.filter((feature) => {
+      const status = feature?.properties?.status ?? 'Unknown';
+      return allowedStatuses.has(status);
+    });
+    map.getSource('stream-gauges').setData({
+      type: 'FeatureCollection',
+      features: filteredFeatures,
+    });
     gaugesLoadedOnce = true;
     recordPerf('network', {
       kind: 'gauges/query',
       provider: PROVIDER,
       bbox_key: gaugeBboxKey,
-      features: fc.features.length,
+      features_raw: fc.features.length,
+      features_visible: filteredFeatures.length,
       duration_ms: Number((nowMs() - started).toFixed(2)),
     });
     if (!silent) {
-      setStatus(`Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded • ${fc.features.length} live gauges`);
+      setStatus(`Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded • ${filteredFeatures.length} live gauges`);
     }
   } catch (err) {
     if (err.name === 'AbortError') return;
