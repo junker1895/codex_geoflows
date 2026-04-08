@@ -637,6 +637,11 @@ function applyGaugeVisibilityPolicy() {
   applyGaugeDataForCurrentZoom();
 }
 
+function applyGaugeVisibilityPolicy() {
+  if (!map || !map.getLayer('stream-gauges')) return;
+  map.setFilter('stream-gauges', gaugeFilterExpressionByZoom(map.getZoom()));
+}
+
 function formatGaugeValue(value, key) {
   if (value === null || value === undefined || value === '') return '—';
   if (key === 'lastupdate') {
@@ -1199,6 +1204,7 @@ async function initMap() {
       onViewportChange();
       updateRiverDebugPanel();
       riverFlowAnimator.triggerRefresh();
+      applyGaugeVisibilityPolicy();
     });
     map.on('moveend', () => {
       const c = map.getCenter();
