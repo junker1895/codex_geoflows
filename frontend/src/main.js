@@ -127,6 +127,10 @@ function getGaugeVisibilityPolicyForZoom(zoom) {
   return GAUGE_ZOOM_VISIBILITY_POLICY[GAUGE_ZOOM_VISIBILITY_POLICY.length - 1];
 }
 
+function exprNumberProperty(propertyName) {
+  return ['to-number', ['coalesce', ['get', propertyName], 0], 0];
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -1068,8 +1072,8 @@ async function initMap() {
         id: 'rivers-major',
         filter: [
           'all',
-          ['>=', ['get', 'strmOrder'], 7],
-          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 0, 120000, 3, 60000, 5, 15000, 6, 0]],
+          ['>=', exprNumberProperty('strmOrder'), 7],
+          ['>=', exprNumberProperty('DSContArea'), ['interpolate', ['linear'], ['zoom'], 0, 120000, 3, 60000, 5, 15000, 6, 0]],
         ],
         minzoom: 0,
         // Keep low-zoom major PMTiles visually close to Natural Earth stroke
@@ -1082,9 +1086,9 @@ async function initMap() {
         id: 'rivers-medium',
         filter: [
           'all',
-          ['>=', ['get', 'strmOrder'], 4],
-          ['<', ['get', 'strmOrder'], 7],
-          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
+          ['>=', exprNumberProperty('strmOrder'), 4],
+          ['<', exprNumberProperty('strmOrder'), 7],
+          ['>=', exprNumberProperty('DSContArea'), ['interpolate', ['linear'], ['zoom'], 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
         ],
         minzoom: 6,
         width: [5, 1.3, 7, 1.8, 9, 2.3, 12, 3],
@@ -1095,8 +1099,8 @@ async function initMap() {
         id: 'rivers-minor',
         filter: [
           'all',
-          ['<', ['get', 'strmOrder'], 4],
-          ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 8, 10000, 9, 2000, 10, 0]],
+          ['<', exprNumberProperty('strmOrder'), 4],
+          ['>=', exprNumberProperty('DSContArea'), ['interpolate', ['linear'], ['zoom'], 8, 10000, 9, 2000, 10, 0]],
         ],
         minzoom: 8,
         width: [8, 0.5, 10, 0.9, 12, 1.3, 14, 1.8],
@@ -1254,8 +1258,8 @@ function addHighlightLayer() {
       id: 'rivers-highlight-major',
       filter: [
         'all',
-        ['>=', ['get', 'strmOrder'], 7],
-        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 0, 120000, 3, 60000, 5, 15000, 6, 0]],
+        ['>=', exprNumberProperty('strmOrder'), 7],
+        ['>=', exprNumberProperty('DSContArea'), ['interpolate', ['linear'], ['zoom'], 0, 120000, 3, 60000, 5, 15000, 6, 0]],
       ],
       minzoom: 0,
     },
@@ -1263,9 +1267,9 @@ function addHighlightLayer() {
       id: 'rivers-highlight-medium',
       filter: [
         'all',
-        ['>=', ['get', 'strmOrder'], 4],
-        ['<', ['get', 'strmOrder'], 7],
-        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
+        ['>=', exprNumberProperty('strmOrder'), 4],
+        ['<', exprNumberProperty('strmOrder'), 7],
+        ['>=', exprNumberProperty('DSContArea'), ['interpolate', ['linear'], ['zoom'], 6, 20000, 7, 5000, 8, 1000, 9, 100, 10, 0]],
       ],
       minzoom: 6,
     },
@@ -1273,8 +1277,8 @@ function addHighlightLayer() {
       id: 'rivers-highlight-minor',
       filter: [
         'all',
-        ['<', ['get', 'strmOrder'], 4],
-        ['>=', ['coalesce', ['get', 'DSContArea'], 0], ['interpolate', ['linear'], ['zoom'], 8, 10000, 9, 2000, 10, 0]],
+        ['<', exprNumberProperty('strmOrder'), 4],
+        ['>=', exprNumberProperty('DSContArea'), ['interpolate', ['linear'], ['zoom'], 8, 10000, 9, 2000, 10, 0]],
       ],
       minzoom: 8,
     },
