@@ -151,6 +151,8 @@ let gaugesRefreshTimer = null;
 let gaugesLoadedOnce = false;
 let gaugesAbort = null;
 let lastGaugeBboxKey = null;
+let lastGaugePolicyKey = null;
+let lastGaugeRawFeatures = [];
 let gaugeLayerSpec = {
   orderByField: null,
   outFields: '*',
@@ -707,13 +709,36 @@ async function refreshGaugeData({ silent = false, force = false } = {}) {
   if (!map || !map.getSource('stream-gauges')) return;
   const started = nowMs();
   const gaugeBboxKey = bboxKey(map.getBounds(), 1);
-  if (silent && !force && gaugeBboxKey === lastGaugeBboxKey) return;
+  const policy = getGaugeVisibilityPolicyForZoom(map.getZoom());
+  const gaugePolicyKey = policy.priorities.join('|');
+  const sameBbox = gaugeBboxKey === lastGaugeBboxKey;
+  const samePolicy = gaugePolicyKey === lastGaugePolicyKey;
+  if (silent && !force && sameBbox && samePolicy) return;
+
+  // If only the zoom policy changed, re-filter cached viewport data immediately.
+  if (!force && sameBbox && !samePolicy && lastGaugeRawFeatures.length > 0) {
+    const allowedStatuses = new Set(
+      Object.entries(GAUGE_STATUS_PRIORITY)
+        .filter(([, priority]) => policy.priorities.includes(priority))
+        .map(([status]) => status)
+    );
+    const filteredFeatures = lastGaugeRawFeatures.filter((feature) => {
+      const status = feature?.properties?.status_norm ?? 'Unknown';
+      return allowedStatuses.has(status);
+    });
+    map.getSource('stream-gauges').setData({
+      type: 'FeatureCollection',
+      features: filteredFeatures,
+    });
+    lastGaugePolicyKey = gaugePolicyKey;
+    return;
+  }
   if (gaugesAbort) gaugesAbort.abort();
   gaugesAbort = new AbortController();
   try {
     const fc = await fetchGaugeFeaturesForViewport(map.getBounds(), gaugesAbort.signal);
+    lastGaugeRawFeatures = fc.features;
     lastGaugeBboxKey = gaugeBboxKey;
-    const policy = getGaugeVisibilityPolicyForZoom(map.getZoom());
     const allowedStatuses = new Set(
       Object.entries(GAUGE_STATUS_PRIORITY)
         .filter(([, priority]) => policy.priorities.includes(priority))
@@ -727,6 +752,7 @@ async function refreshGaugeData({ silent = false, force = false } = {}) {
       type: 'FeatureCollection',
       features: filteredFeatures,
     });
+    lastGaugePolicyKey = gaugePolicyKey;
     gaugesLoadedOnce = true;
     recordPerf('network', {
       kind: 'gauges/query',
