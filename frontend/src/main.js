@@ -632,16 +632,6 @@ function setGaugeLayerVisibility(visible) {
   }
 }
 
-function applyGaugeVisibilityPolicy() {
-  if (!map || !map.getSource('stream-gauges')) return;
-  applyGaugeDataForCurrentZoom();
-}
-
-function applyGaugeVisibilityPolicy() {
-  if (!map || !map.getLayer('stream-gauges')) return;
-  map.setFilter('stream-gauges', gaugeFilterExpressionByZoom(map.getZoom()));
-}
-
 function formatGaugeValue(value, key) {
   if (value === null || value === undefined || value === '') return '—';
   if (key === 'lastupdate') {
@@ -672,7 +662,7 @@ function onGaugeClick(e) {
 async function refreshGaugeData({ silent = false, force = false } = {}) {
   if (!map || !map.getSource('stream-gauges') || !gaugesVisible) return;
   if (!shouldRefreshGauges(force)) {
-    applyGaugeVisibilityPolicy();
+    applyGaugeDataForCurrentZoom();
     return;
   }
   if (gaugesAbort) gaugesAbort.abort();
