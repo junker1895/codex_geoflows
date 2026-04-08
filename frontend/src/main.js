@@ -25,7 +25,7 @@ const GAUGE_REFRESH_MS = 5 * 60 * 1000;
 const GAUGE_VIEWPORT_BUFFER_RATIO = 0.15;
 const GAUGE_QUERY_PAGE_SIZE = 1500;
 const GAUGE_QUERY_MAX_PAGES = 20;
-const GAUGE_QUERY_FIELDS = [
+const GAUGE_DESIRED_FIELDS = [
   'OBJECTID',
   'name',
   'status',
@@ -40,7 +40,7 @@ const GAUGE_QUERY_FIELDS = [
   'wfo',
   'waterbody',
   'url',
-].join(',');
+];
 let PROVIDER = 'geoglows';
 
 // Severity → colour mapping (matches legend)
@@ -146,6 +146,7 @@ let gaugesLoadedOnce = false;
 let lastGaugePolicyKey = null;
 let lastGaugeViewportKey = null;
 let gaugeLoadingAbort = null;
+let gaugeOutFields = '*';
 let floodTileDate = null;
 let floodTileLayer = 'flood';
 let floodTilesReady = false;
@@ -477,12 +478,48 @@ function gaugePriorityForStatus(status) {
   return GAUGE_STATUS_PRIORITY[status] || 'low';
 }
 
+function readGaugePropertyCaseInsensitive(properties, keys) {
+  if (!properties) return undefined;
+  for (const key of keys) {
+    if (properties[key] !== undefined && properties[key] !== null) return properties[key];
+  }
+  const entries = Object.entries(properties);
+  for (const key of keys) {
+    const match = entries.find(([k]) => k.toLowerCase() === key.toLowerCase());
+    if (match && match[1] !== undefined && match[1] !== null) return match[1];
+  }
+  return undefined;
+}
+
 function enrichGaugeFeature(feature) {
   const properties = { ...(feature?.properties || {}) };
-  const normalizedStatus = normalizeGaugeStatus(properties.status);
+  const rawStatus = readGaugePropertyCaseInsensitive(properties, ['status']);
+  const normalizedStatus = normalizeGaugeStatus(rawStatus);
   properties.status_normalized = normalizedStatus;
   properties.status_priority = gaugePriorityForStatus(normalizedStatus);
   return { ...feature, properties };
+}
+
+async function loadGaugeFieldSelection() {
+  try {
+    const metadata = await fetchJSON(
+      `${GAUGE_LAYER_URL.replace(/\/query$/, '')}?f=json`,
+      undefined,
+      'gauges/metadata'
+    );
+    const serviceFields = (metadata?.fields || []).map((f) => String(f.name || '').trim()).filter(Boolean);
+    if (!serviceFields.length) {
+      gaugeOutFields = '*';
+      return;
+    }
+    const selected = serviceFields.filter((name) =>
+      GAUGE_DESIRED_FIELDS.some((wanted) => wanted.toLowerCase() === name.toLowerCase())
+    );
+    gaugeOutFields = selected.length ? selected.join(',') : '*';
+  } catch (err) {
+    console.warn('Could not load gauge field metadata; using outFields=*', err);
+    gaugeOutFields = '*';
+  }
 }
 
 function gaugeQueryUrl(offset = 0, pageSize = 2000) {
@@ -500,7 +537,7 @@ function gaugeQueryUrl(offset = 0, pageSize = 2000) {
   const params = new URLSearchParams({
     f: 'geojson',
     where: '1=1',
-    outFields: GAUGE_QUERY_FIELDS,
+    outFields: gaugeOutFields,
     returnGeometry: 'true',
     inSR: '4326',
     outSR: '4326',
@@ -1110,6 +1147,7 @@ async function initMap() {
     riverFlowAnimator = createRiverFlowAnimator();
     riverFlowAnimator.triggerRefresh();
     addGaugeLayers();
+    await loadGaugeFieldSelection();
     setGaugeLayerVisibility(gaugesVisible);
     applyGaugeVisibilityPolicy();
     await refreshGaugeData({ silent: true });
