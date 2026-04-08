@@ -723,7 +723,7 @@ async function refreshGaugeData({ silent = false, force = false } = {}) {
       duration_ms: Number((nowMs() - started).toFixed(2)),
     });
     if (!silent) {
-      setStatus(`Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded • ${fc.features.length} live gauges`);
+      setStatus(`Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded • ${filteredFeatures.length} live gauges`);
     }
   } catch (err) {
     if (err.name === 'AbortError') return;
