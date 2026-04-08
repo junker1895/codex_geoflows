@@ -21,6 +21,8 @@ const FLOOD_TILE_BUCKET_BASE = 'https://pub-ca427796d1e2457685016e82ce231ce3.r2.
 const FLOOD_TILE_METADATA_URL = `${FLOOD_TILE_BUCKET_BASE}/metadata.json`;
 const GAUGE_LAYER_URL =
   'https://services9.arcgis.com/RHVPKKiFTONKtxq3/ArcGIS/rest/services/Live_Stream_Gauges_v1/FeatureServer/0/query';
+const GAUGE_LAYER_METADATA_URL =
+  'https://services9.arcgis.com/RHVPKKiFTONKtxq3/ArcGIS/rest/services/Live_Stream_Gauges_v1/FeatureServer/0?f=json';
 const GAUGE_REFRESH_MS = 5 * 60 * 1000;
 const GAUGE_VIEWPORT_BUFFER_DEG = 0.5;
 const GAUGE_PAGE_SIZE = 1500;
@@ -137,6 +139,10 @@ let gaugesRefreshTimer = null;
 let gaugesLoadedOnce = false;
 let gaugesAbort = null;
 let lastGaugeBboxKey = null;
+let gaugeLayerSpec = {
+  orderByField: null,
+  outFields: '*',
+};
 let floodTileDate = null;
 let floodTileLayer = 'flood';
 let floodTilesReady = false;
@@ -468,31 +474,66 @@ function expandBounds(bounds, bufferDeg = GAUGE_VIEWPORT_BUFFER_DEG) {
   };
 }
 
+async function ensureGaugeLayerSpec() {
+  if (gaugeLayerSpec?.loaded) return gaugeLayerSpec;
+  try {
+    const metadata = await fetchJSON(GAUGE_LAYER_METADATA_URL, undefined, 'gauges/metadata');
+    const fieldNames = new Set((metadata?.fields || []).map((f) => f.name));
+    const desired = GAUGE_OUT_FIELDS.filter((f) => fieldNames.has(f));
+    const outFields = desired.length > 0 ? desired.join(',') : '*';
+    const orderByField = metadata?.objectIdField || metadata?.objectIdFieldName || null;
+    gaugeLayerSpec = {
+      loaded: true,
+      orderByField: fieldNames.has(orderByField) ? orderByField : null,
+      outFields,
+    };
+  } catch (err) {
+    console.warn('Could not load gauge layer metadata, using safe defaults:', err);
+    gaugeLayerSpec = {
+      loaded: true,
+      orderByField: null,
+      outFields: '*',
+    };
+  }
+  return gaugeLayerSpec;
+}
+
 function gaugeQueryUrl(bounds, offset = 0, pageSize = GAUGE_PAGE_SIZE) {
   const envelope = expandBounds(bounds);
+  const geometry = JSON.stringify({
+    xmin: envelope.west,
+    ymin: envelope.south,
+    xmax: envelope.east,
+    ymax: envelope.north,
+    spatialReference: { wkid: 4326 },
+  });
   const params = new URLSearchParams({
     f: 'geojson',
-    where: 'OBJECTID IS NOT NULL',
-    outFields: GAUGE_OUT_FIELDS.join(','),
+    where: '1=1',
+    outFields: gaugeLayerSpec.outFields || '*',
     returnGeometry: 'true',
     outSR: '4326',
     inSR: '4326',
     geometryType: 'esriGeometryEnvelope',
-    geometry: `${envelope.west},${envelope.south},${envelope.east},${envelope.north}`,
+    geometry,
     spatialRel: 'esriSpatialRelIntersects',
     resultOffset: String(offset),
     resultRecordCount: String(pageSize),
-    orderByFields: 'OBJECTID ASC',
   });
+  if (gaugeLayerSpec.orderByField) params.set('orderByFields', `${gaugeLayerSpec.orderByField} ASC`);
   return `${GAUGE_LAYER_URL}?${params.toString()}`;
 }
 
 async function fetchGaugeFeaturesForViewport(bounds, signal) {
+  await ensureGaugeLayerSpec();
   const pageSize = GAUGE_PAGE_SIZE;
   const merged = [];
   let offset = 0;
   for (let page = 0; page < GAUGE_MAX_PAGES; page += 1) {
     const pageData = await fetchJSON(gaugeQueryUrl(bounds, offset, pageSize), signal, 'gauges/query');
+    if (pageData?.error) {
+      throw new Error(`Gauge query error: ${pageData.error.message || 'unknown'} (${pageData.error.code || 'n/a'})`);
+    }
     const features = Array.isArray(pageData?.features) ? pageData.features : [];
     merged.push(...features);
     if (features.length < pageSize) break;
