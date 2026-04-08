@@ -81,7 +81,18 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Backend is available on `http://localhost:8000`.
+Backend is available on `http://localhost:8000` by default.
+
+> Port overrides:
+>
+> - API host port: `APP_PORT` (default `8000`)
+> - Postgres host port: `POSTGRES_HOST_PORT` (default `5433`, chosen to avoid common local 5432 collisions)
+>
+> Example:
+>
+> ```bash
+> APP_PORT=8100 POSTGRES_HOST_PORT=55432 docker compose up --build
+> ```
 
 ### 2.3 Migrations (inside Docker)
 
