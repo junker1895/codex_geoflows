@@ -83,6 +83,8 @@ const GAUGE_ZOOM_VISIBILITY_POLICY = [
   { maxZoom: Infinity, priorities: ['high', 'medium', 'low'] },
 ];
 
+const GAUGE_PRIORITY_ORDER = ['high', 'medium', 'low'];
+
 // Zoom → minimum severity threshold + max reaches to load
 // At global zoom only show the most extreme; as user zooms in, reveal more.
 const ZOOM_SEVERITY_TIERS = [
@@ -122,6 +124,7 @@ let riverFlowAnimator = null;
 let gaugesVisible = true;
 let gaugesRefreshTimer = null;
 let gaugesLoadedOnce = false;
+let lastGaugePolicyKey = null;
 let floodTileDate = null;
 let floodTileLayer = 'flood';
 let floodTilesReady = false;
@@ -410,7 +413,7 @@ function getRiverDebugState(zoom) {
 function gaugeColorExpression() {
   return [
     'match',
-    ['coalesce', ['get', 'status'], 'Unknown'],
+    ['coalesce', ['get', 'status_normalized'], 'Unknown'],
     'Major Flood', GAUGE_STATUS_COLORS['Major Flood'],
     'Moderate Flood', GAUGE_STATUS_COLORS['Moderate Flood'],
     'Minor Flood', GAUGE_STATUS_COLORS['Minor Flood'],
@@ -424,7 +427,7 @@ function gaugeColorExpression() {
 function gaugeRadiusExpression() {
   const byStatus = [
     'match',
-    ['coalesce', ['get', 'status'], 'Unknown'],
+    ['coalesce', ['get', 'status_normalized'], 'Unknown'],
     'Major Flood', 7.5,
     'Moderate Flood', 6,
     'Minor Flood', 5.25,
@@ -438,10 +441,27 @@ function gaugeRadiusExpression() {
 
 function gaugeFilterExpressionByZoom(zoom) {
   const policy = getGaugeVisibilityPolicyForZoom(zoom);
-  const allowedStatuses = Object.entries(GAUGE_STATUS_PRIORITY)
-    .filter(([, priority]) => policy.priorities.includes(priority))
-    .map(([status]) => status);
-  return ['in', ['coalesce', ['get', 'status'], 'Unknown'], ['literal', allowedStatuses]];
+  const allowedPriorities = GAUGE_PRIORITY_ORDER.filter((priority) => policy.priorities.includes(priority));
+  return ['in', ['coalesce', ['get', 'status_priority'], 'low'], ['literal', allowedPriorities]];
+}
+
+function normalizeGaugeStatus(rawStatus) {
+  const value = String(rawStatus ?? '').trim();
+  if (!value) return 'Unknown';
+  if (GAUGE_STATUS_PRIORITY[value]) return value;
+  return 'Unknown';
+}
+
+function gaugePriorityForStatus(status) {
+  return GAUGE_STATUS_PRIORITY[status] || 'low';
+}
+
+function enrichGaugeFeature(feature) {
+  const properties = { ...(feature?.properties || {}) };
+  const normalizedStatus = normalizeGaugeStatus(properties.status);
+  properties.status_normalized = normalizedStatus;
+  properties.status_priority = gaugePriorityForStatus(normalizedStatus);
+  return { ...feature, properties };
 }
 
 function gaugeQueryUrl(offset = 0, pageSize = 2000) {
@@ -510,9 +530,13 @@ function setGaugeLayerVisibility(visible) {
   map.setLayoutProperty('stream-gauges', 'visibility', visible ? 'visible' : 'none');
 }
 
-function applyGaugeVisibilityPolicy() {
+function applyGaugeVisibilityPolicy(force = false) {
   if (!map || !map.getLayer('stream-gauges')) return;
+  const policy = getGaugeVisibilityPolicyForZoom(map.getZoom());
+  const key = policy.priorities.join('|');
+  if (!force && key === lastGaugePolicyKey) return;
   map.setFilter('stream-gauges', gaugeFilterExpressionByZoom(map.getZoom()));
+  lastGaugePolicyKey = key;
 }
 
 function formatGaugeValue(value, key) {
@@ -546,10 +570,15 @@ async function refreshGaugeData({ silent = false } = {}) {
   if (!map || !map.getSource('stream-gauges')) return;
   try {
     const fc = await fetchAllGaugeFeatures();
-    map.getSource('stream-gauges').setData(fc);
+    const enriched = {
+      ...fc,
+      features: (fc.features || []).map(enrichGaugeFeature),
+    };
+    map.getSource('stream-gauges').setData(enriched);
     gaugesLoadedOnce = true;
+    applyGaugeVisibilityPolicy(true);
     if (!silent) {
-      setStatus(`Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded • ${fc.features.length} live gauges`);
+      setStatus(`Run ${currentRunId} – ${Object.keys(forecastIndex).length} reaches loaded • ${enriched.features.length} live gauges`);
     }
   } catch (err) {
     console.warn('Could not load live stream gauges:', err);
