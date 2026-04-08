@@ -18,6 +18,16 @@ This document translates the agreed architecture strategy into execution-ready t
 
 ## Epic A — Gauge relevance + map performance (Phase 1)
 
+### Phase 1 implementation status (April 8, 2026)
+
+- ✅ **Implemented:** A1 (Gauge severity priority model) and A2 (Zoom-based gauge visibility policy).
+- 🚧 **In progress next:** A3 (Viewport-scoped gauge loading) and A4 (Low-zoom clustering/thinning).
+- Suggested execution order for the remaining Phase 1 work:
+  1. A3: viewport-bounded ArcGIS gauge queries with reduced `outFields`.
+  2. A3: viewport-aware refresh with request cancellation on rapid pan/zoom.
+  3. A4: low-zoom clustering for stream gauges.
+  4. A4 fallback: deterministic thinning if clustering quality/performance is insufficient.
+
 ### A1. Gauge severity priority model
 
 **Goal:** Classify gauge statuses into priority tiers used by rendering policy.
