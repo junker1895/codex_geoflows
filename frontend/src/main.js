@@ -1197,6 +1197,7 @@ async function initMap() {
       onViewportChange();
       updateRiverDebugPanel();
       riverFlowAnimator.triggerRefresh();
+      applyGaugeVisibilityPolicy();
     });
     map.on('moveend', () => {
       const c = map.getCenter();
