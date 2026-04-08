@@ -94,6 +94,16 @@ const GAUGE_STATUS_PRIORITY = {
   Unknown: 'low',
 };
 
+const GAUGE_STATUS_CANONICAL = {
+  'major flood': 'Major Flood',
+  'moderate flood': 'Moderate Flood',
+  'minor flood': 'Minor Flood',
+  'action stage': 'Action Stage',
+  'low flow': 'Low Flow',
+  'no flooding': 'No Flooding',
+  unknown: 'Unknown',
+};
+
 const GAUGE_ZOOM_VISIBILITY_POLICY = [
   { maxZoom: 5.5, priorities: ['high'] },
   { maxZoom: 8, priorities: ['high', 'medium'] },
@@ -433,7 +443,7 @@ function getRiverDebugState(zoom) {
 function gaugeColorExpression() {
   return [
     'match',
-    ['coalesce', ['get', 'status'], 'Unknown'],
+    ['coalesce', ['get', 'status_norm'], ['get', 'status'], 'Unknown'],
     'Major Flood', GAUGE_STATUS_COLORS['Major Flood'],
     'Moderate Flood', GAUGE_STATUS_COLORS['Moderate Flood'],
     'Minor Flood', GAUGE_STATUS_COLORS['Minor Flood'],
@@ -447,7 +457,7 @@ function gaugeColorExpression() {
 function gaugeRadiusExpression() {
   const byStatus = [
     'match',
-    ['coalesce', ['get', 'status'], 'Unknown'],
+    ['coalesce', ['get', 'status_norm'], ['get', 'status'], 'Unknown'],
     'Major Flood', 7.5,
     'Moderate Flood', 6,
     'Minor Flood', 5.25,
@@ -464,7 +474,7 @@ function gaugeFilterExpressionByZoom(zoom) {
   const allowedStatuses = Object.entries(GAUGE_STATUS_PRIORITY)
     .filter(([, priority]) => policy.priorities.includes(priority))
     .map(([status]) => status);
-  return ['in', ['coalesce', ['get', 'status'], 'Unknown'], ['literal', allowedStatuses]];
+  return ['in', ['coalesce', ['get', 'status_norm'], ['get', 'status'], 'Unknown'], ['literal', allowedStatuses]];
 }
 
 function expandBounds(bounds, bufferDeg = GAUGE_VIEWPORT_BUFFER_DEG) {
@@ -476,12 +486,26 @@ function expandBounds(bounds, bufferDeg = GAUGE_VIEWPORT_BUFFER_DEG) {
   };
 }
 
+function normalizeGaugeStatus(properties = {}) {
+  const raw = properties.status
+    ?? properties.Status
+    ?? properties.STATUS
+    ?? properties.flood_status
+    ?? properties.FLOOD_STATUS
+    ?? 'Unknown';
+  const normalized = String(raw).trim().toLowerCase();
+  return GAUGE_STATUS_CANONICAL[normalized] || 'Unknown';
+}
+
 async function ensureGaugeLayerSpec() {
   if (gaugeLayerSpec?.loaded) return gaugeLayerSpec;
   try {
     const metadata = await fetchJSON(GAUGE_LAYER_METADATA_URL, undefined, 'gauges/metadata');
     const fieldNames = new Set((metadata?.fields || []).map((f) => f.name));
-    const desired = GAUGE_OUT_FIELDS.filter((f) => fieldNames.has(f));
+    const fieldNamesLower = new Map((metadata?.fields || []).map((f) => [String(f.name).toLowerCase(), f.name]));
+    const desired = GAUGE_OUT_FIELDS
+      .map((f) => fieldNamesLower.get(String(f).toLowerCase()))
+      .filter(Boolean);
     const outFields = desired.length > 0 ? desired.join(',') : '*';
     const orderByField = metadata?.objectIdField || metadata?.objectIdFieldName || null;
     gaugeLayerSpec = {
@@ -536,7 +560,15 @@ async function fetchGaugeFeaturesForViewport(bounds, signal) {
     if (pageData?.error) {
       throw new Error(`Gauge query error: ${pageData.error.message || 'unknown'} (${pageData.error.code || 'n/a'})`);
     }
-    const features = Array.isArray(pageData?.features) ? pageData.features : [];
+    const features = Array.isArray(pageData?.features)
+      ? pageData.features.map((feature) => ({
+        ...feature,
+        properties: {
+          ...(feature.properties || {}),
+          status_norm: normalizeGaugeStatus(feature.properties || {}),
+        },
+      }))
+      : [];
     merged.push(...features);
     if (features.length < pageSize) break;
     offset += pageSize;
@@ -688,7 +720,7 @@ async function refreshGaugeData({ silent = false, force = false } = {}) {
         .map(([status]) => status)
     );
     const filteredFeatures = fc.features.filter((feature) => {
-      const status = feature?.properties?.status ?? 'Unknown';
+      const status = feature?.properties?.status_norm ?? 'Unknown';
       return allowedStatuses.has(status);
     });
     map.getSource('stream-gauges').setData({
