@@ -487,11 +487,15 @@ function gaugeQueryUrlForViewport(bounds, offset = 0, pageSize = 1500, outFields
 function filterGaugeFeaturesByZoom(features, zoom) {
   const policy = getGaugeVisibilityPolicyForZoom(zoom);
   const allowedPriorities = new Set(policy.priorities);
-  return features.filter((feature) => {
+  const filtered = features.filter((feature) => {
     const status = normalizedStatus(feature?.properties?.status);
     const priority = GAUGE_STATUS_PRIORITY[status] ?? 'low';
     return allowedPriorities.has(priority);
   });
+  // Fallback: if status values are unexpected and everything gets filtered out,
+  // show fetched gauges instead of rendering nothing.
+  if (features.length > 0 && filtered.length === 0) return features;
+  return filtered;
 }
 
 function applyGaugeDataForCurrentZoom() {
@@ -505,10 +509,10 @@ function applyGaugeDataForCurrentZoom() {
 }
 
 async function fetchViewportGaugeFeatures(bounds, signal) {
-  const pageSize = 1500;
+  const pageSize = 1000;
   const merged = [];
   let offset = 0;
-  for (let page = 0; page < 20; page += 1) {
+  for (let page = 0; page < 6; page += 1) {
     const pageData = await fetchJSON(gaugeQueryUrlForViewport(bounds, offset, pageSize), signal, 'gauges/query');
     const features = Array.isArray(pageData?.features) ? pageData.features : [];
     merged.push(...features);
@@ -662,7 +666,6 @@ function onGaugeClick(e) {
 async function refreshGaugeData({ silent = false, force = false } = {}) {
   if (!map || !map.getSource('stream-gauges') || !gaugesVisible) return;
   if (!shouldRefreshGauges(force)) {
-    applyGaugeDataForCurrentZoom();
     return;
   }
   if (gaugesAbort) gaugesAbort.abort();
