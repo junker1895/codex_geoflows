@@ -867,6 +867,55 @@ function createRiverFlowAnimator() {
     const animMinOrder = zoom < 4 ? 7 : zoom < 6 ? 6 : profile.minOrder;
     const minDsArea = zoom < 4 ? 60000 : zoom < 6 ? 20000 : 0;
 
+    if (zoom < 6) {
+      let rendered = [];
+      try {
+        const layers = ['rivers-major'];
+        if (map.getLayer('ne-rivers')) layers.push('ne-rivers');
+        rendered = map.queryRenderedFeatures({ layers });
+      } catch {
+        rendered = [];
+      }
+
+      for (const feature of rendered) {
+        const geom = feature.geometry;
+        if (!geom) continue;
+        const isNe = feature.layer?.id === 'ne-rivers';
+        const order = isNe ? 6 : Number(feature.properties?.strmOrder ?? 7);
+        const severity = isNe ? 0 : severityForFeature(feature);
+        const collectRendered = (coords) => {
+          if (!coords || coords.length < 2) return;
+          const key = `${isNe ? 'ne' : 'rv'}:${coords[0][0].toFixed(3)},${coords[0][1].toFixed(3)}:${coords.length}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          if (!pathOffsets.has(key)) pathOffsets.set(key, Math.random());
+          const simplified = simplifyCoords(coords, profile.pointStep + (isNe ? 3 : 1));
+          const minLen = isNe ? minNePathLength : minPathLength;
+          if (minLen > 0 && estimateLngLatLength(simplified) < minLen) return;
+          selected.push({
+            coords: simplified,
+            key,
+            severity,
+            order,
+            color: flowColorForSeverity(severity),
+            width: flowWidthForOrder(order, zoom) * (isNe ? 0.9 : 1),
+            projected: null,
+          });
+        };
+        if (geom.type === 'LineString') collectRendered(geom.coordinates);
+        if (geom.type === 'MultiLineString') geom.coordinates.forEach(collectRendered);
+      }
+
+      selected.sort((a, b) => {
+        if (b.severity !== a.severity) return b.severity - a.severity;
+        if (b.order !== a.order) return b.order - a.order;
+        return a.key.localeCompare(b.key);
+      });
+      cachedPaths = selected;
+      projectedDirty = true;
+      return;
+    }
+
     for (const feature of features) {
       const geom = feature.geometry;
       if (!geom) continue;
@@ -899,75 +948,6 @@ function createRiverFlowAnimator() {
 
       if (geom.type === 'LineString') collect(geom.coordinates);
       if (geom.type === 'MultiLineString') geom.coordinates.forEach(collect);
-    }
-
-
-    if (zoom < 6 && map.getLayer('ne-rivers')) {
-      let neFeatures = [];
-      try {
-        neFeatures = map.queryRenderedFeatures({ layers: ['ne-rivers'] });
-      } catch {
-        neFeatures = [];
-      }
-      for (const feature of neFeatures) {
-        const geom = feature.geometry;
-        if (!geom) continue;
-        const scalerank = Number(feature.properties?.scalerank ?? feature.properties?.strokeweig ?? 10);
-        if (zoom < 6 && Number.isFinite(scalerank) && scalerank > 2) continue;
-        const severity = 0;
-        const order = 6;
-        const collectNE = (coords) => {
-          if (!coords || coords.length < 2) return;
-          const mid = coords[Math.floor(coords.length / 2)];
-          if (!mid || !bounds.contains([mid[0], mid[1]])) return;
-          const key = `ne:${coords[0][0].toFixed(3)},${coords[0][1].toFixed(3)}:${coords.length}`;
-          if (seen.has(key)) return;
-          seen.add(key);
-          if (!pathOffsets.has(key)) pathOffsets.set(key, Math.random());
-          const simplifiedCoords = simplifyCoords(coords, profile.pointStep + 3);
-          if (minNePathLength > 0 && estimateLngLatLength(simplifiedCoords) < minNePathLength) return;
-          selected.push({
-            coords: simplifiedCoords,
-            key,
-            severity,
-            order,
-            color: flowColorForSeverity(severity),
-            width: flowWidthForOrder(order, zoom) * 0.9,
-            projected: null,
-          });
-        };
-        if (geom.type === 'LineString') collectNE(geom.coordinates);
-        if (geom.type === 'MultiLineString') geom.coordinates.forEach(collectNE);
-      }
-    }
-    if (!selected.length && zoom < 6) {
-      // Safety fallback: keep animation visible even if strict low-zoom filters
-      // remove all candidates in a sparse viewport.
-      for (const feature of features) {
-        const geom = feature.geometry;
-        if (!geom) continue;
-        const order = Number(feature.properties?.strmOrder ?? 0);
-        if (order < 6) continue;
-        const pushFallback = (coords) => {
-          if (!coords || coords.length < 2) return;
-          const mid = coords[Math.floor(coords.length / 2)];
-          if (!mid || !bounds.contains([mid[0], mid[1]])) return;
-          const key = `fb:${coords[0][0].toFixed(3)},${coords[0][1].toFixed(3)}:${coords.length}`;
-          if (seen.has(key)) return;
-          seen.add(key);
-          selected.push({
-            coords: simplifyCoords(coords, profile.pointStep + 2),
-            key,
-            severity: 0,
-            order,
-            color: flowColorForSeverity(0),
-            width: flowWidthForOrder(order, zoom),
-            projected: null,
-          });
-        };
-        if (geom.type === 'LineString') pushFallback(geom.coordinates);
-        if (geom.type === 'MultiLineString') geom.coordinates.forEach(pushFallback);
-      }
     }
     selected.sort((a, b) => {
       if (b.severity !== a.severity) return b.severity - a.severity;
