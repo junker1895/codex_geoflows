@@ -786,6 +786,7 @@ function createRiverFlowAnimator() {
   let projectedDirty = true;
   let qualityTier = 0;
   let prevTs = 0;
+  let lastRenderTs = 0;
   const frameHistory = [];
 
   function syncCanvasSize() {
@@ -806,9 +807,14 @@ function createRiverFlowAnimator() {
     const pointStep = zoom < 4 ? (qualityTier === 0 ? 3 : qualityTier === 1 ? 4 : 6)
       : zoom < 7 ? (qualityTier === 0 ? 2 : qualityTier === 1 ? 3 : 4)
       : (qualityTier === 0 ? 1 : qualityTier === 1 ? 2 : 3);
+    const targetFrameMs = zoom < 4 ? (qualityTier === 0 ? 55 : qualityTier === 1 ? 70 : 90)
+      : zoom < 6 ? (qualityTier === 0 ? 45 : qualityTier === 1 ? 60 : 75)
+      : (qualityTier === 0 ? 33 : qualityTier === 1 ? 42 : 55);
     return {
       pointStep,
       minOrder,
+      targetFrameMs,
+      primaryOnly: zoom < 6 || qualityTier > 0,
       haloEnabled: qualityTier < 2 && zoom >= 6,
       pulseEnabled: qualityTier < 2,
       baseAlpha: qualityTier === 0 ? 1 : qualityTier === 1 ? 0.86 : 0.74,
@@ -898,6 +904,72 @@ function createRiverFlowAnimator() {
           seen.add(key);
           if (!pathOffsets.has(key)) pathOffsets.set(key, Math.random());
           selected.push({
+            coords: simplifyCoords(coords, profile.pointStep + 3),
+            key,
+            severity,
+            order,
+            color: flowColorForSeverity(severity),
+            width: flowWidthForOrder(order, zoom) * 0.9,
+            projected: null,
+          });
+        };
+        if (geom.type === 'LineString') collectNE(geom.coordinates);
+        if (geom.type === 'MultiLineString') geom.coordinates.forEach(collectNE);
+      }
+    }
+    selected.sort((a, b) => {
+      if (b.severity !== a.severity) return b.severity - a.severity;
+      if (b.order !== a.order) return b.order - a.order;
+      return a.key.localeCompare(b.key);
+    });
+
+    cachedPaths = selected;
+    projectedDirty = true;
+  }
+
+  function updateFrameQuality(ts) {
+    if (!prevTs) {
+      prevTs = ts;
+      return;
+    }
+    const delta = ts - prevTs;
+    prevTs = ts;
+    frameHistory.push(delta);
+    if (frameHistory.length > 90) frameHistory.shift();
+    if (frameHistory.length < 30) return;
+    const avg = frameHistory.reduce((acc, val) => acc + val, 0) / frameHistory.length;
+    if (avg > 24 && qualityTier < 2) {
+      qualityTier += 1;
+      triggerRefresh();
+      frameHistory.length = 0;
+    } else if (avg < 17 && qualityTier > 0) {
+      qualityTier -= 1;
+      triggerRefresh();
+      frameHistory.length = 0;
+    }
+
+
+    if (zoom < 6 && map.getLayer('ne-rivers')) {
+      let neFeatures = [];
+      try {
+        neFeatures = map.queryRenderedFeatures({ layers: ['ne-rivers'] });
+      } catch {
+        neFeatures = [];
+      }
+      for (const feature of neFeatures) {
+        const geom = feature.geometry;
+        if (!geom) continue;
+        const severity = 0;
+        const order = 6;
+        const collectNE = (coords) => {
+          if (!coords || coords.length < 2) return;
+          const mid = coords[Math.floor(coords.length / 2)];
+          if (!mid || !bounds.contains([mid[0], mid[1]])) return;
+          const key = `ne:${coords[0][0].toFixed(3)},${coords[0][1].toFixed(3)}:${coords.length}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          if (!pathOffsets.has(key)) pathOffsets.set(key, Math.random());
+          selected.push({
             coords: simplifyCoords(coords, profile.pointStep + 1),
             key,
             severity,
@@ -953,10 +1025,20 @@ function createRiverFlowAnimator() {
     projectedDirty = false;
   }
 
+  function reprojectVisiblePaths() {
+    for (const path of cachedPaths) {
+      path.projected = path.coords.map(([lng, lat]) => {
+        const p = map.project([lng, lat]);
+        return [p.x, p.y];
+      });
+    }
+    projectedDirty = false;
+  }
+
   function animate(ts) {
     syncCanvasSize();
-    ctx.clearRect(0, 0, riverFlowCanvas.width, riverFlowCanvas.height);
     if (!map || !map.loaded() || !cachedPaths.length) {
+      ctx.clearRect(0, 0, riverFlowCanvas.width, riverFlowCanvas.height);
       requestAnimationFrame(animate);
       return;
     }
@@ -965,6 +1047,12 @@ function createRiverFlowAnimator() {
 
     const zoom = map.getZoom();
     const profile = getAnimationProfile(zoom);
+    if (lastRenderTs && ts - lastRenderTs < profile.targetFrameMs) {
+      requestAnimationFrame(animate);
+      return;
+    }
+    lastRenderTs = ts;
+
     const { dashLen, gapLen, period } = getDashConfig(zoom);
     const baseSpeed = interpLinear(zoom, [[0, 10], [4, 18], [6, 24], [9, 34], [12, 44]])
       * flowFxConfig.speedMult
@@ -972,6 +1060,8 @@ function createRiverFlowAnimator() {
     const fadeWhenHighlighted = Object.keys(forecastIndex).length > 0 ? 0.88 : 1;
 
     if (projectedDirty) reprojectVisiblePaths();
+
+    ctx.clearRect(0, 0, riverFlowCanvas.width, riverFlowCanvas.height);
 
     for (const path of cachedPaths) {
       if (!path.projected || path.projected.length < 2) continue;
@@ -983,18 +1073,20 @@ function createRiverFlowAnimator() {
 
       ctx.save();
       ctx.globalAlpha = fadeWhenHighlighted * flowFxConfig.opacityMult * profile.baseAlpha;
-      drawDashedSegment(ctx, path.projected, path.color, path.width * 1.05, 0, 0.14, dashLen * 2.5, gapLen);
+      if (!profile.primaryOnly) {
+        drawDashedSegment(ctx, path.projected, path.color, path.width * 1.05, 0, 0.14, dashLen * 2.5, gapLen);
+      }
       drawDashedSegment(
         ctx,
         path.projected,
         path.color,
-        path.width * 1.6,
+        path.width * (profile.primaryOnly ? 1.25 : 1.6),
         offset,
-        0.58 + pulseBase * 0.18 * flowFxConfig.pulseMult,
+        profile.primaryOnly ? 0.46 : 0.58 + pulseBase * 0.18 * flowFxConfig.pulseMult,
         dashLen,
         gapLen,
       );
-      if (profile.haloEnabled && path.severity >= 3) {
+      if (!profile.primaryOnly && profile.haloEnabled && path.severity >= 3) {
         drawDashedSegment(
           ctx,
           path.projected,
