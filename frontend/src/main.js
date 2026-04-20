@@ -802,11 +802,12 @@ function createRiverFlowAnimator() {
   }
 
   function getAnimationProfile(zoom) {
-    const baseCap = zoom < 3 ? 900 : zoom < 5 ? 1600 : zoom < 7 ? 2500 : zoom < 9 ? 3600 : 4600;
-    const qualityScale = qualityTier === 0 ? 1 : qualityTier === 1 ? 0.75 : 0.55;
     const minOrder = zoom < 3 ? 7 : zoom < 5 ? 6 : zoom < 7 ? 4 : 1;
+    const pointStep = zoom < 4 ? (qualityTier === 0 ? 3 : qualityTier === 1 ? 4 : 6)
+      : zoom < 7 ? (qualityTier === 0 ? 2 : qualityTier === 1 ? 3 : 4)
+      : (qualityTier === 0 ? 1 : qualityTier === 1 ? 2 : 3);
     return {
-      drawCap: Math.max(300, Math.floor(baseCap * qualityScale)),
+      pointStep,
       minOrder,
       haloEnabled: qualityTier < 2 && zoom >= 6,
       pulseEnabled: qualityTier < 2,
@@ -833,6 +834,14 @@ function createRiverFlowAnimator() {
     }
 
     const bounds = map.getBounds();
+
+    const simplifyCoords = (coords, step) => {
+      if (!step || step <= 1 || coords.length <= 3) return coords;
+      const simplified = [coords[0]];
+      for (let i = step; i < coords.length - 1; i += step) simplified.push(coords[i]);
+      simplified.push(coords[coords.length - 1]);
+      return simplified;
+    };
     const seen = new Set();
     const selected = [];
 
@@ -851,17 +860,15 @@ function createRiverFlowAnimator() {
         if (seen.has(key)) return;
         seen.add(key);
         if (!pathOffsets.has(key)) pathOffsets.set(key, Math.random());
+        const simplifiedCoords = simplifyCoords(coords, profile.pointStep);
         selected.push({
-          coords,
+          coords: simplifiedCoords,
           key,
           severity,
           order,
           color: flowColorForSeverity(severity),
           width: flowWidthForOrder(order, zoom),
           projected: null,
-          midLng: mid[0],
-          midLat: mid[1],
-          score: severity * 100 + order * 10 + Math.min(50, coords.length / 20),
         });
       };
 
@@ -869,88 +876,48 @@ function createRiverFlowAnimator() {
       if (geom.type === 'MultiLineString') geom.coordinates.forEach(collect);
     }
 
-    selected.sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return a.key.localeCompare(b.key);
-    });
 
-    const pickBalancedSample = (paths, cap, viewportBounds) => {
-      if (paths.length <= cap) return paths;
-      const west = viewportBounds.getWest();
-      const east = viewportBounds.getEast();
-      const south = viewportBounds.getSouth();
-      const north = viewportBounds.getNorth();
-      const lngSpan = Math.max(0.0001, east - west);
-      const latSpan = Math.max(0.0001, north - south);
-      const cols = 8;
-      const rows = 5;
-      const buckets = new Map();
-
-      for (const path of paths) {
-        const bx = Math.max(0, Math.min(cols - 1, Math.floor(((path.midLng - west) / lngSpan) * cols)));
-        const by = Math.max(0, Math.min(rows - 1, Math.floor(((path.midLat - south) / latSpan) * rows)));
-        const bKey = `${bx}:${by}`;
-        if (!buckets.has(bKey)) buckets.set(bKey, []);
-        buckets.get(bKey).push(path);
+    if (zoom < 6 && map.getLayer('ne-rivers')) {
+      let neFeatures = [];
+      try {
+        neFeatures = map.queryRenderedFeatures({ layers: ['ne-rivers'] });
+      } catch {
+        neFeatures = [];
       }
-
-      for (const bucket of buckets.values()) {
-        bucket.sort((a, b) => b.score - a.score);
+      for (const feature of neFeatures) {
+        const geom = feature.geometry;
+        if (!geom) continue;
+        const severity = 0;
+        const order = 6;
+        const collectNE = (coords) => {
+          if (!coords || coords.length < 2) return;
+          const mid = coords[Math.floor(coords.length / 2)];
+          if (!mid || !bounds.contains([mid[0], mid[1]])) return;
+          const key = `ne:${coords[0][0].toFixed(3)},${coords[0][1].toFixed(3)}:${coords.length}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          if (!pathOffsets.has(key)) pathOffsets.set(key, Math.random());
+          selected.push({
+            coords: simplifyCoords(coords, profile.pointStep + 1),
+            key,
+            severity,
+            order,
+            color: flowColorForSeverity(severity),
+            width: flowWidthForOrder(order, zoom) * 0.9,
+            projected: null,
+          });
+        };
+        if (geom.type === 'LineString') collectNE(geom.coordinates);
+        if (geom.type === 'MultiLineString') geom.coordinates.forEach(collectNE);
       }
-
-      const bucketKeys = [...buckets.keys()].sort();
-      const sampled = [];
-      let index = 0;
-      while (sampled.length < cap && bucketKeys.length) {
-        const key = bucketKeys[index % bucketKeys.length];
-        const bucket = buckets.get(key);
-        if (bucket && bucket.length) {
-          sampled.push(bucket.shift());
-        }
-        if (!bucket || bucket.length === 0) {
-          const i = bucketKeys.indexOf(key);
-          if (i >= 0) bucketKeys.splice(i, 1);
-          if (!bucketKeys.length) break;
-          if (index >= bucketKeys.length) index = 0;
-          continue;
-        }
-        index += 1;
-      }
-      return sampled;
-    };
-
-    cachedPaths = pickBalancedSample(selected, profile.drawCap, bounds);
-    projectedDirty = true;
-  }
-
-  function updateFrameQuality(ts) {
-    if (!prevTs) {
-      prevTs = ts;
-      return;
     }
-    const delta = ts - prevTs;
-    prevTs = ts;
-    frameHistory.push(delta);
-    if (frameHistory.length > 90) frameHistory.shift();
-    if (frameHistory.length < 30) return;
-    const avg = frameHistory.reduce((acc, val) => acc + val, 0) / frameHistory.length;
-    if (avg > 24 && qualityTier < 2) {
-      qualityTier += 1;
-      triggerRefresh();
-      frameHistory.length = 0;
-    } else if (avg < 17 && qualityTier > 0) {
-      qualityTier -= 1;
-      triggerRefresh();
-      frameHistory.length = 0;
-    }
-
     selected.sort((a, b) => {
       if (b.severity !== a.severity) return b.severity - a.severity;
       if (b.order !== a.order) return b.order - a.order;
       return a.key.localeCompare(b.key);
     });
 
-    cachedPaths = selected.slice(0, profile.drawCap);
+    cachedPaths = selected;
     projectedDirty = true;
   }
 
@@ -974,16 +941,6 @@ function createRiverFlowAnimator() {
       triggerRefresh();
       frameHistory.length = 0;
     }
-  }
-
-  function reprojectVisiblePaths() {
-    for (const path of cachedPaths) {
-      path.projected = path.coords.map(([lng, lat]) => {
-        const p = map.project([lng, lat]);
-        return [p.x, p.y];
-      });
-    }
-    projectedDirty = false;
   }
 
   function reprojectVisiblePaths() {
