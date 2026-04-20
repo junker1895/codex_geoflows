@@ -947,6 +947,82 @@ function createRiverFlowAnimator() {
       triggerRefresh();
       frameHistory.length = 0;
     }
+
+
+    if (zoom < 6 && map.getLayer('ne-rivers')) {
+      let neFeatures = [];
+      try {
+        neFeatures = map.queryRenderedFeatures({ layers: ['ne-rivers'] });
+      } catch {
+        neFeatures = [];
+      }
+      for (const feature of neFeatures) {
+        const geom = feature.geometry;
+        if (!geom) continue;
+        const severity = 0;
+        const order = 6;
+        const collectNE = (coords) => {
+          if (!coords || coords.length < 2) return;
+          const mid = coords[Math.floor(coords.length / 2)];
+          if (!mid || !bounds.contains([mid[0], mid[1]])) return;
+          const key = `ne:${coords[0][0].toFixed(3)},${coords[0][1].toFixed(3)}:${coords.length}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          if (!pathOffsets.has(key)) pathOffsets.set(key, Math.random());
+          selected.push({
+            coords: simplifyCoords(coords, profile.pointStep + 1),
+            key,
+            severity,
+            order,
+            color: flowColorForSeverity(severity),
+            width: flowWidthForOrder(order, zoom) * 0.9,
+            projected: null,
+          });
+        };
+        if (geom.type === 'LineString') collectNE(geom.coordinates);
+        if (geom.type === 'MultiLineString') geom.coordinates.forEach(collectNE);
+      }
+    }
+    selected.sort((a, b) => {
+      if (b.severity !== a.severity) return b.severity - a.severity;
+      if (b.order !== a.order) return b.order - a.order;
+      return a.key.localeCompare(b.key);
+    });
+
+    cachedPaths = selected;
+    projectedDirty = true;
+  }
+
+  function updateFrameQuality(ts) {
+    if (!prevTs) {
+      prevTs = ts;
+      return;
+    }
+    const delta = ts - prevTs;
+    prevTs = ts;
+    frameHistory.push(delta);
+    if (frameHistory.length > 90) frameHistory.shift();
+    if (frameHistory.length < 30) return;
+    const avg = frameHistory.reduce((acc, val) => acc + val, 0) / frameHistory.length;
+    if (avg > 24 && qualityTier < 2) {
+      qualityTier += 1;
+      triggerRefresh();
+      frameHistory.length = 0;
+    } else if (avg < 17 && qualityTier > 0) {
+      qualityTier -= 1;
+      triggerRefresh();
+      frameHistory.length = 0;
+    }
+  }
+
+  function reprojectVisiblePaths() {
+    for (const path of cachedPaths) {
+      path.projected = path.coords.map(([lng, lat]) => {
+        const p = map.project([lng, lat]);
+        return [p.x, p.y];
+      });
+    }
+    projectedDirty = false;
   }
 
   function reprojectVisiblePaths() {
