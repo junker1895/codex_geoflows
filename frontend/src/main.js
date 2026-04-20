@@ -943,6 +943,47 @@ function createRiverFlowAnimator() {
       triggerRefresh();
       frameHistory.length = 0;
     }
+
+    selected.sort((a, b) => {
+      if (b.severity !== a.severity) return b.severity - a.severity;
+      if (b.order !== a.order) return b.order - a.order;
+      return a.key.localeCompare(b.key);
+    });
+
+    cachedPaths = selected.slice(0, profile.drawCap);
+    projectedDirty = true;
+  }
+
+  function updateFrameQuality(ts) {
+    if (!prevTs) {
+      prevTs = ts;
+      return;
+    }
+    const delta = ts - prevTs;
+    prevTs = ts;
+    frameHistory.push(delta);
+    if (frameHistory.length > 90) frameHistory.shift();
+    if (frameHistory.length < 30) return;
+    const avg = frameHistory.reduce((acc, val) => acc + val, 0) / frameHistory.length;
+    if (avg > 24 && qualityTier < 2) {
+      qualityTier += 1;
+      triggerRefresh();
+      frameHistory.length = 0;
+    } else if (avg < 17 && qualityTier > 0) {
+      qualityTier -= 1;
+      triggerRefresh();
+      frameHistory.length = 0;
+    }
+  }
+
+  function reprojectVisiblePaths() {
+    for (const path of cachedPaths) {
+      path.projected = path.coords.map(([lng, lat]) => {
+        const p = map.project([lng, lat]);
+        return [p.x, p.y];
+      });
+    }
+    projectedDirty = false;
   }
 
   function reprojectVisiblePaths() {
