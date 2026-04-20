@@ -864,12 +864,16 @@ function createRiverFlowAnimator() {
 
     const seen = new Set();
     const selected = [];
+    const animMinOrder = zoom < 4 ? 8 : zoom < 6 ? 7 : profile.minOrder;
+    const minDsArea = zoom < 4 ? 90000 : zoom < 6 ? 35000 : 0;
 
     for (const feature of features) {
       const geom = feature.geometry;
       if (!geom) continue;
       const order = Number(feature.properties?.strmOrder ?? 5);
-      if (order < profile.minOrder) continue;
+      const dsArea = Number(feature.properties?.DSContArea ?? 0);
+      if (order < animMinOrder) continue;
+      if (minDsArea > 0 && dsArea < minDsArea) continue;
       const severity = severityForFeature(feature);
 
       const collect = (coords) => {
@@ -909,7 +913,7 @@ function createRiverFlowAnimator() {
         const geom = feature.geometry;
         if (!geom) continue;
         const scalerank = Number(feature.properties?.scalerank ?? feature.properties?.strokeweig ?? 10);
-        if (zoom < 4 && Number.isFinite(scalerank) && scalerank > 4) continue;
+        if (zoom < 6 && Number.isFinite(scalerank) && scalerank > 2) continue;
         const severity = 0;
         const order = 6;
         const collectNE = (coords) => {
@@ -966,26 +970,6 @@ function createRiverFlowAnimator() {
       triggerRefresh();
       frameHistory.length = 0;
     }
-  }
-
-  function reprojectVisiblePaths() {
-    for (const path of cachedPaths) {
-      path.projected = path.coords.map(([lng, lat]) => {
-        const p = map.project([lng, lat]);
-        return [p.x, p.y];
-      });
-    }
-    projectedDirty = false;
-  }
-
-  function reprojectVisiblePaths() {
-    for (const path of cachedPaths) {
-      path.projected = path.coords.map(([lng, lat]) => {
-        const p = map.project([lng, lat]);
-        return [p.x, p.y];
-      });
-    }
-    projectedDirty = false;
   }
 
   function reprojectVisiblePaths() {
@@ -1345,17 +1329,8 @@ async function initMap() {
     const RIVER_LAYER_IDS = RIVER_TIERS.flatMap(t => [t.id, `${t.id}-query`]);
     riverLayerIds = RIVER_LAYER_IDS;
     riverFlowAnimator = createRiverFlowAnimator();
+    map.on('sourcedata', onSourceData);
     riverFlowAnimator.triggerRefresh();
-    addGaugeLayers();
-    await loadGaugeFieldSelection();
-    setGaugeLayerVisibility(gaugesVisible);
-    applyGaugeVisibilityPolicy();
-    await refreshGaugeData({ silent: true });
-    if (gaugesRefreshTimer) clearInterval(gaugesRefreshTimer);
-    gaugesRefreshTimer = setInterval(() => {
-      if (!gaugesVisible) return;
-      refreshGaugeData({ silent: true, force: true });
-    }, GAUGE_REFRESH_MS);
 
     // Get the run ID first
     try {
@@ -1369,6 +1344,25 @@ async function initMap() {
     // Initial data load for current zoom
     await loadDataForZoom(map.getZoom());
     riverFlowAnimator.triggerRefresh();
+
+    // Load gauges without blocking river animation startup.
+    addGaugeLayers();
+    loadGaugeFieldSelection()
+      .then(() => {
+        setGaugeLayerVisibility(gaugesVisible);
+        applyGaugeVisibilityPolicy();
+        return refreshGaugeData({ silent: true });
+      })
+      .catch((err) => {
+        console.warn('Gauge bootstrap failed:', err);
+      })
+      .finally(() => {
+        if (gaugesRefreshTimer) clearInterval(gaugesRefreshTimer);
+        gaugesRefreshTimer = setInterval(() => {
+          if (!gaugesVisible) return;
+          refreshGaugeData({ silent: true, force: true });
+        }, GAUGE_REFRESH_MS);
+      });
 
     // Unified viewport handler – fires on both zoom and pan
     map.on('zoomend', () => {
@@ -1400,7 +1394,6 @@ async function initMap() {
     });
 
     // Re-apply feature states as new tiles stream in (pan/zoom)
-    map.on('sourcedata', onSourceData);
     map.on('idle', () => riverFlowAnimator?.triggerRefresh());
 
     // Click / cursor handlers for all river layers (highlight layers bound later in addHighlightLayer)
